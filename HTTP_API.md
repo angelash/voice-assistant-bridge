@@ -1,43 +1,59 @@
-# Voice Assistant Bridge HTTP API
+# Voice Assistant Brain HTTP API
 
-用于 Windows 客户端 / 其他工具调用 WSL2 语音桥服务。
+**推荐架构：**
+- Windows 端负责：唤醒词 / STT / TTS / 音频播放
+- 本服务负责：**文本智能处理**（记忆 / 技能 / 工具 / 大模型回复）
 
-默认服务地址：
+因此，**主接口是 `/chat`**。
+`/audio` 和 `/tts` 仅作为兼容调试接口保留。
 
-```text
-http://<WSL_HOST>:8765
+## 回复后端切换
+
+支持两种后端：
+- `openclaw`：推荐，走专用语音 session
+- `ollama`：保底/回退链路
+
+环境变量：
+
+```bash
+VOICE_REPLY_BACKEND=openclaw
+VOICE_OPENCLAW_SESSION_ID=voice-bridge-session
+VOICE_OPENCLAW_TIMEOUT=120
+
+VOICE_OLLAMA_ENDPOINT=http://localhost:11434/api/generate
+VOICE_OLLAMA_MODEL=qwen2.5:7b
 ```
 
-本地测试常用：
-
-```text
-http://127.0.0.1:8765
-```
+---
 
 ## 1. GET /health
-
-检查服务状态。
 
 ### Response
 
 ```json
 {
   "status": "ok",
-  "models_loaded": true,
-  "llm_endpoint": "http://localhost:11434/api/generate",
-  "llm_model": "qwen2.5:7b"
+  "role": "text-brain",
+  "reply_backend": "openclaw",
+  "ollama_endpoint": "http://localhost:11434/api/generate",
+  "ollama_model": "qwen2.5:7b",
+  "openclaw_session_id": "voice-bridge-session",
+  "tts_voice": "zh-CN-XiaoxiaoNeural",
+  "debug_audio_supported": true
 }
 ```
 
-## 2. POST /chat
+---
 
-文字对话接口。
+## 2. POST /chat （主接口）
+
+Windows 端将 STT 后的文字发到这里。
 
 ### Request
 
 ```json
 {
-  "text": "你好，请做个自我介绍"
+  "text": "帮我查一下今天下午的天气"
 }
 ```
 
@@ -45,22 +61,26 @@ http://127.0.0.1:8765
 
 ```json
 {
-  "text": "你好，请做个自我介绍",
-  "response": "你好，我是当前语音桥接助手。",
-  "tts_audio_base64": "<base64-mp3>",
-  "tts_size": 32400
+  "ok": true,
+  "input_text": "帮我查一下今天下午的天气",
+  "response_text": "我来帮你看一下今天下午的天气。",
+  "reply_backend": "openclaw",
+  "session_id": "voice-bridge-session"
 }
 ```
 
-字段：
-- `text`: 输入文本
-- `response`: LLM 输出文本
-- `tts_audio_base64`: MP3 音频的 Base64
-- `tts_size`: MP3 字节数
+### 字段说明
 
-## 3. POST /audio
+- `input_text`: 输入文本
+- `response_text`: 智能处理后的文本回复
+- `reply_backend`: 当前使用的回复后端
+- `session_id`: 当后端为 `openclaw` 时，对应专用语音 session
 
-音频对话接口。
+---
+
+## 3. POST /audio（兼容调试）
+
+仅用于调试。服务端会自行做 STT/TTS。
 
 ### Headers
 
@@ -70,7 +90,7 @@ Content-Type: application/octet-stream
 
 ### Body
 
-原始 PCM 字节流：
+原始 PCM：
 - 16kHz
 - mono
 - 16-bit signed PCM
@@ -79,15 +99,21 @@ Content-Type: application/octet-stream
 
 ```json
 {
-  "text": "帮我查一下天气",
-  "response": "好的，我来帮你看天气。",
+  "ok": true,
+  "input_text": "帮我查天气",
+  "response_text": "好的，我来帮你查天气。",
+  "reply_backend": "openclaw",
+  "session_id": "voice-bridge-session",
   "tts_audio_base64": "<base64-mp3>",
   "tts_size": 30124,
-  "tts_content_type": "audio/mpeg"
+  "tts_content_type": "audio/mpeg",
+  "debug_interface": true
 }
 ```
 
-## 4. POST /tts
+---
+
+## 4. POST /tts（兼容调试）
 
 单独文字转语音。
 
@@ -104,36 +130,48 @@ Content-Type: application/octet-stream
 - `Content-Type: audio/mpeg`
 - body 为 MP3 二进制
 
-## 5. 错误格式
+---
 
-统一返回：
+## 5. openclaw backend 的工作方式
 
-```json
-{
-  "error": "错误信息"
-}
+当：
+
+```bash
+VOICE_REPLY_BACKEND=openclaw
 ```
 
-## 6. 当前实现说明
+服务端会调用：
 
-当前服务端链路：
-- STT: `faster-whisper`
-- LLM: `Ollama / qwen2.5:7b`
-- TTS: `edge-tts`
-- HTTP: `aiohttp`
+```bash
+openclaw agent --session-id <固定专用session> --message <用户文本> --json
+```
 
-## 7. 重要限制
+这意味着：
+- 所有语音文本进入一个固定专用 session
+- 这个 session 可持续积累上下文
+- 后续更适合接入记忆 / 技能 / 工具能力
 
-当前 `/chat` 和 `/audio` 还没有接入 OpenClaw 主 Agent 本体。
+---
 
-这意味着当前版本：
-- 还没有接入 Clawra 的长期记忆
-- 还没有接入技能扩展能力
-- 还没有接入主会话上下文
+## 6. 推荐调用方式
 
-后续建议把“回复层”从 Ollama 直连切到 OpenClaw 主 Agent，以实现真正和 Clawra 本体对话。
+### Windows 端流程
 
-## 8. 示例
+1. 本地唤醒词命中
+2. 本地录音
+3. 本地 STT
+4. 调 `/chat`
+5. 拿到 `response_text`
+6. 本地 TTS 播放
+
+也就是：
+
+> Windows = 耳朵 + 嘴巴  
+> OpenClaw = 脑子
+
+---
+
+## 7. 示例
 
 ### health
 
@@ -146,40 +184,20 @@ curl http://127.0.0.1:8765/health
 ```bash
 curl -X POST http://127.0.0.1:8765/chat \
   -H 'Content-Type: application/json' \
-  -d '{"text":"你好，请做个自我介绍"}'
+  -d '{"text":"你好，帮我做个自我介绍"}'
 ```
 
-### tts
+### 启动 openclaw backend
 
 ```bash
-curl -X POST http://127.0.0.1:8765/tts \
-  -H 'Content-Type: application/json' \
-  -d '{"text":"你好"}' \
-  --output hello.mp3
+export VOICE_REPLY_BACKEND=openclaw
+export VOICE_OPENCLAW_SESSION_ID=voice-bridge-session
+python server.py --port 8765
 ```
 
-## 9. Windows 侧推荐命令
-
-### 文字模式
+### 回退到 ollama backend
 
 ```bash
-python windows_client.py --server http://localhost:8765 --text "你好"
-```
-
-### 录音模式
-
-```bash
-python windows_client.py --server http://localhost:8765 --record 5
-```
-
-### 持续监听模式
-
-```bash
-python windows_client.py --server http://localhost:8765 --continuous
-```
-
-### 列设备
-
-```bash
-python windows_client.py --list-devices
+export VOICE_REPLY_BACKEND=ollama
+python server.py --port 8765
 ```
