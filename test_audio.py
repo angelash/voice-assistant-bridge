@@ -30,10 +30,10 @@ def test_imports():
     for pkg, (desc, required) in dependencies.items():
         try:
             __import__(pkg)
-            print(f"  ✅ {pkg} - {desc}")
+            print(f"  [PASS] {pkg} - {desc}")
             results[pkg] = True
         except ImportError:
-            marker = "❌" if required else "⚠️ "
+            marker = "[FAIL]" if required else "[WARN] "
             suffix = "未安装"
             level = "核心" if required else "可选"
             print(f"  {marker} {pkg} - {desc} ({level}依赖，{suffix})")
@@ -67,14 +67,14 @@ def test_audio_devices():
         print(f"  输出设备: {len(output_devices)} 个")
         
         if not input_devices:
-            print("  ⚠️  WSL2 环境可能没有音频设备")
+            print("  [WARN]  WSL2 环境可能没有音频设备")
             print("  解决方案: 1) 使用 PulseAudio 桥接到 Windows")
             print("           2) 使用 Windows 端客户端")
             return False
         
         return True
     except Exception as e:
-        print(f"  ❌ 音频设备检查失败: {e}")
+        print(f"  [FAIL] 音频设备检查失败: {e}")
         return False
 
 async def test_tts():
@@ -99,17 +99,17 @@ async def test_tts():
         
         if output_file.exists():
             size = output_file.stat().st_size
-            print(f"  ✅ 合成成功，输出文件: {output_file} ({size} 字节)")
+            print(f"  [PASS] 合成成功，输出文件: {output_file} ({size} 字节)")
             return True
         else:
-            print("  ❌ 合成失败，文件未生成")
+            print("  [FAIL] 合成失败，文件未生成")
             return False
             
     except ImportError:
-        print("  ❌ edge-tts 未安装: pip install edge-tts")
+        print("  [FAIL] edge-tts 未安装: pip install edge-tts")
         return False
     except Exception as e:
-        print(f"  ❌ TTS 测试失败: {e}")
+        print(f"  [FAIL] TTS 测试失败: {e}")
         return False
 
 def test_stt():
@@ -123,21 +123,21 @@ def test_stt():
         
         print("  加载模型 tiny (测试用)...")
         model = WhisperModel("tiny", device="cpu", compute_type="int8")
-        print("  ✅ 模型加载成功")
+        print("  [PASS] 模型加载成功")
         
         # 测试空音频（仅验证模型可用）
         import numpy as np
         silence = np.zeros(16000, dtype=np.float32)
         segments, info = model.transcribe(silence, language="zh")
         
-        print(f"  ✅ 推理测试成功")
+        print(f"  [PASS] 推理测试成功")
         return True
         
     except ImportError:
-        print("  ❌ faster-whisper 未安装: pip install faster-whisper")
+        print("  [FAIL] faster-whisper 未安装: pip install faster-whisper")
         return False
     except Exception as e:
-        print(f"  ❌ STT 测试失败: {e}")
+        print(f"  [FAIL] STT 测试失败: {e}")
         return False
 
 def test_llm_connection():
@@ -157,17 +157,43 @@ def test_llm_connection():
     try:
         result = sock.connect_ex((endpoint, port))
         if result == 0:
-            print(f"  ✅ Ollama 服务可用 ({endpoint}:{port})")
+            print(f"  [PASS] Ollama 服务可用 ({endpoint}:{port})")
             return True
         else:
-            print(f"  ⚠️  Ollama 服务未运行 ({endpoint}:{port})")
+            print(f"  [WARN]  Ollama 服务未运行 ({endpoint}:{port})")
             print("  启动方法: ollama serve")
             return False
     except Exception as e:
-        print(f"  ❌ 连接测试失败: {e}")
+        print(f"  [FAIL] 连接测试失败: {e}")
         return False
     finally:
         sock.close()
+
+def ensure_openwakeword_model(model_name: str = "hey_jarvis") -> bool:
+    """Ensure a built-in model is present locally; download it when missing."""
+    import openwakeword
+
+    model_paths = openwakeword.get_pretrained_model_paths()
+    has_local_model = any(
+        model_name in Path(path).name and Path(path).exists()
+        for path in model_paths
+    )
+    if has_local_model:
+        return True
+
+    print(f"  [INFO] 未检测到内置模型，尝试下载: {model_name}")
+    try:
+        from openwakeword.utils import download_models
+        download_models(model_names=[model_name])
+    except Exception as e:
+        print(f"  [WARN]  模型自动下载失败: {e}")
+        return False
+
+    model_paths = openwakeword.get_pretrained_model_paths()
+    return any(
+        model_name in Path(path).name and Path(path).exists()
+        for path in model_paths
+    )
 
 def test_wakeword():
     """测试唤醒词检测（可选能力）"""
@@ -176,29 +202,23 @@ def test_wakeword():
     print("=" * 50)
 
     try:
-        import openwakeword
         from openwakeword import Model
-        from pathlib import Path
-
-        base = Path(openwakeword.__file__).resolve().parent
-        resources_dir = base / "resources" / "models"
-        if not resources_dir.exists():
-            print("  ⚠️  openwakeword 已安装，但未找到内置模型资源目录")
-            print(f"  包路径: {base}")
-            print("  这通常意味着当前 wheel 未包含 models 资源，需重装或手动提供自定义模型")
+        model_name = "hey_jarvis"
+        if not ensure_openwakeword_model(model_name):
+            print(f"  [WARN]  无法准备唤醒词模型: {model_name}")
             return False
 
-        print("  加载默认模型 (hey_jarvis)...")
-        model = Model()
-        print("  ✅ 唤醒词模型加载成功")
+        print(f"  加载内置模型 ({model_name})...")
+        _model = Model(wakeword_models=[model_name])
+        print("  [PASS] 唤醒词模型加载成功")
         print("  内置唤醒词: hey_jarvis, alexa, hey_mycroft")
         return True
 
     except ImportError:
-        print("  ⚠️  openwakeword 未安装（可选）: pip install openwakeword")
+        print("  [WARN]  openwakeword 未安装（可选）: pip install openwakeword")
         return False
     except Exception as e:
-        print(f"  ⚠️  唤醒词测试失败（可选能力）: {e}")
+        print(f"  [WARN]  唤醒词测试失败（可选能力）: {e}")
         return False
 
 def main():
@@ -227,37 +247,38 @@ def main():
 
     for name, passed in results.items():
         if name in hard_requirements:
-            status = "✅ 通过" if passed else "❌ 失败"
+            status = "[PASS] 通过" if passed else "[FAIL] 失败"
         else:
-            status = "✅ 通过" if passed else "⚠️  待处理"
+            status = "[PASS] 通过" if passed else "[WARN]  待处理"
         print(f"  {name}: {status}")
 
     print("=" * 60)
 
     if ready_for_full_voice:
-        print("\n🎉 主链路可用：语音助手已具备完整本地验证条件。")
+        print("\n[PASS] 主链路可用：语音助手已具备完整本地验证条件。")
         print("启动命令: python voice_assistant.py")
         return 0
 
     if ready_for_text_mode:
-        print("\n✅ 核心能力可用：STT/TTS 已正常，项目可继续验证。")
-        print("⚠️  当前还有环境项待处理（例如 WSL2 音频、Ollama、唤醒词资源）。")
+        print("\n[PASS] 核心能力可用：STT/TTS 已正常，项目可继续验证。")
+        print("[WARN]  当前还有环境项待处理（例如 WSL2 音频、Ollama、唤醒词资源）。")
         print("可先启动 Ollama 后运行: python voice_assistant.py")
         if not results["音频设备"]:
-            print("\n💡 WSL2 音频解决方案:")
+            print("\n[INFO] WSL2 音频解决方案:")
             print("   方案1: 安装 PulseAudio 桥接")
             print("   方案2: 使用 Windows 端客户端（见 windows_client.py）")
         if not results["LLM连接"]:
-            print("\n💡 LLM 解决方案:")
+            print("\n[INFO] LLM 解决方案:")
             print("   ollama serve")
             print("   ollama pull qwen2.5:7b")
         if not results["唤醒词"] and dep_details.get("openwakeword"):
-            print("\n💡 唤醒词解决方案:")
+            print("\n[INFO] 唤醒词解决方案:")
             print("   当前 openwakeword 包可能缺少内置模型资源；可重装、改用自定义模型，或暂时跳过唤醒词。")
         return 0
 
-    print("\n❌ 核心能力仍未就绪，请先修复必需依赖或关键测试失败项。")
+    print("\n[FAIL] 核心能力仍未就绪，请先修复必需依赖或关键测试失败项。")
     return 1
 
 if __name__ == "__main__":
     sys.exit(main())
+

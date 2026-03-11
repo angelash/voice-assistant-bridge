@@ -8,9 +8,38 @@ import logging
 import queue
 import threading
 import time
+from pathlib import Path
 from typing import Optional, Callable
 
 logger = logging.getLogger(__name__)
+
+
+def ensure_openwakeword_model(model_name: str = "hey_jarvis") -> bool:
+    """Ensure a built-in openwakeword model exists locally."""
+    import openwakeword
+
+    model_paths = openwakeword.get_pretrained_model_paths()
+    has_local_model = any(
+        model_name in Path(path).name and Path(path).exists()
+        for path in model_paths
+    )
+    if has_local_model:
+        return True
+
+    logger.info(f"未检测到内置模型，尝试下载: {model_name}")
+    try:
+        from openwakeword.utils import download_models
+        download_models(model_names=[model_name])
+    except Exception as e:
+        logger.error(f"自动下载唤醒词模型失败: {e}")
+        return False
+
+    model_paths = openwakeword.get_pretrained_model_paths()
+    return any(
+        model_name in Path(path).name and Path(path).exists()
+        for path in model_paths
+    )
+
 
 class WakeWordDetector:
     """唤醒词检测器"""
@@ -41,10 +70,18 @@ class WakeWordDetector:
             
             if self.model_path:
                 logger.info(f"加载自定义唤醒词模型: {self.model_path}")
-                self.model = Model(wakeword_model_paths=[self.model_path])
+                model_file = Path(self.model_path)
+                if not model_file.exists():
+                    logger.error(f"自定义模型文件不存在: {model_file}")
+                    return False
+                self.model = Model(wakeword_models=[str(model_file)])
             else:
-                logger.info("加载默认唤醒词模型 (hey_jarvis)")
-                self.model = Model()
+                model_name = "hey_jarvis"
+                if not ensure_openwakeword_model(model_name):
+                    logger.error(f"无法准备内置唤醒词模型: {model_name}")
+                    return False
+                logger.info(f"加载默认唤醒词模型 ({model_name})")
+                self.model = Model(wakeword_models=[model_name])
             
             logger.info("唤醒词模型加载完成")
             return True
@@ -203,7 +240,7 @@ if __name__ == "__main__":
     detector = WakeWordDetector(threshold=0.5)
     
     if detector.load_model():
-        print("✅ 唤醒词模型加载成功")
+        print("[PASS] 唤醒词模型加载成功")
         print("内置唤醒词: hey_jarvis, alexa, hey_mycroft, etc.")
     else:
-        print("❌ 模型加载失败")
+        print("[FAIL] 模型加载失败")
