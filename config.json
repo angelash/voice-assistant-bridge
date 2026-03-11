@@ -1,7 +1,10 @@
 {
-  "server_url": "http://localhost:8765",
+  "gateway_url": "http://127.0.0.1:18789",
+  "gateway_token": "596f18b2c5e18ac108572063167e9aa1a0ef4c14f1ccf6df",
+  "chat_path": "/api/voice-brain/chat",
+  "health_path": "/api/voice-brain/health",
   "brain_backend": "openclaw",
   "openclaw_session_id": "voice-bridge-session",
   "openclaw_timeout": 120,
-  "notes": "Windows shell default config. The text brain should be started with VOICE_REPLY_BACKEND=openclaw."
+  "notes": "Windows shell now targets the Gateway-native voice-brain plugin routes."
 }

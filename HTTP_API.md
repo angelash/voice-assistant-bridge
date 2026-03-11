@@ -1,58 +1,85 @@
-# Voice Assistant Brain HTTP API
+# Voice Brain HTTP API
 
-**推荐架构：**
-- Windows 端负责：唤醒词 / STT / TTS / 音频播放
-- 本服务负责：**文本智能处理**（记忆 / 技能 / 工具 / 大模型回复）
+当前已验证可用的 Gateway 原生插件接口为：
 
-因此，**主接口是 `/chat`**。
-`/audio` 和 `/tts` 仅作为兼容调试接口保留。
+- `GET /api/voice-brain/health`
+- `POST /api/voice-brain/chat`
 
-## 回复后端切换
+基础地址：
 
-支持两种后端：
-- `openclaw`：推荐，走专用语音 session（**当前默认**）
-- `ollama`：保底/回退链路
-
-环境变量：
-
-```bash
-VOICE_REPLY_BACKEND=openclaw
-VOICE_OPENCLAW_SESSION_ID=voice-bridge-session
-VOICE_OPENCLAW_TIMEOUT=120
-VOICE_OLLAMA_ENDPOINT=http://localhost:11434/api/generate
-VOICE_OLLAMA_MODEL=qwen2.5:7b
+```text
+http://127.0.0.1:18789
 ```
 
-## GET /health
+需要携带 Gateway token：
 
-返回当前角色、backend 和 session 配置。
+```text
+Authorization: Bearer <gateway-token>
+```
 
-## POST /chat
+## 1. GET /api/voice-brain/health
 
-主接口。
-
-Request:
+### Response
 
 ```json
-{"text":"帮我查一下今天下午天气"}
+{
+  "status": "ok",
+  "role": "text-brain-plugin",
+  "route": "/api/voice-brain/chat",
+  "backend": "openclaw",
+  "sessionId": "voice-bridge-session"
+}
 ```
 
-Response:
+## 2. POST /api/voice-brain/chat
+
+### Request
+
+```json
+{
+  "text": "你好"
+}
+```
+
+### Response
 
 ```json
 {
   "ok": true,
-  "input_text": "帮我查一下今天下午天气",
-  "response_text": "我来帮你看一下今天下午的天气。",
+  "input_text": "你好",
+  "response_text": "你好。",
   "reply_backend": "openclaw",
   "session_id": "voice-bridge-session"
 }
 ```
 
-## POST /audio
+## 推荐架构
 
-仅调试用。接收 PCM 音频并在服务端执行 STT/TTS。
+- Windows 端负责：wakeword / STT / TTS / 播放
+- Gateway 插件负责：文字智能处理
 
-## POST /tts
+也就是：
 
-仅调试用。文字转音频。
+- Windows = 耳朵 + 嘴巴
+- OpenClaw = 脑子
+
+## PowerShell 示例
+
+### health
+
+```powershell
+$headers = @{ Authorization = "Bearer <gateway-token>" }
+Invoke-RestMethod -Uri "http://127.0.0.1:18789/api/voice-brain/health" -Method Get -Headers $headers
+```
+
+### chat
+
+```powershell
+$headers = @{
+  Authorization = "Bearer <gateway-token>"
+  "Content-Type" = "application/json"
+}
+
+$body = @{ text = "你好" } | ConvertTo-Json
+Invoke-RestMethod -Uri "http://127.0.0.1:18789/api/voice-brain/chat" -Method Post -Headers $headers -Body $body
+```

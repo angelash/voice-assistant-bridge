@@ -4,18 +4,19 @@ Windows 音频桥接客户端
 
 职责：
 - Windows 端录音 / 持续监听
-- 调用文字脑服务 `/chat` 或调试接口 `/audio`
-- 本地保存返回语音（调试用途）
+- 调用 OpenClaw Gateway 原生 voice-brain 插件接口
+- 当前主接口：/api/voice-brain/chat
 
 长期推荐架构：
-- Windows 端自己做 STT/TTS
-- 主要调用 `/chat`
+- Windows 端自己做 wakeword / STT / TTS
+- 主要调用 Gateway 的 /api/voice-brain/chat
 """
 
 import argparse
 import asyncio
-import base64
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -33,13 +34,36 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000
 
+DEFAULT_GATEWAY_URL = "http://127.0.0.1:18789"
+DEFAULT_CHAT_PATH = "/api/voice-brain/chat"
+DEFAULT_HEALTH_PATH = "/api/voice-brain/health"
+CONFIG_PATH = Path(__file__).with_name("config.json")
+
+
+def load_config() -> dict:
+    if CONFIG_PATH.exists():
+        try:
+            return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning(f"读取配置失败，使用默认值: {e}")
+    return {}
+
 
 class AudioBridgeClient:
-    def __init__(self, server_url: str = "http://localhost:8765", device_index: Optional[int] = None):
-        self.server_url = server_url.rstrip("/")
+    def __init__(self, gateway_url: str, gateway_token: str = "", device_index: Optional[int] = None):
+        self.gateway_url = gateway_url.rstrip("/")
+        self.gateway_token = gateway_token.strip()
         self.device_index = device_index
         self.p = pyaudio.PyAudio()
         self.is_running = False
+
+    def _headers(self, json_body: bool = True) -> dict:
+        headers = {}
+        if self.gateway_token:
+            headers["Authorization"] = f"Bearer {self.gateway_token}"
+        if json_body:
+            headers["Content-Type"] = "application/json"
+        return headers
 
     def list_devices(self):
         print("\n可用音频设备:")
@@ -53,28 +77,17 @@ class AudioBridgeClient:
             kwargs["input_device_index"] = self.device_index
         return self.p.open(**kwargs)
 
-    def play_mp3_bytes(self, audio_data: bytes):
-        out_path = "reply.mp3"
-        with open(out_path, "wb") as f:
-            f.write(audio_data)
-        print(f"已保存语音回复到 {out_path}（当前脚本未内置 MP3 直接播放，建议用系统播放器打开）")
-
-    async def send_audio(self, audio_data: bytes) -> Optional[dict]:
+    async def health(self) -> Optional[dict]:
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    f"{self.server_url}/audio",
-                    data=audio_data,
-                    headers={"Content-Type": "application/octet-stream"},
-                    timeout=aiohttp.ClientTimeout(total=90),
+                async with session.get(
+                    f"{self.gateway_url}{DEFAULT_HEALTH_PATH}",
+                    headers=self._headers(json_body=False),
+                    timeout=aiohttp.ClientTimeout(total=30),
                 ) as resp:
                     if resp.status == 200:
-                        result = await resp.json()
-                        tts_b64 = result.get("tts_audio_base64")
-                        if tts_b64:
-                            self.play_mp3_bytes(base64.b64decode(tts_b64))
-                        return result
-                    logger.error(f"服务器错误: {resp.status} {await resp.text()}")
+                        return await resp.json()
+                    logger.error(f"健康检查失败: {resp.status} {await resp.text()}")
                     return None
         except aiohttp.ClientError as e:
             logger.error(f"连接失败: {e}")
@@ -84,9 +97,10 @@ class AudioBridgeClient:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self.server_url}/chat",
+                    f"{self.gateway_url}{DEFAULT_CHAT_PATH}",
                     json={"text": text},
-                    timeout=aiohttp.ClientTimeout(total=90),
+                    headers=self._headers(json_body=True),
+                    timeout=aiohttp.ClientTimeout(total=120),
                 ) as resp:
                     if resp.status == 200:
                         return await resp.json()
@@ -105,12 +119,9 @@ class AudioBridgeClient:
         stream.stop_stream()
         stream.close()
         audio_data = b"".join(frames)
-        print(f"录音完成，发送到服务器 ({len(audio_data)} 字节)...")
-        result = await self.send_audio(audio_data)
-        if result:
-            print(f"识别文本: {result.get('input_text')}")
-            print(f"助手回复: {result.get('response_text')}")
-        return result
+        print(f"录音完成，共 {len(audio_data)} 字节。")
+        print("当前 Gateway 主接口是文本接口 /api/voice-brain/chat。请先在 Windows 侧做 STT，再把文字发给 send_text().")
+        return None
 
     async def continuous_mode(self):
         self.is_running = True
@@ -136,11 +147,7 @@ class AudioBridgeClient:
                         if silence_count > 30:
                             is_speaking = False
                             if len(speaking_buffer) > RATE * 0.5:
-                                print(f"语音结束，发送 ({len(speaking_buffer)} 字节)...")
-                                result = await self.send_audio(speaking_buffer)
-                                if result:
-                                    print(f"识别文本: {result.get('input_text')}")
-                                    print(f"助手回复: {result.get('response_text')}")
+                                print(f"检测到一段语音 ({len(speaking_buffer)} 字节)。当前请在 Windows 侧接 STT 后再调用 /api/voice-brain/chat。")
                             speaking_buffer = b""
         except KeyboardInterrupt:
             print("\n停止监听")
@@ -153,46 +160,57 @@ class AudioBridgeClient:
 
 
 async def main():
+    cfg = load_config()
     parser = argparse.ArgumentParser(description="Windows 音频桥接客户端")
-    parser.add_argument("--server", default="http://localhost:8765", help="服务器地址")
+    parser.add_argument("--gateway", default=cfg.get("gateway_url", DEFAULT_GATEWAY_URL), help="Gateway 地址")
+    parser.add_argument("--token", default=cfg.get("gateway_token", ""), help="Gateway Bearer token")
     parser.add_argument("--record", type=float, help="录音时长（秒）")
     parser.add_argument("--continuous", action="store_true", help="持续监听模式")
     parser.add_argument("--list-devices", action="store_true", help="列出音频设备")
     parser.add_argument("--device", type=int, help="指定输入设备索引")
-    parser.add_argument("--text", help="直接发送文字到服务端，跳过录音")
+    parser.add_argument("--text", help="直接发送文字到 Gateway，跳过录音")
+    parser.add_argument("--health", action="store_true", help="调用 /api/voice-brain/health")
     args = parser.parse_args()
 
-    client = AudioBridgeClient(args.server, device_index=args.device)
+    client = AudioBridgeClient(args.gateway, gateway_token=args.token, device_index=args.device)
     if args.list_devices:
         client.list_devices()
         return
     try:
-        if args.text:
+        if args.health:
+            result = await client.health()
+            if result:
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+        elif args.text:
             result = await client.send_text(args.text)
             if result:
-                print(f"助手回复: {result.get('response_text')}")
+                print(json.dumps(result, ensure_ascii=False, indent=2))
         elif args.record:
             await client.record_and_send(args.record)
         elif args.continuous:
             await client.continuous_mode()
         else:
-            print("音频桥接客户端")
-            print("命令: r=录音, c=持续监听, t=文字对话, l=列设备, q=退出")
+            print("Windows 语音壳客户端")
+            print("命令: h=health, t=文字对话, r=录音, c=持续监听, l=列设备, q=退出")
             while True:
                 cmd = input("> ").strip().lower()
                 if cmd == 'q':
                     break
-                if cmd == 'r':
-                    duration = float(input("录音时长（秒）: ") or "5")
-                    await client.record_and_send(duration)
-                elif cmd == 'c':
-                    await client.continuous_mode()
+                if cmd == 'h':
+                    result = await client.health()
+                    if result:
+                        print(json.dumps(result, ensure_ascii=False, indent=2))
                 elif cmd == 't':
                     text = input("输入文字: ").strip()
                     if text:
                         result = await client.send_text(text)
                         if result:
-                            print(f"助手回复: {result.get('response_text')}")
+                            print(json.dumps(result, ensure_ascii=False, indent=2))
+                elif cmd == 'r':
+                    duration = float(input("录音时长（秒）: ") or "5")
+                    await client.record_and_send(duration)
+                elif cmd == 'c':
+                    await client.continuous_mode()
                 elif cmd == 'l':
                     client.list_devices()
     finally:

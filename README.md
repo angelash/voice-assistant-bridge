@@ -2,58 +2,55 @@
 
 这是 **Windows 端语音壳**。
 
-职责：
-- 麦克风录音
-- 持续监听 / 语音片段切分
-- 调用 OpenClaw 文字脑服务
-- （当前调试状态下）保存返回语音文件
+## 当前正式对接方式
 
-不负责：
-- 记忆
-- 技能
-- 工具调用
-- 主 Agent 回复生成
+Windows 端现在直接对接 **OpenClaw Gateway 原生插件 `voice-brain`**。
 
-这些由 OpenClaw 侧的 `voice-text-brain` skill 负责。
+已验证可用的接口：
+- `GET /api/voice-brain/health`
+- `POST /api/voice-brain/chat`
 
-## 默认链路
+默认配置写在：
+- `config.json`
 
-**当前默认就是走 OpenClaw。**
+## 先做什么
 
-- 脑侧 backend：`openclaw`
-- 专用 session：`voice-bridge-session`
-- Windows 客户端默认请求：`http://localhost:8765`
+### 1. 测试 Gateway 插件接口
 
-## 当前文件
+PowerShell：
 
-- `windows_client.py`：Windows 端测试客户端
-- `config.json`：默认配置（已设置为 OpenClaw）
-- `run_windows_client.bat`：Windows 端启动脚本
-- `run_text_brain_openclaw.sh`：WSL/OpenClaw 脑侧启动脚本
-- `HTTP_API.md`：文字脑接口说明
-- `ARCHITECTURE.md`：架构说明
-
-## 推荐启动方式
-
-### 1. WSL / OpenClaw 侧启动文字脑
-
-```bash
-bash run_text_brain_openclaw.sh
+```powershell
+.\test_voice_brain.ps1
 ```
 
-### 2. Windows 侧测试文字请求
+### 2. 用 Python 客户端测 health
 
-```bat
-run_windows_client.bat --text "你好"
+```powershell
+python windows_client.py --health
 ```
 
-### 3. Windows 侧测试录音
+### 3. 用 Python 客户端测文字对话
 
-```bat
-run_windows_client.bat --record 5
+```powershell
+python windows_client.py --text "你好"
 ```
 
-## 推荐长期架构
+## 当前职责
 
-- Windows 端负责 wakeword / STT / TTS
-- OpenClaw 端只负责 `/chat`
+Windows 侧负责：
+- wakeword
+- 录音
+- STT
+- TTS
+- 播放
+
+Gateway 插件负责：
+- 文本智能处理
+
+## 注意
+
+当前 `record` / `continuous` 还只是录音壳，**不会直接把音频发给 Gateway**。
+
+因为当前正式架构已经收敛为：
+- Windows 侧先做 STT
+- 再把文本发给 `/api/voice-brain/chat`
