@@ -7,6 +7,7 @@ Voice Assistant - 接近小爱同学体验
 """
 
 import asyncio
+import io
 import queue
 import threading
 from pathlib import Path
@@ -97,14 +98,58 @@ class AudioIO:
             logger.error(f"录音失败: {e}")
             return None
     
+    def _decode_compressed_audio(self, audio_data: bytes):
+        """Decode compressed audio bytes (e.g., MP3) to mono float32 PCM."""
+        import av
+        import numpy as np
+
+        chunks = []
+        with av.open(io.BytesIO(audio_data), mode="r") as container:
+            audio_stream = next((s for s in container.streams if s.type == "audio"), None)
+            if audio_stream is None:
+                raise ValueError("没有找到音频流")
+
+            target_rate = audio_stream.rate or 24000
+            resampler = av.audio.resampler.AudioResampler(
+                format="fltp",
+                layout="mono",
+                rate=target_rate,
+            )
+
+            for frame in container.decode(audio=0):
+                resampled = resampler.resample(frame)
+                if not isinstance(resampled, list):
+                    resampled = [resampled]
+
+                for out_frame in resampled:
+                    arr = out_frame.to_ndarray()
+                    if arr.ndim == 2:
+                        arr = arr[0]  # mono fltp -> [1, samples]
+                    chunks.append(arr.astype(np.float32, copy=False))
+
+        if not chunks:
+            raise ValueError("解码失败: 音频为空")
+
+        pcm = np.concatenate(chunks)
+        pcm = np.clip(pcm, -1.0, 1.0)
+        return pcm, target_rate
+
     def play_audio(self, audio_data: bytes, sample_rate: int = 24000):
         """播放音频"""
         try:
             import sounddevice as sd
             import numpy as np
-            
-            audio_array = np.frombuffer(audio_data, dtype=np.int16)
-            sd.play(audio_array, samplerate=sample_rate)
+
+            try:
+                audio_array, decoded_rate = self._decode_compressed_audio(audio_data)
+                play_rate = decoded_rate
+            except Exception as decode_err:
+                # Fallback for raw PCM paths.
+                logger.warning(f"压缩音频解码失败，回退到 PCM 播放: {decode_err}")
+                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+                play_rate = sample_rate
+
+            sd.play(audio_array, samplerate=play_rate)
             sd.wait()
             logger.info("播放完成")
         except Exception as e:
