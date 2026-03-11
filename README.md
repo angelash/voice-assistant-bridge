@@ -73,5 +73,6 @@ Features:
 - local / OpenClaw mode switch
 - health check
 - text chat
+- voice input: hold-to-talk and toggle-record
 - TTS playback
-- audio device listing
+- settings dialog for advanced options

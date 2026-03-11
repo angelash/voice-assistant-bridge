@@ -1,18 +1,32 @@
 {
-  "gateway_url": "http://127.0.0.1:8765",
+  "gateway_url": "http://127.0.0.1:18789",
   "gateway_token": "",
-  "chat_path": "/chat",
-  "health_path": "/health",
+  "chat_path": "/api/voice-brain/chat",
+  "health_path": "/api/voice-brain/health",
+
   "local_gateway_url": "http://127.0.0.1:8765",
   "local_gateway_token": "",
   "local_chat_path": "/chat",
   "local_health_path": "/health",
+
+  "openclaw_gateway_url": "http://127.0.0.1:18789",
+  "openclaw_gateway_token": "",
+  "openclaw_chat_path": "/api/voice-brain/chat",
+  "openclaw_health_path": "/api/voice-brain/health",
+
   "tts_voice": "Xiaoxiao",
   "tts_edge_voice": "zh-CN-XiaoxiaoNeural",
-  "brain_backend": "ollama",
+  "voice_input_seconds": 5,
+  "voice_input_mode": "hold",
+  "stt_model_size": "small",
+
+  "gui_mode": "openclaw",
+  "auto_start_local": true,
+  "brain_backend": "openclaw",
+
   "ollama_endpoint": "http://127.0.0.1:11434/api/generate",
   "ollama_model": "qwen2.5:7b",
   "openclaw_session_id": "voice-bridge-session",
   "openclaw_timeout": 120,
-  "notes": "默认切到本地大模型文本脑服务（server.py + VOICE_REPLY_BACKEND=ollama）。"
+  "notes": "默认模式为 OpenClaw Gateway。"
 }
