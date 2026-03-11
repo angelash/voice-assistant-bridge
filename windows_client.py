@@ -20,8 +20,10 @@ import logging
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 try:
     import aiohttp
@@ -41,6 +43,9 @@ RATE = 16000
 DEFAULT_GATEWAY_URL = "http://127.0.0.1:18789"
 DEFAULT_CHAT_PATH = "/api/voice-brain/chat"
 DEFAULT_HEALTH_PATH = "/api/voice-brain/health"
+LOCAL_LLM_URL = "http://127.0.0.1:8765"
+LOCAL_CHAT_PATH = "/chat"
+LOCAL_HEALTH_PATH = "/health"
 CONFIG_PATH = Path(__file__).with_name("config.json")
 
 
@@ -53,6 +58,85 @@ def load_config() -> dict:
     return {}
 
 
+def _is_loopback_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+    except Exception:
+        return False
+    return host in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
+
+
+def _url_port(url: str, default_port: int) -> int:
+    try:
+        parsed = urlparse(url)
+        if parsed.port:
+            return parsed.port
+    except Exception:
+        pass
+    return default_port
+
+
+def _should_treat_as_local_mode(gateway_url: str, chat_path: str, force_local: bool, backend: str) -> bool:
+    if force_local:
+        return True
+    if backend.strip().lower() == "ollama" and _is_loopback_url(gateway_url):
+        return True
+    return _is_loopback_url(gateway_url) and chat_path.strip().lower() == LOCAL_CHAT_PATH
+
+
+async def ensure_local_service_if_needed(
+    client: "AudioBridgeClient",
+    auto_start_local: bool,
+    local_mode: bool,
+) -> None:
+    if not local_mode:
+        return
+
+    if await client.health(timeout_sec=2, log_error=False):
+        return
+
+    if not auto_start_local:
+        logger.warning("本地模式检测到服务不可达，且已禁用自动启动。")
+        return
+
+    server_path = Path(__file__).with_name("server.py")
+    if not server_path.exists():
+        logger.error(f"未找到本地服务入口: {server_path}")
+        return
+
+    port = _url_port(client.gateway_url, default_port=8765)
+    env = os.environ.copy()
+    env.setdefault("VOICE_REPLY_BACKEND", "ollama")
+    env.setdefault("VOICE_OLLAMA_ENDPOINT", "http://localhost:11434/api/generate")
+    env.setdefault("VOICE_OLLAMA_MODEL", "qwen2.5:7b")
+
+    creationflags = 0
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+
+    try:
+        subprocess.Popen(
+            [sys.executable, str(server_path), "--port", str(port)],
+            cwd=str(server_path.parent),
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+    except Exception as e:
+        logger.error(f"自动启动本地服务失败: {e}")
+        return
+
+    print(f"检测到本地服务未启动，已自动拉起: {client.gateway_url}{client.chat_path}")
+    for _ in range(20):
+        await asyncio.sleep(0.5)
+        if await client.health(timeout_sec=2, log_error=False):
+            print("本地服务已就绪。")
+            return
+    logger.error("本地服务自动启动后仍不可达，请手动检查 `python server.py --port 8765`。")
+
+
 class AudioBridgeClient:
     def __init__(
         self,
@@ -60,11 +144,15 @@ class AudioBridgeClient:
         gateway_token: str = "",
         device_index: Optional[int] = None,
         tts_voice: str = "",
+        chat_path: str = DEFAULT_CHAT_PATH,
+        health_path: str = DEFAULT_HEALTH_PATH,
     ):
         self.gateway_url = gateway_url.rstrip("/")
         self.gateway_token = gateway_token.strip()
         self.device_index = device_index
         self.tts_voice = tts_voice.strip()
+        self.chat_path = chat_path if chat_path.startswith("/") else f"/{chat_path}"
+        self.health_path = health_path if health_path.startswith("/") else f"/{health_path}"
         self.p = pyaudio.PyAudio()
         self.is_running = False
 
@@ -88,27 +176,29 @@ class AudioBridgeClient:
             kwargs["input_device_index"] = self.device_index
         return self.p.open(**kwargs)
 
-    async def health(self) -> Optional[dict]:
+    async def health(self, timeout_sec: int = 30, log_error: bool = True) -> Optional[dict]:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
-                    f"{self.gateway_url}{DEFAULT_HEALTH_PATH}",
+                    f"{self.gateway_url}{self.health_path}",
                     headers=self._headers(json_body=False),
-                    timeout=aiohttp.ClientTimeout(total=30),
+                    timeout=aiohttp.ClientTimeout(total=timeout_sec),
                 ) as resp:
                     if resp.status == 200:
                         return await resp.json()
-                    logger.error(f"健康检查失败: {resp.status} {await resp.text()}")
+                    if log_error:
+                        logger.error(f"健康检查失败: {resp.status} {await resp.text()}")
                     return None
-        except aiohttp.ClientError as e:
-            logger.error(f"连接失败: {e}")
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            if log_error:
+                logger.error(f"连接失败: {e}")
             return None
 
     async def send_text(self, text: str) -> Optional[dict]:
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self.gateway_url}{DEFAULT_CHAT_PATH}",
+                    f"{self.gateway_url}{self.chat_path}",
                     json={"text": text},
                     headers=self._headers(json_body=True),
                     timeout=aiohttp.ClientTimeout(total=120),
@@ -117,7 +207,7 @@ class AudioBridgeClient:
                         return await resp.json()
                     logger.error(f"服务器错误: {resp.status} {await resp.text()}")
                     return None
-        except aiohttp.ClientError as e:
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"连接失败: {e}")
             return None
 
@@ -304,6 +394,10 @@ async def main():
     parser = argparse.ArgumentParser(description="Windows 音频桥接客户端")
     parser.add_argument("--gateway", default=cfg.get("gateway_url", DEFAULT_GATEWAY_URL), help="Gateway 地址")
     parser.add_argument("--token", default=cfg.get("gateway_token", ""), help="Gateway Bearer token")
+    parser.add_argument("--chat-path", default=cfg.get("chat_path", DEFAULT_CHAT_PATH), help="文字对话接口路径")
+    parser.add_argument("--health-path", default=cfg.get("health_path", DEFAULT_HEALTH_PATH), help="健康检查接口路径")
+    parser.add_argument("--local-llm", action="store_true", help="一键切换到本地大模型服务(127.0.0.1:8765)")
+    parser.add_argument("--no-auto-start-local", action="store_true", help="本地模式下不自动拉起 server.py")
     parser.add_argument("--record", type=float, help="录音时长（秒）")
     parser.add_argument("--continuous", action="store_true", help="持续监听模式")
     parser.add_argument("--list-devices", action="store_true", help="列出音频设备")
@@ -314,7 +408,32 @@ async def main():
     parser.add_argument("--list-voices", action="store_true", help="列出系统可用 TTS 语音包")
     args = parser.parse_args()
 
-    client = AudioBridgeClient(args.gateway, gateway_token=args.token, device_index=args.device, tts_voice=args.voice)
+    gateway = args.gateway
+    token = args.token
+    chat_path = args.chat_path
+    health_path = args.health_path
+    if args.local_llm:
+        gateway = cfg.get("local_gateway_url", LOCAL_LLM_URL)
+        token = cfg.get("local_gateway_token", "")
+        chat_path = cfg.get("local_chat_path", LOCAL_CHAT_PATH)
+        health_path = cfg.get("local_health_path", LOCAL_HEALTH_PATH)
+        print(f"已切换到本地大模型模式: {gateway}{chat_path}")
+
+    local_mode = _should_treat_as_local_mode(
+        gateway_url=gateway,
+        chat_path=chat_path,
+        force_local=args.local_llm,
+        backend=str(cfg.get("brain_backend", "")),
+    )
+
+    client = AudioBridgeClient(
+        gateway,
+        gateway_token=token,
+        device_index=args.device,
+        tts_voice=args.voice,
+        chat_path=chat_path,
+        health_path=health_path,
+    )
     if args.list_devices:
         client.list_devices()
         return
@@ -322,6 +441,11 @@ async def main():
         client.list_tts_voices()
         return
     try:
+        await ensure_local_service_if_needed(
+            client,
+            auto_start_local=(not args.no_auto_start_local),
+            local_mode=local_mode,
+        )
         if args.health:
             result = await client.health()
             if result:
@@ -366,3 +490,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+

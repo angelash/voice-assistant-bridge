@@ -26,7 +26,7 @@ class VoiceAssistantServer:
     def __init__(self, port: int = 8765):
         self.port = port
         self.stt = None
-        self.reply_backend = os.getenv("VOICE_REPLY_BACKEND", "openclaw").strip().lower()
+        self.reply_backend = os.getenv("VOICE_REPLY_BACKEND", "ollama").strip().lower()
         self.llm_endpoint = os.getenv("VOICE_OLLAMA_ENDPOINT", "http://localhost:11434/api/generate")
         self.llm_model = os.getenv("VOICE_OLLAMA_MODEL", "qwen2.5:7b")
         self.openclaw_session_id = os.getenv("VOICE_OPENCLAW_SESSION_ID", "voice-bridge-session")

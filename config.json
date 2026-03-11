@@ -1,10 +1,16 @@
 {
-  "gateway_url": "http://127.0.0.1:18789",
-  "gateway_token": "596f18b2c5e18ac108572063167e9aa1a0ef4c14f1ccf6df",
-  "chat_path": "/api/voice-brain/chat",
-  "health_path": "/api/voice-brain/health",
-  "brain_backend": "openclaw",
+  "gateway_url": "http://127.0.0.1:8765",
+  "gateway_token": "",
+  "chat_path": "/chat",
+  "health_path": "/health",
+  "local_gateway_url": "http://127.0.0.1:8765",
+  "local_gateway_token": "",
+  "local_chat_path": "/chat",
+  "local_health_path": "/health",
+  "brain_backend": "ollama",
+  "ollama_endpoint": "http://127.0.0.1:11434/api/generate",
+  "ollama_model": "qwen2.5:7b",
   "openclaw_session_id": "voice-bridge-session",
   "openclaw_timeout": 120,
-  "notes": "Windows shell now targets the Gateway-native voice-brain plugin routes."
+  "notes": "默认切到本地大模型文本脑服务（server.py + VOICE_REPLY_BACKEND=ollama）。"
 }
