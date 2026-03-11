@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Windows 音频桥接客户端
 
@@ -15,6 +15,7 @@ Windows 音频桥接客户端
 import argparse
 import asyncio
 import base64
+import io
 import json
 import logging
 import os
@@ -141,7 +142,8 @@ class AudioBridgeClient:
         gateway_url: str,
         gateway_token: str = "",
         device_index: Optional[int] = None,
-        tts_voice: str = "",
+        tts_voice: str = "Xiaoxiao",
+        tts_edge_voice: str = "zh-CN-XiaoxiaoNeural",
         chat_path: str = DEFAULT_CHAT_PATH,
         health_path: str = DEFAULT_HEALTH_PATH,
     ):
@@ -149,6 +151,7 @@ class AudioBridgeClient:
         self.gateway_token = gateway_token.strip()
         self.device_index = device_index
         self.tts_voice = tts_voice.strip()
+        self.tts_edge_voice = tts_edge_voice.strip() or "zh-CN-XiaoxiaoNeural"
         self.chat_path = chat_path if chat_path.startswith("/") else f"/{chat_path}"
         self.health_path = health_path if health_path.startswith("/") else f"/{health_path}"
         self.p = pyaudio.PyAudio()
@@ -277,10 +280,69 @@ $s.GetInstalledVoices() | ForEach-Object {
                 return reply
         return ""
 
+    @staticmethod
+    def _decode_mp3_to_mono_float32(audio_data: bytes):
+        import av
+        import numpy as np
+
+        chunks = []
+        target_rate = 24000
+        with av.open(io.BytesIO(audio_data), mode="r") as container:
+            audio_stream = next((s for s in container.streams if s.type == "audio"), None)
+            if audio_stream is None:
+                raise ValueError("未找到音频流")
+            target_rate = audio_stream.rate or 24000
+            resampler = av.audio.resampler.AudioResampler(
+                format="fltp",
+                layout="mono",
+                rate=target_rate,
+            )
+            for frame in container.decode(audio=0):
+                out = resampler.resample(frame)
+                if not isinstance(out, list):
+                    out = [out]
+                for out_frame in out:
+                    arr = out_frame.to_ndarray()
+                    if arr.ndim == 2:
+                        arr = arr[0]
+                    chunks.append(arr.astype(np.float32, copy=False))
+        if not chunks:
+            raise ValueError("音频解码失败")
+        pcm = np.concatenate(chunks)
+        return np.clip(pcm, -1.0, 1.0), target_rate
+
+    def _speak_text_edge(self, text: str) -> bool:
+        async def synthesize() -> bytes:
+            import edge_tts
+
+            communicate = edge_tts.Communicate(text, self.tts_edge_voice)
+            audio = b""
+            async for chunk in communicate.stream():
+                if chunk.get("type") == "audio":
+                    audio += chunk["data"]
+            return audio
+
+        try:
+            import sounddevice as sd
+
+            audio_data = asyncio.run(synthesize())
+            if not audio_data:
+                return False
+            audio_array, sample_rate = self._decode_mp3_to_mono_float32(audio_data)
+            sd.play(audio_array, samplerate=sample_rate)
+            sd.wait()
+            print(f"播报语音: {self.tts_edge_voice} (edge-tts)")
+            return True
+        except Exception as e:
+            logger.warning(f"edge-tts 播放失败，回退系统语音: {e}")
+            return False
+
     def _speak_text_windows(self, text: str):
         """使用 Windows 系统 TTS 朗读文本。"""
         speak_text = self._strip_emoji_for_speech(text)
         if not speak_text:
+            return
+        if self._speak_text_edge(speak_text):
             return
         # 通过 PowerShell + System.Speech.Synthesis 调用系统语音
         # 使用 EncodedCommand 避免中文和引号转义问题
@@ -291,6 +353,7 @@ $s.Rate = 0
 $s.SetOutputToDefaultAudioDevice()
 $voiceName = $env:BRIDGE_TTS_VOICE
 $voiceOK = $false
+$voices = $s.GetInstalledVoices()
 if (-not [string]::IsNullOrWhiteSpace($voiceName)) {
   try {
     $s.SelectVoice($voiceName)
@@ -298,10 +361,40 @@ if (-not [string]::IsNullOrWhiteSpace($voiceName)) {
   } catch {}
 }
 $selected = $s.Voice.Name
-$zh = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -like 'zh*' } | Select-Object -First 1
-if (-not $voiceOK -and $zh) {
-  $s.SelectVoice($zh.VoiceInfo.Name)
-  $selected = $s.Voice.Name
+if (-not $voiceOK -and -not [string]::IsNullOrWhiteSpace($voiceName)) {
+  $fuzzy = $voices | Where-Object { $_.VoiceInfo.Name -like ("*" + $voiceName + "*") } | Select-Object -First 1
+  if ($fuzzy) {
+    $s.SelectVoice($fuzzy.VoiceInfo.Name)
+    $voiceOK = $true
+    $selected = $s.Voice.Name
+  }
+}
+if (-not $voiceOK) {
+  $preferred = $voices | Where-Object {
+    $_.VoiceInfo.Name -match '(?i)xiaoxiao|xiaoyi|xiaoyou'
+  } | Select-Object -First 1
+  if ($preferred) {
+    $s.SelectVoice($preferred.VoiceInfo.Name)
+    $voiceOK = $true
+    $selected = $s.Voice.Name
+  }
+}
+if (-not $voiceOK) {
+  $zhFemale = $voices | Where-Object {
+    $_.VoiceInfo.Culture.Name -like 'zh*' -and $_.VoiceInfo.Gender -eq 'Female'
+  } | Select-Object -First 1
+  if ($zhFemale) {
+    $s.SelectVoice($zhFemale.VoiceInfo.Name)
+    $voiceOK = $true
+    $selected = $s.Voice.Name
+  }
+}
+if (-not $voiceOK) {
+  $zhAny = $voices | Where-Object { $_.VoiceInfo.Culture.Name -like 'zh*' } | Select-Object -First 1
+  if ($zhAny) {
+    $s.SelectVoice($zhAny.VoiceInfo.Name)
+    $selected = $s.Voice.Name
+  }
 }
 Write-Output ("TTS_VOICE=" + $selected)
 $text = $env:BRIDGE_TTS_TEXT
@@ -402,7 +495,8 @@ async def main():
     parser.add_argument("--device", type=int, help="指定输入设备索引")
     parser.add_argument("--text", help="直接发送文字到 Gateway，跳过录音")
     parser.add_argument("--health", action="store_true", help="调用 /api/voice-brain/health")
-    parser.add_argument("--voice", default=cfg.get("tts_voice", ""), help="指定 TTS 语音包名称（例如 Microsoft Huihui Desktop）")
+    parser.add_argument("--voice", default=cfg.get("tts_voice", "Xiaoxiao"), help="指定 TTS 语音包名称（例如 Xiaoxiao / Microsoft Huihui Desktop）")
+    parser.add_argument("--edge-voice", default=cfg.get("tts_edge_voice", "zh-CN-XiaoxiaoNeural"), help="指定 edge-tts 语音（例如 zh-CN-XiaoxiaoNeural）")
     parser.add_argument("--list-voices", action="store_true", help="列出系统可用 TTS 语音包")
     args = parser.parse_args()
 
@@ -428,6 +522,7 @@ async def main():
         gateway_token=token,
         device_index=args.device,
         tts_voice=args.voice,
+        tts_edge_voice=args.edge_voice,
         chat_path=chat_path,
         health_path=health_path,
     )
@@ -487,4 +582,5 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
 

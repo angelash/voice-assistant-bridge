@@ -7,6 +7,8 @@
   "local_gateway_token": "",
   "local_chat_path": "/chat",
   "local_health_path": "/health",
+  "tts_voice": "Xiaoxiao",
+  "tts_edge_voice": "zh-CN-XiaoxiaoNeural",
   "brain_backend": "ollama",
   "ollama_endpoint": "http://127.0.0.1:11434/api/generate",
   "ollama_model": "qwen2.5:7b",
