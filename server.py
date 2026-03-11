@@ -137,7 +137,6 @@ class VoiceAssistantServer:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     async def handle_audio(self, request: web.Request) -> web.Response:
-        """兼容调试接口：接收 PCM 音频 -> STT -> 文本回复。"""
         try:
             audio_data = await request.read()
             logger.info(f"收到音频: {len(audio_data)} 字节")
@@ -161,7 +160,6 @@ class VoiceAssistantServer:
             return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     async def handle_tts(self, request: web.Request) -> web.Response:
-        """兼容调试接口：单独 TTS。"""
         try:
             data = await request.json()
             text = data.get("text", "")

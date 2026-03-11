@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
 """
 Windows 音频桥接客户端
-用于 WSL2 环境：在 Windows 端运行，捕获音频并通过 HTTP 发送到 WSL2，接收并播放返回语音。
+
+职责：
+- Windows 端录音 / 持续监听
+- 调用文字脑服务 `/chat` 或调试接口 `/audio`
+- 本地保存返回语音（调试用途）
+
+长期推荐架构：
+- Windows 端自己做 STT/TTS
+- 主要调用 `/chat`
 """
 
 import argparse
@@ -27,8 +35,6 @@ RATE = 16000
 
 
 class AudioBridgeClient:
-    """音频桥接客户端"""
-
     def __init__(self, server_url: str = "http://localhost:8765", device_index: Optional[int] = None):
         self.server_url = server_url.rstrip("/")
         self.device_index = device_index
@@ -42,13 +48,7 @@ class AudioBridgeClient:
             print(f"  [{i}] {dev['name']} (in:{dev['maxInputChannels']}, out:{dev['maxOutputChannels']})")
 
     def _open_input_stream(self):
-        kwargs = dict(
-            format=FORMAT,
-            channels=CHANNELS,
-            rate=RATE,
-            input=True,
-            frames_per_buffer=CHUNK,
-        )
+        kwargs = dict(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, frames_per_buffer=CHUNK)
         if self.device_index is not None:
             kwargs["input_device_index"] = self.device_index
         return self.p.open(**kwargs)
@@ -89,11 +89,7 @@ class AudioBridgeClient:
                     timeout=aiohttp.ClientTimeout(total=90),
                 ) as resp:
                     if resp.status == 200:
-                        result = await resp.json()
-                        tts_b64 = result.get("tts_audio_base64")
-                        if tts_b64:
-                            self.play_mp3_bytes(base64.b64decode(tts_b64))
-                        return result
+                        return await resp.json()
                     logger.error(f"服务器错误: {resp.status} {await resp.text()}")
                     return None
         except aiohttp.ClientError as e:
@@ -105,35 +101,29 @@ class AudioBridgeClient:
         frames = []
         print(f"录音中... ({duration}秒)")
         for _ in range(0, int(RATE / CHUNK * duration)):
-            data = stream.read(CHUNK, exception_on_overflow=False)
-            frames.append(data)
+            frames.append(stream.read(CHUNK, exception_on_overflow=False))
         stream.stop_stream()
         stream.close()
-
         audio_data = b"".join(frames)
         print(f"录音完成，发送到服务器 ({len(audio_data)} 字节)...")
         result = await self.send_audio(audio_data)
         if result:
-            print(f"识别文本: {result.get('text')}")
-            print(f"助手回复: {result.get('response')}")
+            print(f"识别文本: {result.get('input_text')}")
+            print(f"助手回复: {result.get('response_text')}")
         return result
 
     async def continuous_mode(self):
         self.is_running = True
         stream = self._open_input_stream()
         print("持续监听模式 (Ctrl+C 停止)...")
-
         silence_count = 0
         is_speaking = False
         speaking_buffer = b""
-
         try:
             while self.is_running:
                 chunk = stream.read(CHUNK, exception_on_overflow=False)
                 import numpy as np
-                audio_array = np.frombuffer(chunk, dtype=np.int16)
-                energy = abs(audio_array).mean()
-
+                energy = abs(np.frombuffer(chunk, dtype=np.int16)).mean()
                 if energy > 500:
                     if not is_speaking:
                         is_speaking = True
@@ -149,8 +139,8 @@ class AudioBridgeClient:
                                 print(f"语音结束，发送 ({len(speaking_buffer)} 字节)...")
                                 result = await self.send_audio(speaking_buffer)
                                 if result:
-                                    print(f"识别文本: {result.get('text')}")
-                                    print(f"助手回复: {result.get('response')}")
+                                    print(f"识别文本: {result.get('input_text')}")
+                                    print(f"助手回复: {result.get('response_text')}")
                             speaking_buffer = b""
         except KeyboardInterrupt:
             print("\n停止监听")
@@ -173,16 +163,14 @@ async def main():
     args = parser.parse_args()
 
     client = AudioBridgeClient(args.server, device_index=args.device)
-
     if args.list_devices:
         client.list_devices()
         return
-
     try:
         if args.text:
             result = await client.send_text(args.text)
             if result:
-                print(f"助手回复: {result.get('response')}")
+                print(f"助手回复: {result.get('response_text')}")
         elif args.record:
             await client.record_and_send(args.record)
         elif args.continuous:
@@ -204,7 +192,7 @@ async def main():
                     if text:
                         result = await client.send_text(text)
                         if result:
-                            print(f"助手回复: {result.get('response')}")
+                            print(f"助手回复: {result.get('response_text')}")
                 elif cmd == 'l':
                     client.list_devices()
     finally:
