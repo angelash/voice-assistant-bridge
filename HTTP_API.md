@@ -10,7 +10,7 @@
 ## 回复后端切换
 
 支持两种后端：
-- `openclaw`：推荐，走专用语音 session
+- `openclaw`：推荐，走专用语音 session（**当前默认**）
 - `ollama`：保底/回退链路
 
 环境变量：

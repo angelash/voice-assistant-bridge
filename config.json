@@ -1,0 +1,7 @@
+{
+  "server_url": "http://localhost:8765",
+  "brain_backend": "openclaw",
+  "openclaw_session_id": "voice-bridge-session",
+  "openclaw_timeout": 120,
+  "notes": "Windows shell default config. The text brain should be started with VOICE_REPLY_BACKEND=openclaw."
+}
