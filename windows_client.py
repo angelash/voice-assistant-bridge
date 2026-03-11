@@ -54,10 +54,17 @@ def load_config() -> dict:
 
 
 class AudioBridgeClient:
-    def __init__(self, gateway_url: str, gateway_token: str = "", device_index: Optional[int] = None):
+    def __init__(
+        self,
+        gateway_url: str,
+        gateway_token: str = "",
+        device_index: Optional[int] = None,
+        tts_voice: str = "",
+    ):
         self.gateway_url = gateway_url.rstrip("/")
         self.gateway_token = gateway_token.strip()
         self.device_index = device_index
+        self.tts_voice = tts_voice.strip()
         self.p = pyaudio.PyAudio()
         self.is_running = False
 
@@ -115,6 +122,62 @@ class AudioBridgeClient:
             return None
 
     @staticmethod
+    def list_tts_voices():
+        """列出系统可用 TTS 语音包。"""
+        ps_script = r"""
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$s.GetInstalledVoices() | ForEach-Object {
+  $v = $_.VoiceInfo
+  Write-Output ($v.Name + " | " + $v.Culture.Name + " | " + $v.Gender + " | " + $v.Age)
+}
+"""
+        encoded_cmd = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_cmd],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        output = (proc.stdout or "").strip()
+        if proc.returncode != 0:
+            err = (proc.stderr or output or "").strip()
+            logger.warning(f"获取语音包失败(退出码 {proc.returncode}): {err or '未知错误'}")
+            return
+        print("\n可用 TTS 语音包:")
+        if output:
+            for line in output.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#< CLIXML"):
+                    print(f"  - {line}")
+        else:
+            print("  (未检测到可用语音包)")
+
+    @staticmethod
+    def _strip_emoji_for_speech(text: str) -> str:
+        """去掉 emoji/符号表情，避免播报异常。"""
+        emoji_pattern = re.compile(
+            "["
+            "\U0001F300-\U0001F5FF"  # symbols & pictographs
+            "\U0001F600-\U0001F64F"  # emoticons
+            "\U0001F680-\U0001F6FF"  # transport & map
+            "\U0001F700-\U0001F77F"
+            "\U0001F780-\U0001F7FF"
+            "\U0001F800-\U0001F8FF"
+            "\U0001F900-\U0001F9FF"
+            "\U0001FA00-\U0001FAFF"
+            "\U00002700-\U000027BF"
+            "\U00002600-\U000026FF"
+            "\U0000FE00-\U0000FE0F"  # variation selector
+            "\U0001F1E6-\U0001F1FF"  # flags
+            "]",
+            flags=re.UNICODE,
+        )
+        cleaned = emoji_pattern.sub("", text)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+        return cleaned
+
+    @staticmethod
     def _extract_reply_text(result: dict) -> str:
         """从后端 JSON 中提取可展示/朗读的正文。"""
         for key in ("response_text", "reply_text", "text", "answer", "content"):
@@ -126,10 +189,10 @@ class AudioBridgeClient:
                 return reply
         return ""
 
-    @staticmethod
-    def _speak_text_windows(text: str):
+    def _speak_text_windows(self, text: str):
         """使用 Windows 系统 TTS 朗读文本。"""
-        if not text.strip():
+        speak_text = self._strip_emoji_for_speech(text)
+        if not speak_text:
             return
         # 通过 PowerShell + System.Speech.Synthesis 调用系统语音
         # 使用 EncodedCommand 避免中文和引号转义问题
@@ -138,15 +201,29 @@ Add-Type -AssemblyName System.Speech
 $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
 $s.Rate = 0
 $s.SetOutputToDefaultAudioDevice()
+$voiceName = $env:BRIDGE_TTS_VOICE
+$voiceOK = $false
+if (-not [string]::IsNullOrWhiteSpace($voiceName)) {
+  try {
+    $s.SelectVoice($voiceName)
+    $voiceOK = $true
+  } catch {}
+}
+$selected = $s.Voice.Name
 $zh = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -like 'zh*' } | Select-Object -First 1
-if ($zh) { $s.SelectVoice($zh.VoiceInfo.Name) }
+if (-not $voiceOK -and $zh) {
+  $s.SelectVoice($zh.VoiceInfo.Name)
+  $selected = $s.Voice.Name
+}
+Write-Output ("TTS_VOICE=" + $selected)
 $text = $env:BRIDGE_TTS_TEXT
 if ([string]::IsNullOrWhiteSpace($text)) { exit 2 }
 $s.Speak($text)
 """
         encoded_cmd = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
         env = os.environ.copy()
-        env["BRIDGE_TTS_TEXT"] = text
+        env["BRIDGE_TTS_TEXT"] = speak_text
+        env["BRIDGE_TTS_VOICE"] = self.tts_voice
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_cmd],
             check=False,
@@ -154,8 +231,14 @@ $s.Speak($text)
             text=True,
             env=env,
         )
+        out = (proc.stdout or "").strip()
+        for line in out.splitlines():
+            line = line.strip()
+            if line.startswith("TTS_VOICE="):
+                print(f"播报语音: {line.replace('TTS_VOICE=', '', 1)}")
+                break
         if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or "").strip()
+            err = (proc.stderr or out or "").strip()
             logger.warning(f"TTS 播放失败(退出码 {proc.returncode}): {err or '未知错误'}")
 
     async def print_and_speak_reply(self, result: dict):
@@ -227,11 +310,16 @@ async def main():
     parser.add_argument("--device", type=int, help="指定输入设备索引")
     parser.add_argument("--text", help="直接发送文字到 Gateway，跳过录音")
     parser.add_argument("--health", action="store_true", help="调用 /api/voice-brain/health")
+    parser.add_argument("--voice", default=cfg.get("tts_voice", ""), help="指定 TTS 语音包名称（例如 Microsoft Huihui Desktop）")
+    parser.add_argument("--list-voices", action="store_true", help="列出系统可用 TTS 语音包")
     args = parser.parse_args()
 
-    client = AudioBridgeClient(args.gateway, gateway_token=args.token, device_index=args.device)
+    client = AudioBridgeClient(args.gateway, gateway_token=args.token, device_index=args.device, tts_voice=args.voice)
     if args.list_devices:
         client.list_devices()
+        return
+    if args.list_voices:
+        client.list_tts_voices()
         return
     try:
         if args.health:
@@ -248,7 +336,7 @@ async def main():
             await client.continuous_mode()
         else:
             print("Windows 语音壳客户端")
-            print("命令: h=health, t=文字对话, r=录音, c=持续监听, l=列设备, q=退出")
+            print("命令: h=health, t=文字对话, r=录音, c=持续监听, l=列设备, v=列语音包, q=退出")
             while True:
                 cmd = input("> ").strip().lower()
                 if cmd == 'q':
@@ -270,6 +358,8 @@ async def main():
                     await client.continuous_mode()
                 elif cmd == 'l':
                     client.list_devices()
+                elif cmd == 'v':
+                    client.list_tts_voices()
     finally:
         client.close()
 
