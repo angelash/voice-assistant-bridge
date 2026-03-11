@@ -54,3 +54,24 @@ Gateway 插件负责：
 因为当前正式架构已经收敛为：
 - Windows 侧先做 STT
 - 再把文本发给 `/api/voice-brain/chat`
+
+## GUI Client (New)
+
+Install GUI dependencies:
+
+```powershell
+pip install PySide6 qasync
+```
+
+Start GUI:
+
+```powershell
+run_windows_gui.bat
+```
+
+Features:
+- local / OpenClaw mode switch
+- health check
+- text chat
+- TTS playback
+- audio device listing
