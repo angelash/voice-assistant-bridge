@@ -1,0 +1,22 @@
+# Core dependencies
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Audio I/O
+sounddevice>=0.4.6
+pyaudio>=0.2.14
+
+# Speech Recognition
+faster-whisper>=1.0.0
+
+# Speech Synthesis
+edge-tts>=6.1.0
+
+# Wake Word Detection
+# openwakeword depends on tflite-runtime on Linux, and tflite-runtime wheels are not
+# available for Python 3.12 in this environment. Install it automatically everywhere
+# except Linux+Py3.12; on that combo, use Python 3.11 or an alternative wakeword backend.
+openwakeword>=0.5.0; platform_system != "Linux" or python_version < "3.12"
+
+# HTTP Client (for LLM/server)
+aiohttp>=3.9.0
