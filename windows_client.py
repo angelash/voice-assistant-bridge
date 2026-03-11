@@ -14,8 +14,12 @@ Windows 音频桥接客户端
 
 import argparse
 import asyncio
+import base64
 import json
 import logging
+import os
+import re
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -110,6 +114,59 @@ class AudioBridgeClient:
             logger.error(f"连接失败: {e}")
             return None
 
+    @staticmethod
+    def _extract_reply_text(result: dict) -> str:
+        """从后端 JSON 中提取可展示/朗读的正文。"""
+        for key in ("response_text", "reply_text", "text", "answer", "content"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                reply = value.strip()
+                # 清理类似 [[reply_to_current]] 这种前缀标签
+                reply = re.sub(r"^\s*\[\[[^\]]+\]\]\s*", "", reply).strip()
+                return reply
+        return ""
+
+    @staticmethod
+    def _speak_text_windows(text: str):
+        """使用 Windows 系统 TTS 朗读文本。"""
+        if not text.strip():
+            return
+        # 通过 PowerShell + System.Speech.Synthesis 调用系统语音
+        # 使用 EncodedCommand 避免中文和引号转义问题
+        ps_script = r"""
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$s.Rate = 0
+$s.SetOutputToDefaultAudioDevice()
+$zh = $s.GetInstalledVoices() | Where-Object { $_.VoiceInfo.Culture.Name -like 'zh*' } | Select-Object -First 1
+if ($zh) { $s.SelectVoice($zh.VoiceInfo.Name) }
+$text = $env:BRIDGE_TTS_TEXT
+if ([string]::IsNullOrWhiteSpace($text)) { exit 2 }
+$s.Speak($text)
+"""
+        encoded_cmd = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
+        env = os.environ.copy()
+        env["BRIDGE_TTS_TEXT"] = text
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded_cmd],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            logger.warning(f"TTS 播放失败(退出码 {proc.returncode}): {err or '未知错误'}")
+
+    async def print_and_speak_reply(self, result: dict):
+        reply_text = self._extract_reply_text(result)
+        if reply_text:
+            print(f"助手: {reply_text}")
+            await asyncio.to_thread(self._speak_text_windows, reply_text)
+        else:
+            # 若未找到正文字段，回退输出原始 JSON 便于排查
+            print(json.dumps(result, ensure_ascii=False, indent=2))
+
     async def record_and_send(self, duration: float = 5.0):
         stream = self._open_input_stream()
         frames = []
@@ -184,7 +241,7 @@ async def main():
         elif args.text:
             result = await client.send_text(args.text)
             if result:
-                print(json.dumps(result, ensure_ascii=False, indent=2))
+                await client.print_and_speak_reply(result)
         elif args.record:
             await client.record_and_send(args.record)
         elif args.continuous:
@@ -205,7 +262,7 @@ async def main():
                     if text:
                         result = await client.send_text(text)
                         if result:
-                            print(json.dumps(result, ensure_ascii=False, indent=2))
+                            await client.print_and_speak_reply(result)
                 elif cmd == 'r':
                     duration = float(input("录音时长（秒）: ") or "5")
                     await client.record_and_send(duration)
