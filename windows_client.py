@@ -77,10 +77,8 @@ def _url_port(url: str, default_port: int) -> int:
     return default_port
 
 
-def _should_treat_as_local_mode(gateway_url: str, chat_path: str, force_local: bool, backend: str) -> bool:
+def _should_treat_as_local_mode(gateway_url: str, chat_path: str, force_local: bool) -> bool:
     if force_local:
-        return True
-    if backend.strip().lower() == "ollama" and _is_loopback_url(gateway_url):
         return True
     return _is_loopback_url(gateway_url) and chat_path.strip().lower() == LOCAL_CHAT_PATH
 
@@ -423,7 +421,6 @@ async def main():
         gateway_url=gateway,
         chat_path=chat_path,
         force_local=args.local_llm,
-        backend=str(cfg.get("brain_backend", "")),
     )
 
     client = AudioBridgeClient(
