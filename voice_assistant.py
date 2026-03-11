@@ -23,7 +23,7 @@ CONFIG = {
     "channels": 1,
     "stt_model": "small",  # faster-whisper: tiny, base, small, medium, large
     "tts_voice": "zh-CN-XiaoxiaoNeural",  # edge-tts 中文女声
-    "llm_endpoint": "http://localhost:11434/api/generate",  # Ollama
+    "llm_endpoint": "http://localhost:11434/api/chat",  # Ollama
     "llm_model": "qwen2.5:7b",
 }
 
@@ -194,27 +194,62 @@ class LLMClient:
     def __init__(self, endpoint: str, model: str):
         self.endpoint = endpoint
         self.model = model
+
+    @staticmethod
+    def _build_prompt(user_input: str, history: list) -> str:
+        """Build a simple prompt for /api/generate compatibility."""
+        lines = []
+        for msg in history[-10:]:
+            role = msg.get("role", "user")
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            if role == "assistant":
+                lines.append(f"助手: {content}")
+            else:
+                lines.append(f"用户: {content}")
+        lines.append(f"用户: {user_input}")
+        lines.append("助手:")
+        return "\n".join(lines)
     
     async def chat(self, user_input: str, history: list = None) -> str:
         """对话"""
         import aiohttp
         
-        messages = history or []
+        messages = list(history or [])
         messages.append({"role": "user", "content": user_input})
+
+        endpoint = self.endpoint.rstrip("/")
+        is_chat_api = endpoint.endswith("/api/chat")
+        if is_chat_api:
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "stream": False,
+            }
+        else:
+            payload = {
+                "model": self.model,
+                "prompt": self._build_prompt(user_input, history or []),
+                "stream": False,
+            }
         
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     self.endpoint,
-                    json={
-                        "model": self.model,
-                        "messages": messages,
-                        "stream": False
-                    },
+                    json=payload,
                     timeout=aiohttp.ClientTimeout(total=60)
                 ) as resp:
-                    result = await resp.json()
-                    return result.get("message", {}).get("content", "抱歉，我没能理解。")
+                    if resp.status != 200:
+                        body = await resp.text()
+                        raise RuntimeError(f"Ollama HTTP {resp.status}: {body}")
+
+                    result = await resp.json(content_type=None)
+                    chat_message = (result.get("message") or {}).get("content", "")
+                    generate_message = result.get("response", "")
+                    output = (chat_message or generate_message or "").strip()
+                    return output or "抱歉，我没能理解。"
         except Exception as e:
             logger.error(f"LLM 调用失败: {e}")
             return "抱歉，连接失败了。"
