@@ -458,7 +458,8 @@ class MainWindow(QMainWindow):
                 continue
             printed.add(key)
             self._log(f"[{label}] {text}")
-            await asyncio.to_thread(client._speak_text_windows, text)
+            if source != "local-operator":
+                await asyncio.to_thread(client._speak_text_windows, text)
 
     async def _watch_v1_terminal(self, message_id: str):
         client = self._build_client()

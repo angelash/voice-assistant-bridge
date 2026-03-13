@@ -244,7 +244,6 @@ class MainActivity : AppCompatActivity() {
                 if (localReply.isNotBlank()) {
                     val label = submitResp.optString("local_source_label").ifBlank { "Local Operator" }
                     appendResult("[$label] $localReply")
-                    speak(localReplyRaw)
                     shown.add("$label::$localReply")
                 }
 
@@ -278,11 +277,12 @@ class MainActivity : AppCompatActivity() {
                 val text = normalizeForDisplay(textRaw)
                 if (text.isBlank()) continue
                 val label = item.optString("source_label").ifBlank { "Assistant" }
+                val source = item.optString("source").trim()
                 val key = "$label::$text"
                 if (shown.contains(key)) continue
                 shown.add(key)
                 appendResult("[$label] $text")
-                if (item.optString("kind") != "error") {
+                if (item.optString("kind") != "error" && source != "local-operator") {
                     speak(textRaw)
                 }
             }

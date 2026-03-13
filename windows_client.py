@@ -568,12 +568,14 @@ $s.Speak($text)
 
         for msg in self._extract_messages(result):
             text = msg["text"]
+            source = str(msg.get("source") or "")
             key = (msg["source"], text)
             if key in printed:
                 continue
             printed.add(key)
             print(f"[{msg['source_label']}] {text}")
-            await asyncio.to_thread(self._speak_text_windows, text)
+            if source != "local-operator":
+                await asyncio.to_thread(self._speak_text_windows, text)
 
         if result.get("protocol") == "v1":
             message_id = (result.get("message_id") or "").strip()
@@ -583,12 +585,14 @@ $s.Speak($text)
                 if terminal:
                     for msg in self._extract_messages(terminal):
                         text = msg["text"]
+                        source = str(msg.get("source") or "")
                         key = (msg["source"], text)
                         if key in printed:
                             continue
                         printed.add(key)
                         print(f"[{msg['source_label']}] {text}")
-                        await asyncio.to_thread(self._speak_text_windows, text)
+                        if source != "local-operator":
+                            await asyncio.to_thread(self._speak_text_windows, text)
                     if (terminal.get("status") or "").upper() == "FAILED":
                         err = (terminal.get("last_error") or "openclaw_failed").strip()
                         print(f"[系统] 龙虾大脑回复失败：{err}")
