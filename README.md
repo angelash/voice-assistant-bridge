@@ -61,8 +61,8 @@ run_windows_client_local.bat --text "你好"
 
 ## Android 基线
 
-Android 工程基线路径：
+当前仓库内独立 Android 工程路径：
 
-- `F:\workspace\github\MyChatGPT\src\android\AudioBridgeClient`
+- `F:\workspace\voice-assistant-bridge\android\AudioBridgeClient`
 
-约束：技术方案和默认设置按该工程对齐，在其基础上扩展双链路与文本上行能力。
+约束：实现方案与原基线工程保持一致，但后续开发仅在本仓库内进行。

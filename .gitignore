@@ -13,6 +13,9 @@ ENV/
 build/
 dist/
 *.egg-info/
+android/**/build/
+android/**/.gradle/
+android/**/local.properties
 
 # Test and tool caches
 .pytest_cache/

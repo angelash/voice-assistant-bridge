@@ -144,7 +144,7 @@ OpenClaw 转发必须携带 `message_id`，用于去重和重放保护。
 
 基线工程路径（外部参考）：
 
-1. `F:\workspace\github\MyChatGPT\src\android\AudioBridgeClient`
+1. `F:\workspace\voice-assistant-bridge\android\AudioBridgeClient`
 
 对齐要求：
 

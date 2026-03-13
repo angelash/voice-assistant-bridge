@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">AudioBridge</string>
+    <string name="status_idle">未连接</string>
+    <string name="hint_host">Windows Host（例如 192.168.1.23）</string>
+    <string name="hint_port">Port（默认 21347）</string>
+    <string name="hint_token">Token（可先留空，后续 WP4 接入鉴权）</string>
+    <string name="btn_connect">Connect</string>
+</resources>
+
