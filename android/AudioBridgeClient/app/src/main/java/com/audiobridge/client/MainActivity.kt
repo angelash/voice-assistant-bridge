@@ -1,4 +1,4 @@
-package com.audiobridge.client
+﻿package com.audiobridge.client
 
 import android.Manifest
 import android.content.Context
@@ -8,6 +8,8 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.net.wifi.WifiManager
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Button
@@ -29,6 +31,7 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -51,14 +54,34 @@ class MainActivity : AppCompatActivity() {
         private const val STT_SAMPLE_RATE = 16000
         private const val STT_CHANNEL = AudioFormat.CHANNEL_IN_MONO
         private const val STT_ENCODING = AudioFormat.ENCODING_PCM_16BIT
+
+        private const val LONG_REPLY_LIMIT = 30
+        private const val LONG_REPLY_TIMEOUT_MS = 30_000L
+        private const val LONG_REPLY_MAX_LISTEN_ATTEMPTS = 5
+        private const val LONG_REPLY_SUMMARY_MAX_CHARS = 90
     }
 
     private enum class LinkMode { LAN, TUNNEL }
+
+    private enum class SpeechPurpose { USER_MESSAGE, LONG_REPLY_DECISION }
+
+    private enum class LongReplyChoice { SUMMARY, ORIGINAL, OTHER }
 
     private data class BridgeEndpoint(
         val mode: LinkMode,
         val baseUrl: String,
         val wifiSsid: String?,
+    )
+
+    private data class PendingLongReply(
+        val id: String,
+        val endpoint: BridgeEndpoint,
+        val sessionId: String,
+        val clientId: String,
+        val originalRaw: String,
+        val originalDisplay: String,
+        val deadlineAtMs: Long,
+        var decisionListenAttempts: Int = 0,
     )
 
     private lateinit var statusText: TextView
@@ -72,6 +95,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var speakSwitch: Switch
 
     private var tts: TextToSpeech? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private var sparkInitialized = false
     private var asr: ASR? = null
@@ -85,6 +109,13 @@ class MainActivity : AppCompatActivity() {
     private var sttListening = false
     @Volatile
     private var lastAsrText = ""
+    @Volatile
+    private var currentSpeechPurpose = SpeechPurpose.USER_MESSAGE
+
+    @Volatile
+    private var pendingLongReply: PendingLongReply? = null
+    private var pendingLongReplyTimeoutTask: Runnable? = null
+    private var pendingLongReplyListenTask: Runnable? = null
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -98,29 +129,51 @@ class MainActivity : AppCompatActivity() {
             if (textRaw.isNotBlank()) {
                 lastAsrText = textRaw
             }
+            val purpose = currentSpeechPurpose
 
             when (status) {
-                0, 1 -> runOnUiThread { statusText.text = "Recognizing..." }
+                0, 1 -> {
+                    runOnUiThread {
+                        statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
+                            "Listening choice..."
+                        } else {
+                            "Recognizing..."
+                        }
+                    }
+                }
                 2 -> {
                     sttListening = false
                     stopAudioCapture()
                     runOnUiThread {
                         sttButton.text = "Speak To Text"
-                        statusText.text = "Speech recognized"
+                        statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
+                            "Choice recognized"
+                        } else {
+                            "Speech recognized"
+                        }
                     }
-                    emitSpeechResult(textRaw.ifBlank { lastAsrText })
+                    emitSpeechResult(textRaw.ifBlank { lastAsrText }, purpose)
                 }
                 else -> runOnUiThread { statusText.text = "Recognizing..." }
             }
         }
 
         override fun onError(asrError: ASR.ASRError, userTag: Any?) {
+            val purpose = currentSpeechPurpose
             sttListening = false
             stopAudioCapture()
             runOnUiThread {
                 sttButton.text = "Speak To Text"
-                statusText.text = "STT failed: ${asrError.code}"
             }
+
+            if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                sttFinished.set(true)
+                runOnUiThread { statusText.text = "Waiting your choice..." }
+                scheduleLongReplyDecisionListening(delayMs = 700)
+                return
+            }
+
+            runOnUiThread { statusText.text = "STT failed: ${asrError.code}" }
             val msg = asrError.errMsg ?: "unknown"
             appendResult("[system] STT failed: code=${asrError.code}, msg=$msg")
             sttFinished.set(true)
@@ -151,6 +204,9 @@ class MainActivity : AppCompatActivity() {
                 statusText.text = "Please enter text"
                 return@setOnClickListener
             }
+            if (isPendingLongReplyActive()) {
+                clearPendingLongReply()
+            }
             sendTextToBridge(text)
         }
 
@@ -158,7 +214,7 @@ class MainActivity : AppCompatActivity() {
             if (sttListening) {
                 stopSpeechToText()
             } else {
-                startSpeechToText()
+                startSpeechToText(SpeechPurpose.USER_MESSAGE)
             }
         }
 
@@ -182,6 +238,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        clearPendingLongReply()
         stopAudioCapture()
         try {
             asr?.stop(true)
@@ -267,6 +324,93 @@ class MainActivity : AppCompatActivity() {
         return cleaned
     }
 
+    private fun normalizedLength(text: String): Int {
+        return normalizeForDisplay(text).replace(Regex("""\s+"""), "").length
+    }
+
+    private fun isLongOpenClawReply(textRaw: String): Boolean {
+        return normalizedLength(textRaw) > LONG_REPLY_LIMIT
+    }
+
+    private fun classifyLongReplyChoice(spoken: String): LongReplyChoice {
+        val normalized = normalizeForDisplay(spoken)
+            .lowercase(Locale.getDefault())
+            .replace(Regex("""\s+"""), "")
+        val originalKeywords = listOf("原文", "全文", "照读", "不简报", "不要简报", "不简化", "完整")
+        val summaryKeywords = listOf("简报", "摘要", "总结", "概括", "简化", "简短", "要点", "简版")
+        if (originalKeywords.any { normalized.contains(it) }) return LongReplyChoice.ORIGINAL
+        if (summaryKeywords.any { normalized.contains(it) }) return LongReplyChoice.SUMMARY
+        return LongReplyChoice.OTHER
+    }
+
+    private fun isPendingLongReplyActive(): Boolean {
+        val pending = pendingLongReply ?: return false
+        return System.currentTimeMillis() < pending.deadlineAtMs
+    }
+
+    private fun clearPendingLongReply() {
+        pendingLongReply = null
+        pendingLongReplyTimeoutTask?.let { mainHandler.removeCallbacks(it) }
+        pendingLongReplyTimeoutTask = null
+        pendingLongReplyListenTask?.let { mainHandler.removeCallbacks(it) }
+        pendingLongReplyListenTask = null
+    }
+
+    private fun beginLongReplyDecision(
+        endpoint: BridgeEndpoint,
+        sessionId: String,
+        clientId: String,
+        originalRaw: String,
+    ) {
+        val display = normalizeForDisplay(originalRaw)
+        if (display.isBlank()) return
+
+        clearPendingLongReply()
+        val pending = PendingLongReply(
+            id = UUID.randomUUID().toString(),
+            endpoint = endpoint,
+            sessionId = sessionId,
+            clientId = clientId,
+            originalRaw = originalRaw,
+            originalDisplay = display,
+            deadlineAtMs = System.currentTimeMillis() + LONG_REPLY_TIMEOUT_MS,
+        )
+        pendingLongReply = pending
+
+        appendResult("[system] 内容较长，请在30秒内说“简报”或“原文”")
+        speak("这条回复内容较长。请在三十秒内说简报或原文。", force = true)
+        runOnUiThread { statusText.text = "Waiting long-reply choice..." }
+
+        val timeoutTask = Runnable {
+            val active = pendingLongReply
+            if (active == null || active.id != pending.id) return@Runnable
+            clearPendingLongReply()
+            appendResult("[system] 30秒未选择，已略过该条语音播报")
+            runOnUiThread { statusText.text = "Long reply skipped" }
+        }
+        pendingLongReplyTimeoutTask = timeoutTask
+        mainHandler.postDelayed(timeoutTask, LONG_REPLY_TIMEOUT_MS)
+
+        scheduleLongReplyDecisionListening(delayMs = 900)
+    }
+
+    private fun scheduleLongReplyDecisionListening(delayMs: Long) {
+        val pending = pendingLongReply ?: return
+        if (System.currentTimeMillis() >= pending.deadlineAtMs) return
+        pendingLongReplyListenTask?.let { mainHandler.removeCallbacks(it) }
+        val task = Runnable {
+            val active = pendingLongReply ?: return@Runnable
+            if (active.id != pending.id) return@Runnable
+            if (System.currentTimeMillis() >= active.deadlineAtMs) return@Runnable
+            if (sttListening) return@Runnable
+            if (active.decisionListenAttempts >= LONG_REPLY_MAX_LISTEN_ATTEMPTS) return@Runnable
+            active.decisionListenAttempts += 1
+            startSpeechToText(SpeechPurpose.LONG_REPLY_DECISION)
+        }
+        pendingLongReplyListenTask = task
+        mainHandler.postDelayed(task, delayMs)
+    }
+
     private fun sendTextToBridge(text: String) {
         val input = text.trim()
         if (input.isBlank()) return
@@ -307,12 +451,12 @@ class MainActivity : AppCompatActivity() {
                 if (messageId.isNotBlank() && state !in setOf("DELIVERED", "FAILED")) {
                     val terminal = pollTerminal(endpoint, messageId, timeoutSec = 180, intervalMs = 1000)
                     if (terminal != null) {
-                        renderStatusMessages(terminal, shown)
+                        renderStatusMessages(terminal, shown, endpoint, sessionId, clientId)
                     } else {
                         appendResult("[system] timeout waiting final reply")
                     }
                 } else {
-                    renderStatusMessages(submitResp, shown)
+                    renderStatusMessages(submitResp, shown, endpoint, sessionId, clientId)
                 }
 
                 runOnUiThread { statusText.text = "Send complete" }
@@ -323,7 +467,13 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun renderStatusMessages(payload: JSONObject, shown: MutableSet<String>) {
+    private fun renderStatusMessages(
+        payload: JSONObject,
+        shown: MutableSet<String>,
+        endpoint: BridgeEndpoint,
+        sessionId: String,
+        clientId: String,
+    ) {
         val messages = payload.optJSONArray("messages")
         if (messages != null) {
             for (i in 0 until messages.length()) {
@@ -337,7 +487,12 @@ class MainActivity : AppCompatActivity() {
                 if (shown.contains(key)) continue
                 shown.add(key)
                 appendResult("[$label] $text")
-                if (item.optString("kind") != "error" && source != "local-operator") {
+                if (item.optString("kind") == "error") continue
+                if (source == "local-operator") continue
+
+                if (source == "openclaw" && isLongOpenClawReply(textRaw)) {
+                    beginLongReplyDecision(endpoint, sessionId, clientId, textRaw)
+                } else {
                     speak(textRaw)
                 }
             }
@@ -393,6 +548,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun requestLocalSummary(pending: PendingLongReply): String {
+        val body = JSONObject()
+            .put("text", pending.originalRaw)
+            .put("session_id", pending.sessionId)
+            .put("client_id", pending.clientId)
+            .put("source", "android")
+            .put("max_chars", LONG_REPLY_SUMMARY_MAX_CHARS)
+        val resp = postJson(pending.endpoint, "/v1/operator/summarize", body)
+        if (!resp.optBoolean("ok", false)) {
+            throw IllegalStateException(resp.optString("error").ifBlank { "summary_failed" })
+        }
+        return resp.optString("summary").trim()
+    }
+
     private fun ensureSparkInitialized(): Boolean {
         if (sparkInitialized) return true
         return try {
@@ -424,7 +593,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun startSpeechToText() {
+    private fun startSpeechToText(purpose: SpeechPurpose) {
         if (sttListening) return
 
         if (!hasRecordAudioPermission()) {
@@ -436,6 +605,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        currentSpeechPurpose = purpose
         ensureAsr()
         val asrClient = asr ?: return
         asrClient.language("zh_cn")
@@ -449,23 +619,35 @@ class MainActivity : AppCompatActivity() {
         asrToken += 1
         val ret = asrClient.start("voice-bridge-$asrToken")
         if (ret != 0) {
-            appendResult("[system] STT start failed: $ret")
-            statusText.text = "STT start failed: $ret"
             sttListening = false
+            if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                scheduleLongReplyDecisionListening(delayMs = 700)
+            } else {
+                appendResult("[system] STT start failed: $ret")
+                statusText.text = "STT start failed: $ret"
+            }
             return
         }
 
         if (!startAudioCapture(asrClient)) {
             asrClient.stop(true)
-            appendResult("[system] microphone unavailable")
-            statusText.text = "Microphone unavailable"
             sttListening = false
+            if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                scheduleLongReplyDecisionListening(delayMs = 700)
+            } else {
+                appendResult("[system] microphone unavailable")
+                statusText.text = "Microphone unavailable"
+            }
             return
         }
 
         sttListening = true
         sttButton.text = "Stop Listening"
-        statusText.text = "Listening..."
+        statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
+            "Listening choice..."
+        } else {
+            "Listening..."
+        }
     }
 
     private fun stopSpeechToText() {
@@ -474,11 +656,14 @@ class MainActivity : AppCompatActivity() {
         sttButton.text = "Speak To Text"
         statusText.text = "Processing..."
         stopAudioCapture()
+        val purpose = currentSpeechPurpose
         val ret = asr?.stop(false) ?: -1
         if (ret != 0 && sttFinished.compareAndSet(false, true)) {
             val fallback = lastAsrText.trim()
             if (fallback.isNotBlank()) {
-                emitSpeechResult(fallback)
+                emitSpeechResult(fallback, purpose)
+            } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                scheduleLongReplyDecisionListening(delayMs = 700)
             } else {
                 appendResult("[system] STT stop failed: $ret")
                 statusText.text = "STT stop failed: $ret"
@@ -486,12 +671,22 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun emitSpeechResult(text: String) {
+    private fun emitSpeechResult(text: String, purpose: SpeechPurpose) {
         if (!sttFinished.compareAndSet(false, true)) return
         val spoken = text.trim()
         if (spoken.isBlank()) {
+            if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                runOnUiThread { statusText.text = "Waiting your choice..." }
+                scheduleLongReplyDecisionListening(delayMs = 700)
+                return
+            }
             appendResult("[system] no valid speech text")
             runOnUiThread { statusText.text = "No speech result" }
+            return
+        }
+
+        if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
+            handleLongReplyDecisionSpeech(spoken)
             return
         }
 
@@ -500,6 +695,52 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "Speech recognized"
         }
         sendTextToBridge(spoken)
+    }
+
+    private fun handleLongReplyDecisionSpeech(spoken: String) {
+        val pending = pendingLongReply
+        if (pending == null || System.currentTimeMillis() >= pending.deadlineAtMs) {
+            clearPendingLongReply()
+            runOnUiThread { statusText.text = "Speech recognized" }
+            sendTextToBridge(spoken)
+            return
+        }
+
+        when (classifyLongReplyChoice(spoken)) {
+            LongReplyChoice.SUMMARY -> {
+                clearPendingLongReply()
+                appendResult("[system] 接线员：已选择简报播报")
+                runOnUiThread { statusText.text = "Summarizing..." }
+                Thread {
+                    try {
+                        val summary = requestLocalSummary(pending)
+                        val spokenSummary = summary.ifBlank { pending.originalDisplay }
+                        speak(spokenSummary, force = true)
+                        runOnUiThread { statusText.text = "Brief spoken" }
+                    } catch (e: Exception) {
+                        appendResult("[system] 简报失败，改为原文播报: ${e.message ?: "unknown"}")
+                        speak(pending.originalRaw, force = true)
+                        runOnUiThread { statusText.text = "Original spoken" }
+                    }
+                }.start()
+            }
+
+            LongReplyChoice.ORIGINAL -> {
+                clearPendingLongReply()
+                appendResult("[system] 接线员：已选择原文播报")
+                speak(pending.originalRaw, force = true)
+                runOnUiThread { statusText.text = "Original spoken" }
+            }
+
+            LongReplyChoice.OTHER -> {
+                clearPendingLongReply()
+                runOnUiThread {
+                    textInput.setText(spoken)
+                    statusText.text = "Speech recognized"
+                }
+                sendTextToBridge(spoken)
+            }
+        }
     }
 
     private fun startAudioCapture(asrClient: ASR): Boolean {
@@ -614,8 +855,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun speak(text: String) {
-        if (!speakSwitch.isChecked) return
+    private fun speak(text: String, force: Boolean = false) {
+        if (!force && !speakSwitch.isChecked) return
         val speakText = normalizeForSpeech(text)
         if (speakText.isBlank()) return
         tts?.speak(speakText, TextToSpeech.QUEUE_ADD, null, "msg-${System.currentTimeMillis()}")
@@ -667,6 +908,9 @@ class MainActivity : AppCompatActivity() {
         }
         if (requestCode == REQ_RECORD_AUDIO && hasRecordAudioPermission()) {
             statusText.text = "Microphone permission granted"
+            if (isPendingLongReplyActive() && !sttListening) {
+                scheduleLongReplyDecisionListening(delayMs = 400)
+            }
         }
     }
 }

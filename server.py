@@ -298,6 +298,66 @@ class LocalOperator:
             logger.warning("local operator failed, fallback: %s", exc)
             return self._fallback(text)
 
+    @staticmethod
+    def _fallback_summary(text: str, max_chars: int) -> str:
+        cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+        if not cleaned:
+            return ""
+        if len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[:max_chars].rstrip("，。,.!? ") + "…"
+
+    @staticmethod
+    def _normalize_summary(value: Any, fallback: str, max_chars: int) -> str:
+        if not isinstance(value, str):
+            return fallback
+        cleaned = re.sub(r"\s+", " ", value).strip()
+        if not cleaned:
+            return fallback
+        if len(cleaned) > max_chars:
+            cleaned = cleaned[:max_chars].rstrip("，。,.!? ") + "…"
+        return cleaned
+
+    async def summarize(self, text: str, history: list[dict[str, Any]], max_chars: int = 80) -> str:
+        import aiohttp
+
+        max_chars = max(20, min(200, int(max_chars)))
+        fallback = self._fallback_summary(text, max_chars)
+        ctx: list[str] = []
+        for item in reversed(history[-6:]):
+            if item.get("text"):
+                ctx.append(f"用户: {item['text']}")
+            if item.get("final_reply"):
+                ctx.append(f"助手: {item['final_reply']}")
+        prompt = (
+            "你是本地接线员。请把下面内容压缩成中文简报，仅用于语音播报。\n"
+            f"要求：只输出简报正文；尽量不超过{max_chars}个汉字；保留关键信息与结论。\n"
+            f"上下文：\n{chr(10).join(ctx[-8:]) or '(无)'}\n"
+            f"原文：\n{text}\n"
+        )
+        payload = {"model": self.model, "prompt": prompt, "stream": False}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.endpoint,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout_sec),
+                ) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"operator summary http {resp.status}: {await resp.text()}")
+                    data = await resp.json(content_type=None)
+            raw = extract_reply_text(data) or str(data)
+            obj = extract_json_obj(raw)
+            if obj:
+                cand = obj.get("summary") or obj.get("brief") or obj.get("text") or ""
+            else:
+                cand = raw
+            summary = self._normalize_summary(cand, fallback, max_chars)
+            return summary or fallback
+        except Exception as exc:
+            logger.warning("local operator summarize failed, fallback: %s", exc)
+            return fallback
+
 
 class OpenClawClient:
     def __init__(self, base_url: str, chat_path: str, health_path: str, token: str):
@@ -744,6 +804,40 @@ class VoiceAssistantServer:
             await self.events.unregister(ws)
         return ws
 
+    async def handle_v1_operator_summarize(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+
+        text = (data.get("text") or "").strip()
+        if not text:
+            return web.json_response({"ok": False, "error": "text is required"}, status=400)
+
+        session_id = (data.get("session_id") or self.default_session_id or "voice-bridge-session").strip()
+        client_id = (data.get("client_id") or "android-client").strip() or "android-client"
+        max_chars = clamp_int(data.get("max_chars", 80), 80, 20, 200)
+        try:
+            summary = await self.local_operator.summarize(
+                text=text,
+                history=self.store.recent_session(session_id),
+                max_chars=max_chars,
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "source": SOURCE_LOCAL,
+                    "source_label": source_label(SOURCE_LOCAL),
+                    "session_id": session_id,
+                    "client_id": client_id,
+                    "summary": summary,
+                    "max_chars": max_chars,
+                }
+            )
+        except Exception as exc:
+            logger.exception("handle_v1_operator_summarize failed")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
     async def handle_chat(self, request: web.Request) -> web.Response:
         try:
             data = await request.json()
@@ -857,6 +951,7 @@ class VoiceAssistantServer:
                     "submit": "/v1/messages",
                     "status": "/v1/messages/{message_id}",
                     "events": "/v1/events",
+                    "operator_summarize": "/v1/operator/summarize",
                     "legacy_chat": "/chat",
                 },
                 "local_operator_endpoint": self.local_operator.endpoint,
@@ -890,6 +985,7 @@ class VoiceAssistantServer:
         app.router.add_post("/v1/messages", self.handle_v1_submit)
         app.router.add_get("/v1/messages/{message_id}", self.handle_v1_status)
         app.router.add_get("/v1/events", self.handle_v1_events)
+        app.router.add_post("/v1/operator/summarize", self.handle_v1_operator_summarize)
         app.router.add_post("/chat", self.handle_chat)
         app.router.add_get("/health", self.handle_health)
         app.router.add_post("/audio", self.handle_audio)
