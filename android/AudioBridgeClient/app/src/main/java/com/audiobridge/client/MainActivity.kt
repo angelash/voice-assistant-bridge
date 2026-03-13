@@ -1,32 +1,26 @@
-﻿package com.audiobridge.client
+package com.audiobridge.client
 
 import android.Manifest
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.content.ServiceConnection
 import android.content.pm.PackageManager
 import android.net.wifi.WifiManager
-import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.IBinder
-import android.os.Looper
+import android.provider.Settings
+import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
+import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
+import android.util.Log
 import android.widget.Button
 import android.widget.EditText
-import android.widget.RadioButton
-import android.widget.RadioGroup
 import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import com.audiobridge.client.audio.AudioTuningMode
-import com.audiobridge.client.service.AudioBridgeForegroundService
-import com.audiobridge.client.ws.AbpWebSocketClient
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -37,35 +31,23 @@ import java.util.concurrent.TimeUnit
 
 class MainActivity : AppCompatActivity() {
 
-    private enum class LinkMode { AUTO, LAN, TUNNEL }
+    private companion object {
+        private const val TAG = "VoiceBridgeMain"
+        private const val HARDCODED_LAN_BASE_URL = "http://10.3.91.22:8765"
+        private const val HARDCODED_PUBLIC_BASE_URL = "http://voice-bridge.iepose.cn"
+        private const val HARDCODED_LAN_WIFI_KEYWORD = "4399"
+    }
+
+    private enum class LinkMode { LAN, TUNNEL }
 
     private data class BridgeEndpoint(
         val mode: LinkMode,
         val baseUrl: String,
-        val token: String,
         val wifiSsid: String?,
     )
 
     private lateinit var statusText: TextView
-    private lateinit var audioStatusText: TextView
-    private lateinit var hostInput: EditText
-    private lateinit var tokenInput: EditText
-    private lateinit var connectButton: Button
-    private lateinit var uplinkSwitch: Switch
-    private lateinit var downlinkSwitch: Switch
-    private lateinit var tuningModeGroup: RadioGroup
-    private lateinit var tuningModeLegacy: RadioButton
-    private lateinit var tuningModeRobust: RadioButton
-
-    private lateinit var linkModeGroup: RadioGroup
-    private lateinit var linkModeAuto: RadioButton
-    private lateinit var linkModeLan: RadioButton
-    private lateinit var linkModeTunnel: RadioButton
-    private lateinit var lanBaseUrlInput: EditText
-    private lateinit var lanTokenInput: EditText
-    private lateinit var lanWifiRuleInput: EditText
-    private lateinit var tunnelBaseUrlInput: EditText
-    private lateinit var tunnelTokenInput: EditText
+    private lateinit var routeInfoText: TextView
     private lateinit var sessionIdInput: EditText
     private lateinit var clientIdInput: EditText
     private lateinit var textInput: EditText
@@ -74,48 +56,37 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textResultView: TextView
     private lateinit var speakSwitch: Switch
 
-    private var ignoreTuningModeUiChange: Boolean = false
-    private var pendingStartAfterPermission: Boolean = false
-
     private var tts: TextToSpeech? = null
+    private var speechRecognizer: SpeechRecognizer? = null
+    private var sttListening = false
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val handler = Handler(Looper.getMainLooper())
-    private var statusUpdateRunnable: Runnable? = null
-
-    private var service: AudioBridgeForegroundService? = null
-    private var serviceBound: Boolean = false
-
-    private val serviceConnection = object : ServiceConnection {
-        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
-            val b = binder as? AudioBridgeForegroundService.LocalBinder
-            service = b?.getService()
-            serviceBound = service != null
-            service?.getSnapshot()?.let { snap ->
-                syncTuningModeUi(snap.tuningMode)
-            }
-            updateUiOnce()
-            startStatusUpdate()
-        }
-
-        override fun onServiceDisconnected(name: ComponentName?) {
-            serviceBound = false
-            service = null
-            stopStatusUpdate()
-            updateUiOnce()
-        }
-    }
-
     private val speechLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode != RESULT_OK) return@registerForActivityResult
-        val data = result.data ?: return@registerForActivityResult
+        if (result.resultCode != RESULT_OK) {
+            appendResult("[系统] 语音识别已取消")
+            statusText.text = "语音识别已取消"
+            return@registerForActivityResult
+        }
+
+        val data = result.data
+        if (data == null) {
+            appendResult("[系统] 语音识别返回为空")
+            statusText.text = "语音识别失败"
+            return@registerForActivityResult
+        }
+
         val texts = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
         val spoken = texts?.firstOrNull()?.trim().orEmpty()
-        if (spoken.isBlank()) return@registerForActivityResult
+        if (spoken.isBlank()) {
+            appendResult("[系统] 未识别到有效文本")
+            statusText.text = "语音识别无结果"
+            return@registerForActivityResult
+        }
+
         textInput.setText(spoken)
         sendTextToBridge(spoken)
     }
@@ -125,25 +96,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         statusText = findViewById(R.id.statusText)
-        audioStatusText = findViewById(R.id.audioStatusText)
-        hostInput = findViewById(R.id.hostInput)
-        tokenInput = findViewById(R.id.tokenInput)
-        connectButton = findViewById(R.id.connectButton)
-        uplinkSwitch = findViewById(R.id.uplinkSwitch)
-        downlinkSwitch = findViewById(R.id.downlinkSwitch)
-        tuningModeGroup = findViewById(R.id.tuningModeGroup)
-        tuningModeLegacy = findViewById(R.id.tuningModeLegacy)
-        tuningModeRobust = findViewById(R.id.tuningModeRobust)
-
-        linkModeGroup = findViewById(R.id.linkModeGroup)
-        linkModeAuto = findViewById(R.id.linkModeAuto)
-        linkModeLan = findViewById(R.id.linkModeLan)
-        linkModeTunnel = findViewById(R.id.linkModeTunnel)
-        lanBaseUrlInput = findViewById(R.id.lanBaseUrlInput)
-        lanTokenInput = findViewById(R.id.lanTokenInput)
-        lanWifiRuleInput = findViewById(R.id.lanWifiRuleInput)
-        tunnelBaseUrlInput = findViewById(R.id.tunnelBaseUrlInput)
-        tunnelTokenInput = findViewById(R.id.tunnelTokenInput)
+        routeInfoText = findViewById(R.id.routeInfoText)
         sessionIdInput = findViewById(R.id.sessionIdInput)
         clientIdInput = findViewById(R.id.clientIdInput)
         textInput = findViewById(R.id.textInput)
@@ -154,21 +107,7 @@ class MainActivity : AppCompatActivity() {
 
         initTts()
         loadPrefs()
-
-        uplinkSwitch.setOnCheckedChangeListener { _, checked -> service?.setEnableUplink(checked) }
-        downlinkSwitch.setOnCheckedChangeListener { _, checked -> service?.setEnableDownlink(checked) }
-        tuningModeGroup.setOnCheckedChangeListener { _, checkedId ->
-            if (ignoreTuningModeUiChange) return@setOnCheckedChangeListener
-            val mode = if (checkedId == R.id.tuningModeLegacy) AudioTuningMode.LEGACY else AudioTuningMode.ROBUST
-            service?.setTuningMode(mode)
-        }
-
-        connectButton.setOnClickListener {
-            val snap = service?.getSnapshot()
-            val connected = snap?.wsState == AbpWebSocketClient.State.CONNECTED
-            val connecting = snap?.wsState == AbpWebSocketClient.State.CONNECTING
-            if (!connected && !connecting) connectAudioBridge() else disconnectAudioBridge()
-        }
+        refreshRouteInfo()
 
         sendTextButton.setOnClickListener {
             val text = textInput.text?.toString()?.trim().orEmpty()
@@ -179,164 +118,39 @@ class MainActivity : AppCompatActivity() {
             sendTextToBridge(text)
         }
 
-        sttButton.setOnClickListener { startSpeechToText() }
+        sttButton.setOnClickListener {
+            startSpeechToText()
+        }
+
+        if (!hasLocationPermission()) {
+            requestLocationPermission()
+        }
 
         if (!hasRecordAudioPermission()) {
             requestRecordAudioPermission()
         }
     }
 
-    override fun onStart() {
-        super.onStart()
-        bindService(Intent(this, AudioBridgeForegroundService::class.java), serviceConnection, Context.BIND_AUTO_CREATE)
+    override fun onResume() {
+        super.onResume()
+        refreshRouteInfo()
     }
 
     override fun onStop() {
         super.onStop()
-        stopStatusUpdate()
-        if (serviceBound) {
-            unbindService(serviceConnection)
-            serviceBound = false
-            service = null
-        }
         savePrefs()
     }
 
-    private fun connectAudioBridge() {
-        val host = hostInput.text?.toString()?.trim().orEmpty()
-        if (host.isBlank()) {
-            statusText.text = "请填写音频桥接 Host"
-            return
-        }
-
-        val token = tokenInput.text?.toString()?.trim().orEmpty()
-        val enableUplink = uplinkSwitch.isChecked
-        val enableDownlink = downlinkSwitch.isChecked
-        val mode = getSelectedTuningMode()
-
-        if (enableUplink && !hasRecordAudioPermission()) {
-            requestRecordAudioPermission()
-            statusText.text = "需要麦克风权限"
-            pendingStartAfterPermission = true
-            return
-        }
-
-        if (!hasPostNotificationsPermission()) {
-            requestPostNotificationsPermission()
-            statusText.text = "需要通知权限以后台保活"
-            pendingStartAfterPermission = true
-            return
-        }
-
-        pendingStartAfterPermission = false
-        startForegroundBridgeService(host, token, enableUplink, enableDownlink, mode)
-        startStatusUpdate()
-        savePrefs()
-    }
-
-    private fun disconnectAudioBridge() {
-        pendingStartAfterPermission = false
-        stopStatusUpdate()
-
-        try {
-            service?.requestStop()
-        } catch (_: Exception) {
-        }
-
-        try {
-            stopService(Intent(this, AudioBridgeForegroundService::class.java))
-        } catch (_: Exception) {
-        }
-
-        if (serviceBound) {
-            try {
-                unbindService(serviceConnection)
-            } catch (_: Exception) {
-            } finally {
-                serviceBound = false
-                service = null
-            }
-        }
-        updateUiOnce()
-    }
-
-    private fun startStatusUpdate() {
-        if (statusUpdateRunnable != null) return
-        statusUpdateRunnable = object : Runnable {
-            override fun run() {
-                updateUiOnce()
-                handler.postDelayed(this, 500)
-            }
-        }
-        statusUpdateRunnable?.let { handler.post(it) }
-    }
-
-    private fun stopStatusUpdate() {
-        statusUpdateRunnable?.let { handler.removeCallbacks(it) }
-        statusUpdateRunnable = null
-    }
-
-    private fun updateUiOnce() {
-        val snap = service?.getSnapshot()
-        if (snap == null) {
-            connectButton.text = "连接"
-            statusText.text = "音频桥接未连接"
-            audioStatusText.text = ""
-            return
-        }
-
-        connectButton.text = if (snap.wsState == AbpWebSocketClient.State.CONNECTED) "断开" else "连接"
-        statusText.text = "音频状态: ${snap.wsState}"
-
-        syncTuningModeUi(snap.tuningMode)
-
-        audioStatusText.text = buildString {
-            appendLine("Audio bridge status:")
-            appendLine("  codec: ${snap.selectedCodec}")
-            appendLine("  tuning: ${if (snap.tuningMode == AudioTuningMode.LEGACY) "Mode A" else "Mode B"}")
-            appendLine("  uplink enabled: ${snap.enableUplink}")
-            appendLine("  downlink enabled: ${snap.enableDownlink}")
-            appendLine("  mic running: ${snap.captureRunning}")
-            appendLine("  player running: ${snap.playerRunning}")
-            appendLine("  uplink frames captured: ${snap.uplinkFramesCaptured}")
-            appendLine("  uplink frames sent: ${snap.uplinkFramesSent} (suppressed ${snap.uplinkFramesSuppressed})")
-            appendLine("  uplink bytes: ${formatBytes(snap.uplinkBytesSent)}")
-            appendLine("  downlink frames played: ${snap.downlinkFramesPlayed}")
-            appendLine("  downlink frames recv: ${snap.downlinkFramesReceived}")
-            appendLine("  downlink bytes: ${formatBytes(snap.downlinkBytesReceived)}")
-            appendLine("  player buffer: ${snap.playerBufferedMs}ms")
-            appendLine("  underrun count: ${snap.playerUnderrunCount}")
-            if (!snap.lastError.isNullOrBlank()) {
-                appendLine("  last error: ${snap.lastError}")
-            }
-        }
-    }
-
-    private fun formatBytes(bytes: Long): String {
-        if (bytes < 0) return "-"
-        if (bytes < 1024) return "${bytes}B"
-        if (bytes < 1024 * 1024) return String.format("%.1fKB", bytes / 1024.0)
-        if (bytes < 1024L * 1024 * 1024) return String.format("%.1fMB", bytes / (1024.0 * 1024.0))
-        return String.format("%.2fGB", bytes / (1024.0 * 1024.0 * 1024.0))
-    }
-
-    private fun appendResult(line: String) {
-        runOnUiThread {
-            val old = textResultView.text?.toString().orEmpty()
-            val next = if (old.isBlank() || old == "(text result)") line else "$old\n$line"
-            textResultView.text = next
-        }
-    }
-
-    private fun selectedLinkMode(): LinkMode {
-        return when (linkModeGroup.checkedRadioButtonId) {
-            R.id.linkModeLan -> LinkMode.LAN
-            R.id.linkModeTunnel -> LinkMode.TUNNEL
-            else -> LinkMode.AUTO
-        }
+    override fun onDestroy() {
+        super.onDestroy()
+        releaseSpeechRecognizer()
+        tts?.stop()
+        tts?.shutdown()
+        tts = null
     }
 
     private fun currentWifiSsid(): String? {
+        if (!hasLocationPermission()) return null
         return try {
             val manager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
             val ssid = manager?.connectionInfo?.ssid?.trim()?.trim('"').orEmpty()
@@ -346,36 +160,36 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun normalizeHttpBase(url: String): String {
-        val raw = url.trim().trimEnd('/')
-        if (raw.isBlank()) return ""
-        return if (raw.startsWith("http://") || raw.startsWith("https://")) raw else "http://$raw"
+    private fun resolveBridgeEndpoint(): BridgeEndpoint {
+        val wifi = currentWifiSsid()
+        val useLan = wifi?.contains(HARDCODED_LAN_WIFI_KEYWORD, ignoreCase = true) == true
+        return if (useLan) {
+            BridgeEndpoint(LinkMode.LAN, HARDCODED_LAN_BASE_URL, wifi)
+        } else {
+            BridgeEndpoint(LinkMode.TUNNEL, HARDCODED_PUBLIC_BASE_URL, wifi)
+        }
     }
 
-    private fun resolveBridgeEndpoint(): BridgeEndpoint {
-        val lanUrl = normalizeHttpBase(lanBaseUrlInput.text?.toString().orEmpty())
-        val tunnelUrl = normalizeHttpBase(tunnelBaseUrlInput.text?.toString().orEmpty())
-        val lanToken = lanTokenInput.text?.toString()?.trim().orEmpty()
-        val tunnelToken = tunnelTokenInput.text?.toString()?.trim().orEmpty()
-        val rule = lanWifiRuleInput.text?.toString()?.trim().orEmpty()
-        val wifi = currentWifiSsid()
-
-        val mode = selectedLinkMode()
-        val endpoint = when (mode) {
-            LinkMode.LAN -> BridgeEndpoint(LinkMode.LAN, lanUrl, lanToken, wifi)
-            LinkMode.TUNNEL -> BridgeEndpoint(LinkMode.TUNNEL, tunnelUrl, tunnelToken, wifi)
-            LinkMode.AUTO -> {
-                val useLan = lanUrl.isNotBlank() && rule.isNotBlank() && (wifi?.contains(rule, ignoreCase = true) == true)
-                if (useLan) BridgeEndpoint(LinkMode.LAN, lanUrl, lanToken, wifi)
-                else if (tunnelUrl.isNotBlank()) BridgeEndpoint(LinkMode.TUNNEL, tunnelUrl, tunnelToken, wifi)
-                else BridgeEndpoint(LinkMode.LAN, lanUrl, lanToken, wifi)
-            }
+    private fun refreshRouteInfo() {
+        val endpoint = resolveBridgeEndpoint()
+        routeInfoText.text = buildString {
+            appendLine("Auto Route:")
+            appendLine("  current wifi: ${endpoint.wifiSsid ?: "N/A"}")
+            appendLine("  location perm: ${if (hasLocationPermission()) "granted" else "missing"}")
+            appendLine("  wifi keyword: $HARDCODED_LAN_WIFI_KEYWORD")
+            appendLine("  selected mode: ${endpoint.mode}")
+            appendLine("  selected base: ${endpoint.baseUrl}")
+            appendLine("  lan base: $HARDCODED_LAN_BASE_URL")
+            appendLine("  public base: $HARDCODED_PUBLIC_BASE_URL")
         }
+    }
 
-        if (endpoint.baseUrl.isBlank()) {
-            throw IllegalStateException("请配置可用的 Bridge Base URL")
+    private fun appendResult(line: String) {
+        runOnUiThread {
+            val old = textResultView.text?.toString().orEmpty()
+            val next = if (old.isBlank() || old == "(text result)") line else "$old\n$line"
+            textResultView.text = next
         }
-        return endpoint
     }
 
     private fun sendTextToBridge(text: String) {
@@ -393,7 +207,8 @@ class MainActivity : AppCompatActivity() {
                 val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
 
                 runOnUiThread {
-                    statusText.text = "文本发送中 (${endpoint.mode}, wifi=${endpoint.wifiSsid ?: "N/A"})"
+                    statusText.text = "文本发送中 (${endpoint.mode}, wifi=${endpoint.wifiSsid ?: "N/A"}, ${endpoint.baseUrl})"
+                    refreshRouteInfo()
                 }
 
                 val submitBody = JSONObject()
@@ -401,6 +216,7 @@ class MainActivity : AppCompatActivity() {
                     .put("session_id", sessionId)
                     .put("client_id", clientId)
                     .put("source", "android")
+
                 val submitResp = postJson(endpoint, "/v1/messages", submitBody)
 
                 val shown = linkedSetOf<String>()
@@ -414,7 +230,6 @@ class MainActivity : AppCompatActivity() {
 
                 val messageId = submitResp.optString("message_id").trim()
                 val initialState = submitResp.optString("status").uppercase(Locale.getDefault())
-
                 if (messageId.isNotBlank() && initialState !in setOf("DELIVERED", "FAILED")) {
                     val terminal = pollTerminal(endpoint, messageId, timeoutSec = 180, intervalMs = 1000)
                     if (terminal != null) {
@@ -474,11 +289,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun postJson(endpoint: BridgeEndpoint, path: String, body: JSONObject): JSONObject {
         val reqBody = body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-        val builder = Request.Builder().url(endpoint.baseUrl + path).post(reqBody)
-        if (endpoint.token.isNotBlank()) {
-            builder.addHeader("Authorization", "Bearer ${endpoint.token}")
-        }
-        httpClient.newCall(builder.build()).execute().use { resp ->
+        val req = Request.Builder()
+            .url(endpoint.baseUrl.trimEnd('/') + path)
+            .post(reqBody)
+            .build()
+
+        httpClient.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: $text")
             return JSONObject(text)
@@ -486,31 +302,188 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun getJson(endpoint: BridgeEndpoint, path: String): JSONObject {
-        val builder = Request.Builder().url(endpoint.baseUrl + path).get()
-        if (endpoint.token.isNotBlank()) {
-            builder.addHeader("Authorization", "Bearer ${endpoint.token}")
-        }
-        httpClient.newCall(builder.build()).execute().use { resp ->
+        val req = Request.Builder()
+            .url(endpoint.baseUrl.trimEnd('/') + path)
+            .get()
+            .build()
+
+        httpClient.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: $text")
             return JSONObject(text)
         }
     }
 
+    private fun buildRecognizerIntent(): Intent {
+        return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Locale.getDefault().toLanguageTag())
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出要发送的内容")
+            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+        }
+    }
+
     private fun startSpeechToText() {
+        if (sttListening) return
+
         if (!hasRecordAudioPermission()) {
             requestRecordAudioPermission()
             return
         }
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出要发送的内容")
-        }
-        try {
+
+        val intent = buildRecognizerIntent()
+        val canLaunchActivity = intent.resolveActivity(packageManager) != null
+        if (canLaunchActivity) {
+            statusText.text = "正在启动系统语音识别"
             speechLauncher.launch(intent)
+            return
+        }
+
+        Log.w(TAG, "No activity can handle ACTION_RECOGNIZE_SPEECH, fallback to SpeechRecognizer service")
+        startSpeechRecognizerFallback(intent)
+    }
+
+    private fun startSpeechRecognizerFallback(intent: Intent) {
+        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
+            val currentService = Settings.Secure.getString(contentResolver, "voice_recognition_service")
+            val msg = if (currentService.isNullOrBlank()) {
+                "STT不可用：系统未配置语音识别服务，请在系统语音输入设置里启用"
+            } else {
+                "STT不可用：语音识别服务不可用($currentService)"
+            }
+            appendResult("[系统] $msg")
+            statusText.text = "STT不可用"
+            openVoiceInputSettings()
+            return
+        }
+
+        releaseSpeechRecognizer()
+
+        val component = findRecognitionServiceComponent()
+        speechRecognizer = if (component != null) {
+            Log.i(TAG, "Using RecognitionService: $component")
+            SpeechRecognizer.createSpeechRecognizer(this, component)
+        } else {
+            Log.i(TAG, "Using default RecognitionService")
+            SpeechRecognizer.createSpeechRecognizer(this)
+        }
+
+        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
+            override fun onReadyForSpeech(params: Bundle?) {
+                runOnUiThread { statusText.text = "请开始说话..." }
+            }
+
+            override fun onBeginningOfSpeech() {
+                runOnUiThread { statusText.text = "识别中..." }
+            }
+
+            override fun onRmsChanged(rmsdB: Float) {}
+
+            override fun onBufferReceived(buffer: ByteArray?) {}
+
+            override fun onEndOfSpeech() {
+                runOnUiThread { statusText.text = "处理中..." }
+            }
+
+            override fun onError(error: Int) {
+                sttListening = false
+                val msg = speechErrorMessage(error)
+                appendResult("[系统] STT失败: $msg")
+                runOnUiThread { statusText.text = "语音识别失败: $msg" }
+                releaseSpeechRecognizer()
+            }
+
+            override fun onResults(results: Bundle?) {
+                sttListening = false
+                val spoken = results
+                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()
+                    ?.trim()
+                    .orEmpty()
+
+                if (spoken.isBlank()) {
+                    appendResult("[系统] 未识别到有效文本")
+                    runOnUiThread { statusText.text = "语音识别无结果" }
+                } else {
+                    runOnUiThread { textInput.setText(spoken) }
+                    sendTextToBridge(spoken)
+                }
+                releaseSpeechRecognizer()
+            }
+
+            override fun onPartialResults(partialResults: Bundle?) {}
+
+            override fun onEvent(eventType: Int, params: Bundle?) {}
+        })
+
+        try {
+            sttListening = true
+            statusText.text = "正在语音识别..."
+            speechRecognizer?.startListening(intent)
         } catch (e: Exception) {
-            appendResult("[系统] 语音识别不可用: ${e.message}")
+            sttListening = false
+            appendResult("[系统] STT启动失败: ${e.message}")
+            statusText.text = "语音识别启动失败"
+            releaseSpeechRecognizer()
+        }
+    }
+
+    private fun openVoiceInputSettings() {
+        try {
+            startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun findRecognitionServiceComponent(): ComponentName? {
+        return try {
+            val services = packageManager.queryIntentServices(
+                Intent("android.speech.RecognitionService"),
+                0,
+            )
+            if (services.isEmpty()) return null
+
+            val preferred = services.firstOrNull {
+                it.serviceInfo?.packageName == "com.google.android.googlequicksearchbox"
+            } ?: services.firstOrNull {
+                it.serviceInfo?.packageName == "com.vivo.voicerecognition"
+            } ?: services.first()
+
+            val info = preferred.serviceInfo ?: return null
+            val className = if (info.name.startsWith(".")) "${info.packageName}${info.name}" else info.name
+            ComponentName(info.packageName, className)
+        } catch (e: Exception) {
+            Log.w(TAG, "findRecognitionServiceComponent failed: ${e.message}")
+            null
+        }
+    }
+
+    private fun speechErrorMessage(error: Int): String {
+        return when (error) {
+            SpeechRecognizer.ERROR_AUDIO -> "音频采集错误"
+            SpeechRecognizer.ERROR_CLIENT -> "客户端错误"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "缺少录音权限"
+            SpeechRecognizer.ERROR_NETWORK -> "网络错误"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "网络超时"
+            SpeechRecognizer.ERROR_NO_MATCH -> "未识别到内容"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别服务忙"
+            SpeechRecognizer.ERROR_SERVER -> "识别服务异常"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "说话超时"
+            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "语言不支持"
+            SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "语言暂不可用"
+            else -> "未知错误($error)"
+        }
+    }
+
+    private fun releaseSpeechRecognizer() {
+        try {
+            speechRecognizer?.cancel()
+            speechRecognizer?.destroy()
+        } catch (_: Exception) {
+        } finally {
+            speechRecognizer = null
         }
     }
 
@@ -531,24 +504,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadPrefs() {
         val p = prefs()
-        hostInput.setText(p.getString("audioHost", ""))
-        tokenInput.setText(p.getString("audioToken", ""))
-        uplinkSwitch.isChecked = p.getBoolean("audioUplink", true)
-        downlinkSwitch.isChecked = p.getBoolean("audioDownlink", true)
-        val tuning = AudioTuningMode.fromId(p.getInt("audioTuningMode", AudioTuningMode.ROBUST.id))
-        syncTuningModeUi(tuning)
-
-        when (p.getString("linkMode", "AUTO")) {
-            "LAN" -> linkModeLan.isChecked = true
-            "TUNNEL" -> linkModeTunnel.isChecked = true
-            else -> linkModeAuto.isChecked = true
-        }
-
-        lanBaseUrlInput.setText(p.getString("lanBaseUrl", ""))
-        lanTokenInput.setText(p.getString("lanToken", ""))
-        lanWifiRuleInput.setText(p.getString("lanWifiRule", ""))
-        tunnelBaseUrlInput.setText(p.getString("tunnelBaseUrl", ""))
-        tunnelTokenInput.setText(p.getString("tunnelToken", ""))
         sessionIdInput.setText(p.getString("sessionId", "voice-bridge-session"))
         clientIdInput.setText(p.getString("clientId", "android-client"))
         speakSwitch.isChecked = p.getBoolean("speakEnabled", true)
@@ -556,18 +511,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun savePrefs() {
         val p = prefs().edit()
-        p.putString("audioHost", hostInput.text?.toString()?.trim().orEmpty())
-        p.putString("audioToken", tokenInput.text?.toString()?.trim().orEmpty())
-        p.putBoolean("audioUplink", uplinkSwitch.isChecked)
-        p.putBoolean("audioDownlink", downlinkSwitch.isChecked)
-        p.putInt("audioTuningMode", getSelectedTuningMode().id)
-
-        p.putString("linkMode", selectedLinkMode().name)
-        p.putString("lanBaseUrl", lanBaseUrlInput.text?.toString()?.trim().orEmpty())
-        p.putString("lanToken", lanTokenInput.text?.toString()?.trim().orEmpty())
-        p.putString("lanWifiRule", lanWifiRuleInput.text?.toString()?.trim().orEmpty())
-        p.putString("tunnelBaseUrl", tunnelBaseUrlInput.text?.toString()?.trim().orEmpty())
-        p.putString("tunnelToken", tunnelTokenInput.text?.toString()?.trim().orEmpty())
         p.putString("sessionId", sessionIdInput.text?.toString()?.trim().orEmpty())
         p.putString("clientId", clientIdInput.text?.toString()?.trim().orEmpty())
         p.putBoolean("speakEnabled", speakSwitch.isChecked)
@@ -579,61 +522,17 @@ class MainActivity : AppCompatActivity() {
             PackageManager.PERMISSION_GRANTED
     }
 
+    private fun hasLocationPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
     private fun requestRecordAudioPermission() {
         ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1001)
     }
 
-    private fun hasPostNotificationsPermission(): Boolean {
-        if (Build.VERSION.SDK_INT < 33) return true
-        return ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) ==
-            PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun requestPostNotificationsPermission() {
-        if (Build.VERSION.SDK_INT < 33) return
-        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1002)
-    }
-
-    private fun startForegroundBridgeService(
-        host: String,
-        token: String,
-        enableUplink: Boolean,
-        enableDownlink: Boolean,
-        tuningMode: AudioTuningMode,
-    ) {
-        val i = Intent(this, AudioBridgeForegroundService::class.java).apply {
-            action = AudioBridgeForegroundService.ACTION_START
-            putExtra(AudioBridgeForegroundService.EXTRA_HOST, host)
-            putExtra(AudioBridgeForegroundService.EXTRA_TOKEN, token)
-            putExtra(AudioBridgeForegroundService.EXTRA_ENABLE_UPLINK, enableUplink)
-            putExtra(AudioBridgeForegroundService.EXTRA_ENABLE_DOWNLINK, enableDownlink)
-            putExtra(AudioBridgeForegroundService.EXTRA_TUNING_MODE, tuningMode.id)
-        }
-        ContextCompat.startForegroundService(this, i)
-    }
-
-    private fun getSelectedTuningMode(): AudioTuningMode {
-        return if (tuningModeLegacy.isChecked) AudioTuningMode.LEGACY else AudioTuningMode.ROBUST
-    }
-
-    private fun syncTuningModeUi(mode: AudioTuningMode) {
-        ignoreTuningModeUiChange = true
-        try {
-            when (mode) {
-                AudioTuningMode.LEGACY -> tuningModeLegacy.isChecked = true
-                AudioTuningMode.ROBUST -> tuningModeRobust.isChecked = true
-            }
-        } finally {
-            ignoreTuningModeUiChange = false
-        }
-    }
-
-    override fun onDestroy() {
-        super.onDestroy()
-        stopStatusUpdate()
-        tts?.stop()
-        tts?.shutdown()
-        tts = null
+    private fun requestLocationPermission() {
+        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 1002)
     }
 
     override fun onRequestPermissionsResult(
@@ -642,20 +541,8 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-
-        if (!pendingStartAfterPermission) return
-
-        if (requestCode == 1001 || requestCode == 1002) {
-            val enableUplink = uplinkSwitch.isChecked
-            val micOk = !enableUplink || hasRecordAudioPermission()
-            val notifOk = hasPostNotificationsPermission()
-
-            if (micOk && notifOk) {
-                pendingStartAfterPermission = false
-                connectAudioBridge()
-            } else {
-                pendingStartAfterPermission = false
-            }
+        if (requestCode == 1002) {
+            refreshRouteInfo()
         }
     }
 }
