@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -44,8 +45,9 @@ RATE = 16000
 DEFAULT_GATEWAY_URL = "http://127.0.0.1:18789"
 DEFAULT_CHAT_PATH = "/api/voice-brain/chat"
 DEFAULT_HEALTH_PATH = "/api/voice-brain/health"
+DEFAULT_V1_MESSAGES_PATH = "/v1/messages"
 LOCAL_LLM_URL = "http://127.0.0.1:8765"
-LOCAL_CHAT_PATH = "/chat"
+LOCAL_CHAT_PATH = "/v1/messages"
 LOCAL_HEALTH_PATH = "/health"
 CONFIG_PATH = Path(__file__).with_name("config.json")
 
@@ -81,7 +83,8 @@ def _url_port(url: str, default_port: int) -> int:
 def _should_treat_as_local_mode(gateway_url: str, chat_path: str, force_local: bool) -> bool:
     if force_local:
         return True
-    return _is_loopback_url(gateway_url) and chat_path.strip().lower() == LOCAL_CHAT_PATH
+    normalized = chat_path.strip().lower()
+    return _is_loopback_url(gateway_url) and normalized in {LOCAL_CHAT_PATH, DEFAULT_V1_MESSAGES_PATH}
 
 
 async def ensure_local_service_if_needed(
@@ -106,9 +109,8 @@ async def ensure_local_service_if_needed(
 
     port = _url_port(client.gateway_url, default_port=8765)
     env = os.environ.copy()
-    env.setdefault("VOICE_REPLY_BACKEND", "ollama")
-    env.setdefault("VOICE_OLLAMA_ENDPOINT", "http://localhost:11434/api/generate")
-    env.setdefault("VOICE_OLLAMA_MODEL", "qwen2.5:7b")
+    env.setdefault("VOICE_OPERATOR_ENDPOINT", "http://localhost:11434/api/generate")
+    env.setdefault("VOICE_OPERATOR_MODEL", "qwen2.5:7b")
 
     creationflags = 0
     if os.name == "nt":
@@ -195,22 +197,132 @@ class AudioBridgeClient:
                 logger.error(f"连接失败: {e}")
             return None
 
-    async def send_text(self, text: str) -> Optional[dict]:
+    async def _post_json(self, path: str, payload: dict, timeout_sec: int = 120) -> tuple[int, Optional[dict], str]:
+        path = path if path.startswith("/") else f"/{path}"
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
-                    f"{self.gateway_url}{self.chat_path}",
-                    json={"text": text},
+                    f"{self.gateway_url}{path}",
+                    json=payload,
                     headers=self._headers(json_body=True),
-                    timeout=aiohttp.ClientTimeout(total=120),
+                    timeout=aiohttp.ClientTimeout(total=timeout_sec),
                 ) as resp:
+                    text = await resp.text()
                     if resp.status == 200:
-                        return await resp.json()
-                    logger.error(f"服务器错误: {resp.status} {await resp.text()}")
-                    return None
+                        try:
+                            return resp.status, json.loads(text), text
+                        except Exception:
+                            return resp.status, None, text
+                    return resp.status, None, text
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             logger.error(f"连接失败: {e}")
-            return None
+            return 0, None, str(e)
+
+    async def _get_json(self, path: str, timeout_sec: int = 30) -> tuple[int, Optional[dict], str]:
+        path = path if path.startswith("/") else f"/{path}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{self.gateway_url}{path}",
+                    headers=self._headers(json_body=False),
+                    timeout=aiohttp.ClientTimeout(total=timeout_sec),
+                ) as resp:
+                    text = await resp.text()
+                    if resp.status == 200:
+                        try:
+                            return resp.status, json.loads(text), text
+                        except Exception:
+                            return resp.status, None, text
+                    return resp.status, None, text
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.error(f"连接失败: {e}")
+            return 0, None, str(e)
+
+    @staticmethod
+    def _source_label(source: str) -> str:
+        return {
+            "local-operator": "本地接线员",
+            "openclaw": "龙虾大脑",
+            "system": "系统",
+        }.get(source, source)
+
+    @staticmethod
+    def _messages_from_v1_submit(result: dict) -> list[dict]:
+        messages = []
+        local_reply = (result.get("local_reply") or "").strip()
+        if local_reply:
+            source = result.get("local_source") or "local-operator"
+            messages.append(
+                {
+                    "source": source,
+                    "source_label": AudioBridgeClient._source_label(source),
+                    "kind": "quick_reply",
+                    "text": local_reply,
+                }
+            )
+        return messages
+
+    async def submit_text_v1(
+        self,
+        text: str,
+        *,
+        client_id: str = "windows-client",
+        session_id: str = "voice-bridge-session",
+        source: str = "windows",
+        message_id: Optional[str] = None,
+    ) -> Optional[dict]:
+        payload = {
+            "text": text,
+            "client_id": client_id,
+            "session_id": session_id,
+            "source": source,
+            "message_id": (message_id or f"msg-{uuid.uuid4().hex}"),
+        }
+        status, data, body = await self._post_json(DEFAULT_V1_MESSAGES_PATH, payload, timeout_sec=120)
+        if status == 200 and data:
+            return {"protocol": "v1", **data}
+        if status not in {404, 405}:
+            logger.error(f"V1 提交失败: {status} {body}")
+        return None
+
+    async def get_v1_message_status(self, message_id: str) -> Optional[dict]:
+        status, data, body = await self._get_json(f"{DEFAULT_V1_MESSAGES_PATH}/{message_id}", timeout_sec=30)
+        if status == 200 and data:
+            return data
+        if status not in {404, 405}:
+            logger.error(f"V1 查询失败: {status} {body}")
+        return None
+
+    async def wait_v1_terminal(
+        self,
+        message_id: str,
+        *,
+        timeout_sec: int = 180,
+        poll_interval: float = 1.0,
+    ) -> Optional[dict]:
+        started = asyncio.get_running_loop().time()
+        while True:
+            status = await self.get_v1_message_status(message_id)
+            if status:
+                state = (status.get("status") or "").upper()
+                if state in {"DELIVERED", "FAILED"}:
+                    return status
+            if asyncio.get_running_loop().time() - started >= timeout_sec:
+                return status
+            await asyncio.sleep(poll_interval)
+
+    async def send_text(self, text: str) -> Optional[dict]:
+        # Preferred V1 flow: quick local reply + async OpenClaw final reply.
+        result = await self.submit_text_v1(text)
+        if result:
+            return {"protocol": "v1", **result}
+
+        # Legacy fallback.
+        status, data, body = await self._post_json(self.chat_path, {"text": text}, timeout_sec=120)
+        if status == 200 and data:
+            return {"protocol": "legacy", **data}
+        logger.error(f"服务器错误: {status} {body}")
+        return None
 
     @staticmethod
     def list_tts_voices():
@@ -279,6 +391,35 @@ $s.GetInstalledVoices() | ForEach-Object {
                 reply = re.sub(r"^\s*\[\[[^\]]+\]\]\s*", "", reply).strip()
                 return reply
         return ""
+
+    @staticmethod
+    def _extract_messages(result: dict) -> list[dict]:
+        if result.get("protocol") == "v1" or result.get("local_reply") is not None:
+            return AudioBridgeClient._messages_from_v1_submit(result)
+        messages = result.get("messages")
+        if isinstance(messages, list):
+            filtered = []
+            for item in messages:
+                if not isinstance(item, dict):
+                    continue
+                text = (item.get("text") or "").strip()
+                if not text:
+                    continue
+                source = item.get("source") or "assistant"
+                filtered.append(
+                    {
+                        "source": source,
+                        "source_label": item.get("source_label") or AudioBridgeClient._source_label(str(source)),
+                        "kind": item.get("kind") or "reply",
+                        "text": text,
+                    }
+                )
+            if filtered:
+                return filtered
+        legacy = AudioBridgeClient._extract_reply_text(result)
+        if legacy:
+            return [{"source": "assistant", "source_label": "助手", "kind": "reply", "text": legacy}]
+        return []
 
     @staticmethod
     def _decode_mp3_to_mono_float32(audio_data: bytes):
@@ -423,11 +564,39 @@ $s.Speak($text)
             logger.warning(f"TTS 播放失败(退出码 {proc.returncode}): {err or '未知错误'}")
 
     async def print_and_speak_reply(self, result: dict):
-        reply_text = self._extract_reply_text(result)
-        if reply_text:
-            print(f"助手: {reply_text}")
-            await asyncio.to_thread(self._speak_text_windows, reply_text)
-        else:
+        printed = set()
+
+        for msg in self._extract_messages(result):
+            text = msg["text"]
+            key = (msg["source"], text)
+            if key in printed:
+                continue
+            printed.add(key)
+            print(f"[{msg['source_label']}] {text}")
+            await asyncio.to_thread(self._speak_text_windows, text)
+
+        if result.get("protocol") == "v1":
+            message_id = (result.get("message_id") or "").strip()
+            status = (result.get("status") or "").upper()
+            if message_id and status not in {"DELIVERED", "FAILED"}:
+                terminal = await self.wait_v1_terminal(message_id, timeout_sec=180, poll_interval=1.0)
+                if terminal:
+                    for msg in self._extract_messages(terminal):
+                        text = msg["text"]
+                        key = (msg["source"], text)
+                        if key in printed:
+                            continue
+                        printed.add(key)
+                        print(f"[{msg['source_label']}] {text}")
+                        await asyncio.to_thread(self._speak_text_windows, text)
+                    if (terminal.get("status") or "").upper() == "FAILED":
+                        err = (terminal.get("last_error") or "openclaw_failed").strip()
+                        print(f"[系统] 龙虾大脑回复失败：{err}")
+                else:
+                    print("[系统] 终答等待超时，稍后可重试查询。")
+            return
+
+        if not printed:
             # 若未找到正文字段，回退输出原始 JSON 便于排查
             print(json.dumps(result, ensure_ascii=False, indent=2))
 
@@ -497,6 +666,8 @@ async def main():
     parser.add_argument("--health", action="store_true", help="调用 /api/voice-brain/health")
     parser.add_argument("--voice", default=cfg.get("tts_voice", "Xiaoxiao"), help="指定 TTS 语音包名称（例如 Xiaoxiao / Microsoft Huihui Desktop）")
     parser.add_argument("--edge-voice", default=cfg.get("tts_edge_voice", "zh-CN-XiaoxiaoNeural"), help="指定 edge-tts 语音（例如 zh-CN-XiaoxiaoNeural）")
+    parser.add_argument("--session-id", default=cfg.get("openclaw_session_id", "voice-bridge-session"), help="会话 ID")
+    parser.add_argument("--client-id", default=cfg.get("client_id", "windows-cli"), help="客户端 ID")
     parser.add_argument("--list-voices", action="store_true", help="列出系统可用 TTS 语音包")
     args = parser.parse_args()
 
@@ -543,7 +714,14 @@ async def main():
             if result:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
         elif args.text:
-            result = await client.send_text(args.text)
+            result = await client.submit_text_v1(
+                args.text,
+                client_id=args.client_id,
+                session_id=args.session_id,
+                source="windows",
+            )
+            if not result:
+                result = await client.send_text(args.text)
             if result:
                 await client.print_and_speak_reply(result)
         elif args.record:
@@ -564,7 +742,14 @@ async def main():
                 elif cmd == 't':
                     text = input("输入文字: ").strip()
                     if text:
-                        result = await client.send_text(text)
+                        result = await client.submit_text_v1(
+                            text,
+                            client_id=args.client_id,
+                            session_id=args.session_id,
+                            source="windows",
+                        )
+                        if not result:
+                            result = await client.send_text(text)
                         if result:
                             await client.print_and_speak_reply(result)
                 elif cmd == 'r':

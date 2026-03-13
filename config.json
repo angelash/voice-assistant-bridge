@@ -6,7 +6,7 @@
 
   "local_gateway_url": "http://127.0.0.1:8765",
   "local_gateway_token": "",
-  "local_chat_path": "/chat",
+  "local_chat_path": "/v1/messages",
   "local_health_path": "/health",
 
   "openclaw_gateway_url": "http://127.0.0.1:18789",
@@ -20,13 +20,29 @@
   "voice_input_mode": "hold",
   "stt_model_size": "small",
 
-  "gui_mode": "openclaw",
+  "gui_mode": "local",
   "auto_start_local": true,
-  "brain_backend": "openclaw",
+  "brain_backend": "ollama",
 
   "ollama_endpoint": "http://127.0.0.1:11434/api/generate",
   "ollama_model": "qwen2.5:7b",
+  "operator_timeout": 20,
+
   "openclaw_session_id": "voice-bridge-session",
-  "openclaw_timeout": 120,
-  "notes": "默认模式为 OpenClaw Gateway。"
+  "openclaw_forward_timeout": 30,
+  "openclaw_max_retries": 5,
+  "openclaw_retry_backoff": 1.5,
+
+  "bridge_db_path": "bridge_state.db",
+  "client_id": "windows-cli",
+
+  "android_link_mode": "auto",
+  "android_lan_wifi_match_rule": "",
+  "android_lan_base_url": "",
+  "android_lan_auth_token": "",
+  "android_tunnel_enabled": true,
+  "android_tunnel_base_url": "",
+  "android_tunnel_auth_token": "",
+
+  "notes": "V1: local operator quick reply + OpenClaw reliable forwarding"
 }

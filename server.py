@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
 """
-Voice Assistant Brain Server
-
-定位：文字智能处理层。
-- Windows 端负责：唤醒词 / STT / TTS / 播放
-- 本服务负责：接收文本 -> 调回复后端 -> 返回文本
-
-兼容保留：/audio、/tts（调试用途）
-主入口：/chat
+Voice Assistant Bridge Server (V1)
 """
+
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -16,197 +11,853 @@ import base64
 import json
 import logging
 import os
+import sqlite3
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Optional
+
 from aiohttp import web
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+STATUS_NEW = "NEW"
+STATUS_LOCAL_REPLIED = "LOCAL_REPLIED"
+STATUS_FORWARDED = "FORWARDED"
+STATUS_WAITING_OPENCLAW = "WAITING_OPENCLAW"
+STATUS_RETRYING = "RETRYING"
+STATUS_OPENCLAW_RECEIVED = "OPENCLAW_RECEIVED"
+STATUS_DELIVERED = "DELIVERED"
+STATUS_FAILED = "FAILED"
+TERMINAL = {STATUS_DELIVERED, STATUS_FAILED}
+
+SOURCE_LOCAL = "local-operator"
+SOURCE_OPENCLAW = "openclaw"
+SOURCE_SYSTEM = "system"
+
+CONFIG_PATH = Path(__file__).with_name("config.json")
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def clamp_int(value: Any, fallback: int, lo: int, hi: int) -> int:
+    try:
+        iv = int(value)
+    except Exception:
+        return fallback
+    return max(lo, min(hi, iv))
+
+
+def load_config() -> dict[str, Any]:
+    if not CONFIG_PATH.exists():
+        return {}
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("read config failed: %s", exc)
+        return {}
+
+
+def source_label(source: str) -> str:
+    return {
+        SOURCE_LOCAL: "本地接线员",
+        SOURCE_OPENCLAW: "龙虾大脑",
+        SOURCE_SYSTEM: "系统",
+    }.get(source, source)
+
+
+def extract_json_obj(text: str) -> Optional[dict[str, Any]]:
+    s = text.find("{")
+    e = text.rfind("}")
+    if s < 0 or e <= s:
+        return None
+    try:
+        obj = json.loads(text[s : e + 1])
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def extract_reply_text(data: dict[str, Any]) -> str:
+    for key in ("response_text", "reply_text", "text", "answer", "content", "response"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    msg = data.get("message")
+    if isinstance(msg, dict):
+        val = msg.get("content")
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
+class Store:
+    def __init__(self, db_path: Path):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.lock = threading.RLock()
+        self._init()
+
+    def _init(self) -> None:
+        with self.lock:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_states (
+                    message_id TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    text TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    decision TEXT,
+                    decision_reason TEXT,
+                    decision_confidence REAL,
+                    local_reply TEXT,
+                    final_reply TEXT,
+                    retry_count INTEGER NOT NULL DEFAULT 0,
+                    max_retries INTEGER NOT NULL DEFAULT 5,
+                    timeout_sec INTEGER NOT NULL DEFAULT 30,
+                    last_error TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_message_session ON message_states(session_id, created_at)"
+            )
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_message_status ON message_states(status)")
+            self.conn.commit()
+
+    @staticmethod
+    def _dict(row: sqlite3.Row) -> dict[str, Any]:
+        return {k: row[k] for k in row.keys()}
+
+    def create(self, row: dict[str, Any]) -> None:
+        keys = list(row.keys())
+        cols = ", ".join(keys)
+        vals = ", ".join("?" for _ in keys)
+        with self.lock:
+            self.conn.execute(f"INSERT INTO message_states ({cols}) VALUES ({vals})", [row[k] for k in keys])
+            self.conn.commit()
+
+    def update(self, message_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        keys = list(fields.keys())
+        sets = ", ".join(f"{k}=?" for k in keys)
+        args = [fields[k] for k in keys] + [message_id]
+        with self.lock:
+            self.conn.execute(f"UPDATE message_states SET {sets} WHERE message_id=?", args)
+            self.conn.commit()
+
+    def get(self, message_id: str) -> Optional[dict[str, Any]]:
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM message_states WHERE message_id=?", (message_id,)).fetchone()
+        return self._dict(row) if row else None
+
+    def pending(self) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM message_states WHERE status IN (?, ?, ?)",
+                (STATUS_FORWARDED, STATUS_WAITING_OPENCLAW, STATUS_RETRYING),
+            ).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def recent_session(self, session_id: str, limit: int = 8) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM message_states WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def close(self) -> None:
+        with self.lock:
+            self.conn.close()
+
+
+class EventHub:
+    def __init__(self):
+        self.listeners: dict[int, tuple[web.WebSocketResponse, Optional[str], Optional[str]]] = {}
+        self.lock = asyncio.Lock()
+
+    async def register(self, ws: web.WebSocketResponse, session_id: Optional[str], client_id: Optional[str]) -> None:
+        async with self.lock:
+            self.listeners[id(ws)] = (ws, session_id, client_id)
+
+    async def unregister(self, ws: web.WebSocketResponse) -> None:
+        async with self.lock:
+            self.listeners.pop(id(ws), None)
+
+    async def publish(self, event: dict[str, Any]) -> None:
+        async with self.lock:
+            listeners = list(self.listeners.values())
+        stale: list[web.WebSocketResponse] = []
+        for ws, sid, cid in listeners:
+            if sid and sid != event.get("session_id"):
+                continue
+            if cid and cid != event.get("client_id"):
+                continue
+            try:
+                await ws.send_json(event)
+            except Exception:
+                stale.append(ws)
+        if stale:
+            async with self.lock:
+                for ws in stale:
+                    self.listeners.pop(id(ws), None)
+
+    async def close(self) -> None:
+        async with self.lock:
+            listeners = [v[0] for v in self.listeners.values()]
+            self.listeners.clear()
+        for ws in listeners:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+
+class LocalOperator:
+    def __init__(self, endpoint: str, model: str, timeout_sec: int):
+        self.endpoint = endpoint.rstrip("/")
+        self.model = model
+        self.timeout_sec = timeout_sec
+
+    def _fallback(self, text: str) -> dict[str, Any]:
+        low = text.lower()
+        keys = ("龙虾", "openclaw", "工具", "执行", "搜索", "联网", "代码", "脚本", "排查", "帮我做")
+        forward = any(k in low for k in keys) or len(text) > 45
+        return {
+            "quick_reply": "收到，我先快速处理。",
+            "decision": "forward_openclaw" if forward else "local_only",
+            "reason": "fallback_heuristic",
+            "confidence": 0.45,
+        }
+
+    async def decide(self, text: str, history: list[dict[str, Any]]) -> dict[str, Any]:
+        import aiohttp
+
+        ctx = []
+        for item in reversed(history[-6:]):
+            if item.get("text"):
+                ctx.append(f"用户: {item['text']}")
+            if item.get("final_reply"):
+                ctx.append(f"助手: {item['final_reply']}")
+        prompt = (
+            "你是语音助手接线员。仅输出 JSON。"
+            "字段 quick_reply decision reason confidence。"
+            "decision 只能是 local_only 或 forward_openclaw。"
+            f"\n上下文:\n{chr(10).join(ctx[-8:]) or '(无)'}\n用户输入:\n{text}"
+        )
+        payload = {"model": self.model, "prompt": prompt, "stream": False}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.endpoint,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=self.timeout_sec),
+                ) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"operator http {resp.status}: {await resp.text()}")
+                    data = await resp.json(content_type=None)
+            raw = extract_reply_text(data) or str(data)
+            obj = extract_json_obj(raw)
+            if not obj:
+                raise RuntimeError("operator output is not json")
+            decision = (obj.get("decision") or "").strip().lower()
+            if decision not in {"local_only", "forward_openclaw"}:
+                decision = "forward_openclaw"
+            conf = obj.get("confidence", 0.6)
+            try:
+                conf = max(0.0, min(1.0, float(conf)))
+            except Exception:
+                conf = 0.6
+            return {
+                "quick_reply": (obj.get("quick_reply") or "收到。").strip() or "收到。",
+                "decision": decision,
+                "reason": (obj.get("reason") or "local_operator").strip() or "local_operator",
+                "confidence": conf,
+            }
+        except Exception as exc:
+            logger.warning("local operator failed, fallback: %s", exc)
+            return self._fallback(text)
+
+
+class OpenClawClient:
+    def __init__(self, base_url: str, chat_path: str, token: str):
+        self.base_url = (base_url or "").rstrip("/")
+        path = (chat_path or "").strip()
+        self.chat_path = path if path.startswith("/") else f"/{path}"
+        self.token = (token or "").strip()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.base_url and self.chat_path)
+
+    async def chat(self, text: str, session_id: str, message_id: str, timeout_sec: int) -> str:
+        import aiohttp
+
+        if not self.enabled:
+            raise RuntimeError("openclaw disabled")
+        headers = {"Content-Type": "application/json", "X-Message-Id": message_id}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        payload = {"text": text, "session_id": session_id, "message_id": message_id}
+        url = f"{self.base_url}{self.chat_path}"
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
+            ) as resp:
+                if resp.status != 200:
+                    raise RuntimeError(f"openclaw http {resp.status}: {await resp.text()}")
+                data = await resp.json(content_type=None)
+        if not isinstance(data, dict):
+            raise RuntimeError("openclaw invalid payload")
+        text_out = extract_reply_text(data)
+        if not text_out:
+            raise RuntimeError(f"openclaw empty reply: {json.dumps(data, ensure_ascii=False)[:300]}")
+        return text_out
 
 
 class VoiceAssistantServer:
     def __init__(self, port: int = 8765):
         self.port = port
+        cfg = load_config()
+
+        self.default_session_id = (cfg.get("openclaw_session_id", "voice-bridge-session") or "voice-bridge-session").strip()
+        self.forward_timeout = clamp_int(cfg.get("openclaw_forward_timeout", 30), 30, 5, 300)
+        self.forward_max_retries = clamp_int(cfg.get("openclaw_max_retries", 5), 5, 1, 20)
+        self.forward_backoff = float(cfg.get("openclaw_retry_backoff", 1.5))
+
+        self.local_operator = LocalOperator(
+            endpoint=os.getenv("VOICE_OPERATOR_ENDPOINT", cfg.get("ollama_endpoint", "http://127.0.0.1:11434/api/generate")),
+            model=os.getenv("VOICE_OPERATOR_MODEL", cfg.get("ollama_model", "qwen2.5:7b")),
+            timeout_sec=clamp_int(cfg.get("operator_timeout", 20), 20, 3, 120),
+        )
+        self.openclaw = OpenClawClient(
+            base_url=os.getenv("VOICE_OPENCLAW_GATEWAY_URL", cfg.get("openclaw_gateway_url", cfg.get("gateway_url", "http://127.0.0.1:18789"))),
+            chat_path=os.getenv("VOICE_OPENCLAW_CHAT_PATH", cfg.get("openclaw_chat_path", "/api/voice-brain/chat")),
+            token=os.getenv("VOICE_OPENCLAW_GATEWAY_TOKEN", cfg.get("openclaw_gateway_token", cfg.get("gateway_token", ""))),
+        )
+        db_path = Path(cfg.get("bridge_db_path", str(Path(__file__).with_name("bridge_state.db"))))
+        self.store = Store(db_path)
+        self.events = EventHub()
+
+        self.tts_voice = os.getenv("VOICE_TTS_VOICE", cfg.get("tts_edge_voice", "zh-CN-XiaoxiaoNeural"))
         self.stt = None
-        self.reply_backend = os.getenv("VOICE_REPLY_BACKEND", "ollama").strip().lower()
-        self.llm_endpoint = os.getenv("VOICE_OLLAMA_ENDPOINT", "http://localhost:11434/api/generate")
-        self.llm_model = os.getenv("VOICE_OLLAMA_MODEL", "qwen2.5:7b")
-        self.openclaw_session_id = os.getenv("VOICE_OPENCLAW_SESSION_ID", "voice-bridge-session")
-        self.openclaw_timeout = int(os.getenv("VOICE_OPENCLAW_TIMEOUT", "120"))
-        self.tts_voice = os.getenv("VOICE_TTS_VOICE", "zh-CN-XiaoxiaoNeural")
+        self.session_locks: dict[str, asyncio.Lock] = {}
+        self.forward_tasks: dict[str, asyncio.Task[None]] = {}
 
-    async def init_models(self):
-        if self.stt is None:
-            from faster_whisper import WhisperModel
-            logger.info("加载 Whisper 模型...")
-            self.stt = WhisperModel("small", device="cpu", compute_type="int8")
-            logger.info("模型加载完成")
+    def _session_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self.session_locks.get(session_id)
+        if not lock:
+            lock = asyncio.Lock()
+            self.session_locks[session_id] = lock
+        return lock
 
-    async def transcribe_audio(self, audio_data: bytes) -> str:
-        import numpy as np
-        await self.init_models()
-        audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-        segments, _info = self.stt.transcribe(audio_array, language="zh", beam_size=5)
-        text = "".join([seg.text for seg in segments]).strip()
-        logger.info(f"识别结果: {text}")
-        return text
+    def _base_event(self, row: dict[str, Any], event_type: str) -> dict[str, Any]:
+        data = {
+            "event_type": event_type,
+            "message_id": row["message_id"],
+            "turn_id": row["turn_id"],
+            "session_id": row["session_id"],
+            "client_id": row["client_id"],
+            "status": row["status"],
+            "retry_count": row["retry_count"],
+            "max_retries": row["max_retries"],
+            "timeout_sec": row["timeout_sec"],
+            "updated_at": row["updated_at"],
+        }
+        if row.get("last_error"):
+            data["last_error"] = row["last_error"]
+        return data
 
-    async def ask_ollama(self, text: str) -> str:
-        import aiohttp
-        payload = {"model": self.llm_model, "prompt": text, "stream": False}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(self.llm_endpoint, json=payload, timeout=aiohttp.ClientTimeout(total=60)) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    raise RuntimeError(f"LLM HTTP {resp.status}: {body}")
-                result = await resp.json()
-                response_text = (result.get("response") or "").strip() or "抱歉，我这次没有组织好回复。"
-                logger.info(f"Ollama回复: {response_text}")
-                return response_text
+    async def _emit_reply(self, row: dict[str, Any], source: str, text: str, event_type: str) -> None:
+        evt = self._base_event(row, event_type)
+        evt.update({"source": source, "source_label": source_label(source), "text": text})
+        await self.events.publish(evt)
 
-    def _extract_json_text(self, output: str) -> dict:
-        start = output.find("{")
-        if start < 0:
-            raise RuntimeError(f"未找到 JSON 输出: {output[:500]}")
-        return json.loads(output[start:])
+    async def _emit_status(self, row: dict[str, Any], event_type: str, **extra: Any) -> None:
+        evt = self._base_event(row, event_type)
+        evt.update(extra)
+        await self.events.publish(evt)
 
-    async def ask_openclaw(self, text: str) -> str:
-        cmd = (
-            f'openclaw agent --session-id {self.openclaw_session_id} '
-            f'--message {json.dumps(text)} --json --timeout {self.openclaw_timeout} 2>/dev/null'
-        )
-        proc = await asyncio.create_subprocess_shell(
-            cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=os.getcwd(),
-        )
-        stdout, stderr = await proc.communicate()
-        if proc.returncode != 0:
-            err = stderr.decode("utf-8", errors="ignore")
-            out = stdout.decode("utf-8", errors="ignore")
-            raise RuntimeError(f"openclaw agent failed: code={proc.returncode}, stderr={err}, stdout={out[:1000]}")
-        parsed = self._extract_json_text(stdout.decode("utf-8", errors="ignore"))
-        payloads = (parsed.get("result") or {}).get("payloads") or []
-        texts = [p.get("text", "") for p in payloads if isinstance(p, dict) and p.get("text")]
-        response_text = "\n".join(t.strip() for t in texts if t.strip()) or "抱歉，我这次没有拿到有效回复。"
-        logger.info(f"OpenClaw回复(session={self.openclaw_session_id}): {response_text}")
-        return response_text
+    async def _local_stage(self, message_id: str) -> dict[str, Any]:
+        row = self.store.get(message_id)
+        if not row:
+            raise RuntimeError("message not found")
+        async with self._session_lock(row["session_id"]):
+            row = self.store.get(message_id)
+            if not row or row["status"] != STATUS_NEW:
+                return row or {}
 
-    async def ask_backend(self, text: str) -> str:
-        try:
-            if self.reply_backend == "openclaw":
-                return await self.ask_openclaw(text)
-            return await self.ask_ollama(text)
-        except Exception as e:
-            logger.error(f"{self.reply_backend} 回复后端失败: {e}")
-            if self.reply_backend != "ollama":
-                logger.info("回退到 ollama 后端")
+            decision = await self.local_operator.decide(row["text"], self.store.recent_session(row["session_id"]))
+            self.store.update(
+                message_id,
+                status=STATUS_LOCAL_REPLIED,
+                decision=decision["decision"],
+                decision_reason=decision["reason"],
+                decision_confidence=decision["confidence"],
+                local_reply=decision["quick_reply"],
+                updated_at=now_iso(),
+            )
+            row = self.store.get(message_id) or row
+            await self._emit_reply(row, SOURCE_LOCAL, row.get("local_reply") or "", "local_reply")
+
+            if row.get("decision") == "local_only" or not self.openclaw.enabled:
+                if row.get("decision") != "local_only" and not self.openclaw.enabled:
+                    self.store.update(
+                        message_id,
+                        decision="local_only",
+                        decision_reason=f"{row.get('decision_reason') or ''}|openclaw_disabled",
+                        updated_at=now_iso(),
+                    )
+                self.store.update(message_id, status=STATUS_DELIVERED, updated_at=now_iso())
+                row = self.store.get(message_id) or row
+                await self._emit_status(row, "delivered", source=SOURCE_LOCAL)
+                return row
+
+            self.store.update(message_id, status=STATUS_FORWARDED, updated_at=now_iso())
+            row = self.store.get(message_id) or row
+            await self._emit_status(row, "forwarded")
+            self.store.update(message_id, status=STATUS_WAITING_OPENCLAW, updated_at=now_iso())
+            row = self.store.get(message_id) or row
+            await self._emit_status(row, "waiting_openclaw")
+            self._ensure_forward_task(message_id)
+            return row
+
+    def _ensure_forward_task(self, message_id: str) -> None:
+        task = self.forward_tasks.get(message_id)
+        if task and not task.done():
+            return
+        task = asyncio.create_task(self._forward_task(message_id), name=f"forward-{message_id}")
+        self.forward_tasks[message_id] = task
+
+        def _done(t: asyncio.Task[None]) -> None:
+            self.forward_tasks.pop(message_id, None)
+            if not t.cancelled() and t.exception():
+                logger.exception("forward task failed %s: %s", message_id, t.exception())
+
+        task.add_done_callback(_done)
+
+    def _backoff(self, attempt: int) -> float:
+        return min(max(self.forward_backoff * (2 ** max(attempt - 1, 0)), 0.5), 10.0)
+
+    async def _forward_task(self, message_id: str) -> None:
+        row = self.store.get(message_id)
+        if not row or row["status"] in TERMINAL:
+            return
+        async with self._session_lock(row["session_id"]):
+            row = self.store.get(message_id)
+            if not row or row["status"] in TERMINAL or row.get("decision") != "forward_openclaw":
+                return
+            done_failures = int(row.get("retry_count") or 0)
+            max_retry = int(row.get("max_retries") or self.forward_max_retries)
+            timeout = int(row.get("timeout_sec") or self.forward_timeout)
+            for attempt in range(done_failures + 1, max_retry + 1):
                 try:
-                    return await self.ask_ollama(text)
-                except Exception as e2:
-                    logger.error(f"ollama 回退失败: {e2}")
-            return f"我听到你说：{text}。不过当前回复后端暂时失败了。"
+                    text_out = await self.openclaw.chat(row["text"], row["session_id"], row["message_id"], timeout)
+                    self.store.update(
+                        message_id,
+                        status=STATUS_OPENCLAW_RECEIVED,
+                        final_reply=text_out,
+                        retry_count=attempt - 1,
+                        last_error=None,
+                        updated_at=now_iso(),
+                    )
+                    row = self.store.get(message_id) or row
+                    await self._emit_reply(row, SOURCE_OPENCLAW, text_out, "openclaw_reply")
+                    self.store.update(message_id, status=STATUS_DELIVERED, updated_at=now_iso())
+                    row = self.store.get(message_id) or row
+                    await self._emit_status(row, "delivered", source=SOURCE_OPENCLAW)
+                    return
+                except Exception as exc:
+                    err = str(exc).strip() or exc.__class__.__name__
+                    if attempt < max_retry:
+                        backoff = self._backoff(attempt)
+                        self.store.update(
+                            message_id,
+                            status=STATUS_RETRYING,
+                            retry_count=attempt,
+                            last_error=err,
+                            updated_at=now_iso(),
+                        )
+                        row = self.store.get(message_id) or row
+                        await self._emit_status(row, "retrying", next_attempt=attempt + 1, backoff_sec=backoff)
+                        await asyncio.sleep(backoff)
+                        self.store.update(message_id, status=STATUS_WAITING_OPENCLAW, updated_at=now_iso())
+                        row = self.store.get(message_id) or row
+                        await self._emit_status(row, "waiting_openclaw")
+                        continue
+                    self.store.update(
+                        message_id,
+                        status=STATUS_FAILED,
+                        retry_count=attempt,
+                        last_error=err,
+                        updated_at=now_iso(),
+                    )
+                    row = self.store.get(message_id) or row
+                    await self._emit_status(row, "failed")
+                    return
 
-    async def synthesize_tts(self, text: str) -> bytes:
-        import edge_tts
-        communicate = edge_tts.Communicate(text, self.tts_voice)
-        tts_audio = b""
-        async for chunk in communicate.stream():
-            if chunk["type"] == "audio":
-                tts_audio += chunk["data"]
-        return tts_audio
+    async def _wait_terminal(self, message_id: str, timeout_sec: Optional[int] = None) -> dict[str, Any]:
+        timeout = timeout_sec or (self.forward_timeout * self.forward_max_retries + 10)
+        start = asyncio.get_running_loop().time()
+        while True:
+            row = self.store.get(message_id)
+            if not row:
+                raise RuntimeError("message not found")
+            if row["status"] in TERMINAL:
+                return row
+            if asyncio.get_running_loop().time() - start >= timeout:
+                return row
+            await asyncio.sleep(0.5)
 
-    def _chat_payload(self, text: str, response_text: str) -> dict:
+    async def submit(
+        self,
+        *,
+        text: str,
+        client_id: str,
+        session_id: str,
+        source: str,
+        message_id: Optional[str] = None,
+        turn_id: Optional[str] = None,
+        wait_terminal: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
+        text = (text or "").strip()
+        if not text:
+            raise ValueError("text is required")
+        message_id = (message_id or "").strip() or f"msg-{uuid.uuid4().hex}"
+        turn_id = (turn_id or "").strip() or f"turn-{uuid.uuid4().hex}"
+        session_id = (session_id or "").strip() or self.default_session_id or f"session-{uuid.uuid4().hex}"
+        client_id = (client_id or "").strip() or f"client-{uuid.uuid4().hex}"
+        source = (source or "windows").strip() or "windows"
+
+        existing = self.store.get(message_id)
+        if existing:
+            return existing, True
+
+        ts = now_iso()
+        self.store.create(
+            {
+                "message_id": message_id,
+                "client_id": client_id,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "source": source,
+                "text": text,
+                "status": STATUS_NEW,
+                "decision": None,
+                "decision_reason": None,
+                "decision_confidence": None,
+                "local_reply": None,
+                "final_reply": None,
+                "retry_count": 0,
+                "max_retries": self.forward_max_retries,
+                "timeout_sec": self.forward_timeout,
+                "last_error": None,
+                "created_at": ts,
+                "updated_at": ts,
+            }
+        )
+        row = self.store.get(message_id)
+        if not row:
+            raise RuntimeError("create message failed")
+        await self._emit_status(row, "accepted")
+        row = await self._local_stage(message_id)
+        if wait_terminal and row.get("status") not in TERMINAL:
+            row = await self._wait_terminal(message_id)
+        return row, False
+
+    @staticmethod
+    def _messages_list(row: dict[str, Any]) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        local_text = (row.get("local_reply") or "").strip()
+        final_text = (row.get("final_reply") or "").strip()
+        if local_text:
+            out.append({"source": SOURCE_LOCAL, "source_label": source_label(SOURCE_LOCAL), "kind": "quick_reply", "text": local_text})
+        if final_text:
+            out.append({"source": SOURCE_OPENCLAW, "source_label": source_label(SOURCE_OPENCLAW), "kind": "final_reply", "text": final_text})
+        if row.get("status") == STATUS_FAILED:
+            out.append(
+                {
+                    "source": SOURCE_SYSTEM,
+                    "source_label": source_label(SOURCE_SYSTEM),
+                    "kind": "error",
+                    "text": f"龙虾大脑回复失败：{(row.get('last_error') or 'unknown').strip()}",
+                }
+            )
+        return out
+
+    def _submit_resp(self, row: dict[str, Any], deduped: bool) -> dict[str, Any]:
         return {
             "ok": True,
-            "input_text": text,
-            "response_text": response_text,
-            "reply_backend": self.reply_backend,
-            "session_id": self.openclaw_session_id if self.reply_backend == "openclaw" else None,
+            "accepted": True,
+            "deduped": deduped,
+            "message_id": row["message_id"],
+            "turn_id": row["turn_id"],
+            "session_id": row["session_id"],
+            "client_id": row["client_id"],
+            "status": row["status"],
+            "decision": row.get("decision"),
+            "reason": row.get("decision_reason"),
+            "confidence": row.get("decision_confidence"),
+            "local_reply": row.get("local_reply"),
+            "local_source": SOURCE_LOCAL if row.get("local_reply") else None,
+            "local_source_label": source_label(SOURCE_LOCAL) if row.get("local_reply") else None,
+            "retry": {"count": row.get("retry_count", 0), "max": row.get("max_retries", self.forward_max_retries), "timeout_sec": row.get("timeout_sec", self.forward_timeout)},
+            "updated_at": row.get("updated_at"),
         }
+
+    def _status_resp(self, row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "message_id": row["message_id"],
+            "turn_id": row["turn_id"],
+            "session_id": row["session_id"],
+            "client_id": row["client_id"],
+            "source": row["source"],
+            "text": row["text"],
+            "status": row["status"],
+            "decision": row.get("decision"),
+            "reason": row.get("decision_reason"),
+            "confidence": row.get("decision_confidence"),
+            "messages": self._messages_list(row),
+            "retry": {"count": row.get("retry_count", 0), "max": row.get("max_retries", self.forward_max_retries), "timeout_sec": row.get("timeout_sec", self.forward_timeout)},
+            "last_error": row.get("last_error"),
+            "created_at": row.get("created_at"),
+            "updated_at": row.get("updated_at"),
+        }
+
+    async def handle_v1_submit(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+        text = (data.get("text") or "").strip()
+        if not text:
+            return web.json_response({"ok": False, "error": "text is required"}, status=400)
+        try:
+            row, deduped = await self.submit(
+                text=text,
+                client_id=(data.get("client_id") or "windows-client"),
+                session_id=(data.get("session_id") or self.default_session_id),
+                source=(data.get("source") or "windows"),
+                message_id=data.get("message_id"),
+                turn_id=data.get("turn_id"),
+                wait_terminal=False,
+            )
+            return web.json_response(self._submit_resp(row, deduped))
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+        except Exception as exc:
+            logger.exception("handle_v1_submit failed")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def handle_v1_status(self, request: web.Request) -> web.Response:
+        message_id = (request.match_info.get("message_id") or "").strip()
+        if not message_id:
+            return web.json_response({"ok": False, "error": "message_id required"}, status=400)
+        row = self.store.get(message_id)
+        if not row:
+            return web.json_response({"ok": False, "error": "message_not_found"}, status=404)
+        return web.json_response(self._status_resp(row))
+
+    async def handle_v1_events(self, request: web.Request) -> web.StreamResponse:
+        ws = web.WebSocketResponse(heartbeat=30)
+        await ws.prepare(request)
+        sid = request.query.get("session_id")
+        cid = request.query.get("client_id")
+        await self.events.register(ws, sid, cid)
+        await ws.send_json({"event_type": "connected", "status": "ok", "session_id": sid, "client_id": cid, "timestamp": now_iso()})
+        try:
+            async for msg in ws:
+                if msg.type == web.WSMsgType.TEXT and (msg.data or "").strip().lower() in {"ping", "heartbeat"}:
+                    await ws.send_json({"event_type": "pong", "timestamp": now_iso()})
+                elif msg.type in {web.WSMsgType.ERROR, web.WSMsgType.CLOSE, web.WSMsgType.CLOSING}:
+                    break
+        finally:
+            await self.events.unregister(ws)
+        return ws
 
     async def handle_chat(self, request: web.Request) -> web.Response:
         try:
             data = await request.json()
             text = (data.get("text") or "").strip()
             if not text:
-                return web.json_response({"ok": False, "error": "需要 text 参数"}, status=400)
-            response_text = await self.ask_backend(text)
-            return web.json_response(self._chat_payload(text, response_text))
-        except Exception as e:
-            logger.error(f"Chat 错误: {e}")
-            return web.json_response({"ok": False, "error": str(e)}, status=500)
+                return web.json_response({"ok": False, "error": "text is required"}, status=400)
+            row, _ = await self.submit(
+                text=text,
+                client_id="legacy-chat-client",
+                session_id=(data.get("session_id") or self.default_session_id),
+                source="legacy-chat",
+                message_id=data.get("message_id"),
+                turn_id=data.get("turn_id"),
+                wait_terminal=True,
+            )
+            reply = (row.get("final_reply") or row.get("local_reply") or "").strip()
+            return web.json_response(
+                {
+                    "ok": row["status"] != STATUS_FAILED,
+                    "message_id": row["message_id"],
+                    "input_text": text,
+                    "response_text": reply,
+                    "status": row["status"],
+                    "reply_backend": SOURCE_OPENCLAW if row.get("final_reply") else SOURCE_LOCAL,
+                    "session_id": row["session_id"],
+                    "last_error": row.get("last_error"),
+                }
+            )
+        except Exception as exc:
+            logger.exception("handle_chat failed")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    async def init_models(self) -> None:
+        if self.stt is None:
+            from faster_whisper import WhisperModel
+
+            logger.info("loading Whisper model for /audio")
+            self.stt = WhisperModel("small", device="cpu", compute_type="int8")
+
+    async def transcribe_audio(self, audio_data: bytes) -> str:
+        import numpy as np
+
+        await self.init_models()
+        arr = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+        segments, _ = self.stt.transcribe(arr, language="zh", beam_size=5)
+        return "".join(seg.text for seg in segments).strip()
+
+    async def synthesize_tts(self, text: str) -> bytes:
+        import edge_tts
+
+        communicate = edge_tts.Communicate(text, self.tts_voice)
+        chunks: list[bytes] = []
+        async for chunk in communicate.stream():
+            if chunk.get("type") == "audio":
+                chunks.append(chunk["data"])
+        return b"".join(chunks)
 
     async def handle_audio(self, request: web.Request) -> web.Response:
         try:
             audio_data = await request.read()
-            logger.info(f"收到音频: {len(audio_data)} 字节")
             if not audio_data:
-                return web.json_response({"ok": False, "error": "空音频"}, status=400)
+                return web.json_response({"ok": False, "error": "empty_audio"}, status=400)
             text = await self.transcribe_audio(audio_data)
             if not text:
-                return web.json_response({"ok": False, "error": "无法识别"}, status=400)
-            response_text = await self.ask_backend(text)
-            payload = self._chat_payload(text, response_text)
-            tts_audio = await self.synthesize_tts(response_text)
-            payload.update({
-                "tts_audio_base64": base64.b64encode(tts_audio).decode("ascii"),
-                "tts_size": len(tts_audio),
-                "tts_content_type": "audio/mpeg",
-                "debug_interface": True,
-            })
-            return web.json_response(payload)
-        except Exception as e:
-            logger.exception("处理错误")
-            return web.json_response({"ok": False, "error": str(e)}, status=500)
+                return web.json_response({"ok": False, "error": "stt_failed"}, status=400)
+            row, _ = await self.submit(
+                text=text,
+                client_id="legacy-audio-client",
+                session_id=self.default_session_id,
+                source="legacy-audio",
+                wait_terminal=True,
+            )
+            reply = (row.get("final_reply") or row.get("local_reply") or "").strip()
+            tts_audio = await self.synthesize_tts(reply) if reply else b""
+            return web.json_response(
+                {
+                    "ok": row["status"] != STATUS_FAILED,
+                    "message_id": row["message_id"],
+                    "input_text": text,
+                    "response_text": reply,
+                    "status": row["status"],
+                    "reply_backend": SOURCE_OPENCLAW if row.get("final_reply") else SOURCE_LOCAL,
+                    "last_error": row.get("last_error"),
+                    "tts_audio_base64": base64.b64encode(tts_audio).decode("ascii"),
+                    "tts_size": len(tts_audio),
+                    "tts_content_type": "audio/mpeg",
+                }
+            )
+        except Exception as exc:
+            logger.exception("handle_audio failed")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
     async def handle_tts(self, request: web.Request) -> web.Response:
         try:
             data = await request.json()
-            text = data.get("text", "")
+            text = (data.get("text") or "").strip()
             if not text:
-                return web.json_response({"ok": False, "error": "需要 text 参数"}, status=400)
+                return web.json_response({"ok": False, "error": "text is required"}, status=400)
             tts_audio = await self.synthesize_tts(text)
             return web.Response(body=tts_audio, content_type="audio/mpeg")
-        except Exception as e:
-            logger.error(f"TTS 错误: {e}")
-            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        except Exception as exc:
+            logger.exception("handle_tts failed")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
-    async def handle_health(self, request: web.Request) -> web.Response:
-        return web.json_response({
-            "status": "ok",
-            "role": "text-brain",
-            "reply_backend": self.reply_backend,
-            "ollama_endpoint": self.llm_endpoint,
-            "ollama_model": self.llm_model,
-            "openclaw_session_id": self.openclaw_session_id,
-            "tts_voice": self.tts_voice,
-            "debug_audio_supported": True,
-        })
+    async def handle_health(self, _request: web.Request) -> web.Response:
+        return web.json_response(
+            {
+                "status": "ok",
+                "role": "voice-bridge-v1",
+                "routes": {
+                    "submit": "/v1/messages",
+                    "status": "/v1/messages/{message_id}",
+                    "events": "/v1/events",
+                    "legacy_chat": "/chat",
+                },
+                "local_operator_endpoint": self.local_operator.endpoint,
+                "local_operator_model": self.local_operator.model,
+                "openclaw_gateway": f"{self.openclaw.base_url}{self.openclaw.chat_path}",
+                "openclaw_enabled": self.openclaw.enabled,
+                "forward_timeout_sec": self.forward_timeout,
+                "forward_max_retries": self.forward_max_retries,
+                "default_session_id": self.default_session_id,
+            }
+        )
+
+    async def on_startup(self, _app: web.Application) -> None:
+        pend = self.store.pending()
+        if not pend:
+            return
+        logger.info("recovering %d pending messages", len(pend))
+        for row in pend:
+            self._ensure_forward_task(row["message_id"])
+
+    async def on_shutdown(self, _app: web.Application) -> None:
+        for task in list(self.forward_tasks.values()):
+            task.cancel()
+        if self.forward_tasks:
+            await asyncio.gather(*self.forward_tasks.values(), return_exceptions=True)
+        await self.events.close()
+        self.store.close()
 
     def create_app(self) -> web.Application:
         app = web.Application()
+        app.router.add_post("/v1/messages", self.handle_v1_submit)
+        app.router.add_get("/v1/messages/{message_id}", self.handle_v1_status)
+        app.router.add_get("/v1/events", self.handle_v1_events)
         app.router.add_post("/chat", self.handle_chat)
         app.router.add_get("/health", self.handle_health)
         app.router.add_post("/audio", self.handle_audio)
         app.router.add_post("/tts", self.handle_tts)
+        app.on_startup.append(self.on_startup)
+        app.on_shutdown.append(self.on_shutdown)
         return app
 
-    def run(self):
+    def run(self) -> None:
         web.run_app(self.create_app(), host="0.0.0.0", port=self.port)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="语音助手文字脑服务")
-    parser.add_argument("--port", type=int, default=8765, help="监听端口")
+    parser = argparse.ArgumentParser(description="Voice Assistant Bridge V1 server")
+    parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
-
-    server = VoiceAssistantServer(args.port)
-    print(f"启动文字脑服务，端口: {args.port}")
-    print(f"回复后端: {server.reply_backend}")
-    print("主接口:")
-    print("  POST /chat   - 文本输入 -> 文本回复")
-    print("  GET  /health - 健康检查")
-    print("兼容调试接口:")
-    print("  POST /audio  - PCM音频 -> 文本/语音回复")
-    print("  POST /tts    - 文字转语音")
-    server.run()
+    srv = VoiceAssistantServer(args.port)
+    print(f"Bridge server listening on :{args.port}")
+    print("POST /v1/messages")
+    print("GET  /v1/messages/{message_id}")
+    print("GET  /v1/events (websocket)")
+    print("POST /chat (legacy)")
+    srv.run()

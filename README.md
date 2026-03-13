@@ -1,78 +1,68 @@
-# Voice Assistant Bridge (Windows Shell)
+# Voice Assistant Bridge
 
-这是 **Windows 端语音壳**。
+Windows 语音助手桥接工程（V1）：
 
-## 当前正式对接方式
+- 本地模型做低延迟接线员回复
+- 本地模型做路由决策（是否转发 OpenClaw）
+- OpenClaw 负责深度能力与扩展
+- 反馈丢失可检测并自动重发（30 秒超时，最多 5 次）
+- 统一文本入口，Windows/Android 输入走同一管线
 
-Windows 端现在直接对接 **OpenClaw Gateway 原生插件 `voice-brain`**。
+## 核心组件
 
-已验证可用的接口：
-- `GET /api/voice-brain/health`
-- `POST /api/voice-brain/chat`
+- `server.py`：Bridge 服务（V1 接口 + 状态机 + 重试 + SQLite 持久化）
+- `windows_client.py`：Windows CLI 客户端
+- `windows_gui.py`：Windows GUI 客户端（文本/语音输入）
+- `config.json`：本地与 OpenClaw 配置
+- `REQUIREMENTS_V1.md`：需求归档
 
-默认配置写在：
-- `config.json`
+## 快速启动
 
-## 先做什么
-
-### 1. 测试 Gateway 插件接口
-
-PowerShell：
-
-```powershell
-.\test_voice_brain.ps1
-```
-
-### 2. 用 Python 客户端测 health
+1. 安装依赖
 
 ```powershell
-python windows_client.py --health
+pip install -r requirements.txt
 ```
 
-### 3. 用 Python 客户端测文字对话
+2. 启动 Bridge 服务（本地）
 
 ```powershell
-python windows_client.py --text "你好"
+python server.py --port 8765
 ```
 
-## 当前职责
-
-Windows 侧负责：
-- wakeword
-- 录音
-- STT
-- TTS
-- 播放
-
-Gateway 插件负责：
-- 文本智能处理
-
-## 注意
-
-当前 `record` / `continuous` 还只是录音壳，**不会直接把音频发给 Gateway**。
-
-因为当前正式架构已经收敛为：
-- Windows 侧先做 STT
-- 再把文本发给 `/api/voice-brain/chat`
-
-## GUI Client (New)
-
-Install GUI dependencies:
-
-```powershell
-pip install PySide6 qasync
-```
-
-Start GUI:
+3. 启动 Windows GUI
 
 ```powershell
 run_windows_gui.bat
 ```
 
-Features:
-- local / OpenClaw mode switch
-- health check
-- text chat
-- voice input: hold-to-talk and toggle-record
-- TTS playback
-- settings dialog for advanced options
+4. 或使用 CLI（本地模式）
+
+```powershell
+run_windows_client_local.bat --text "你好"
+```
+
+## V1 API（本地服务）
+
+- `POST /v1/messages`：提交文本，立即返回本地首答和消息状态
+- `GET /v1/messages/{message_id}`：查询终态与来源消息列表
+- `GET /v1/events`：WebSocket 事件流（可选）
+- 兼容保留：`POST /chat`、`POST /audio`、`POST /tts`、`GET /health`
+
+## 配置重点
+
+`config.json` 中重点字段：
+
+- `local_chat_path`: 建议 `/v1/messages`
+- `openclaw_forward_timeout`: 默认 `30`
+- `openclaw_max_retries`: 默认 `5`
+- `openclaw_retry_backoff`: 默认 `1.5`
+- `bridge_db_path`: 消息状态持久化数据库
+
+## Android 基线
+
+Android 工程基线路径：
+
+- `F:\workspace\github\MyChatGPT\src\android\AudioBridgeClient`
+
+约束：技术方案和默认设置按该工程对齐，在其基础上扩展双链路与文本上行能力。

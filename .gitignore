@@ -28,6 +28,7 @@ htmlcov/
 *.tmp
 *.temp
 test_output.mp3
+bridge_state.db
 
 # IDE/editor
 .vscode/

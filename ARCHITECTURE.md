@@ -1,45 +1,53 @@
-# Voice Assistant Architecture
+# Voice Assistant Bridge Architecture (V1)
 
-## 分层
+## 1. 分层
 
-### 1. Windows Voice Shell
-位置：
-- 开发源：`/home/shash/clawd/apps/voice-assistant-bridge-windows/`
-- Windows 交付：`F:\workspace\voice-assistant-bridge`
+### 1.1 Client Layer
 
-职责：
-- wakeword
-- 录音
-- STT
-- 本地 TTS
-- 本地播放
-- 调用文字脑接口
+- Windows GUI / CLI
+- Android App（基线：`AudioBridgeClient`）
+- 职责：输入文本、展示追加回复、语音采集与播报
 
-### 2. OpenClaw Text Brain
-位置：
-- `skills/voice-text-brain/`
+### 1.2 Bridge Layer (`server.py`)
 
-职责：
-- `/chat` 接口
-- backend 切换（`openclaw` / `ollama`）
-- 专用语音 session
-- 文本智能处理
+- 统一入口：`/v1/messages`
+- 本地接线员：快速首答 + 路由决策
+- 可靠转发：OpenClaw 超时检测与重试
+- 状态追踪：SQLite 持久化
+- 事件推送：`/v1/events`
 
-### 3. Legacy Sandbox
-位置：
-- `voice-assistant/`
+### 1.3 Brain Layer
 
-职责：
-- 保留早期实验材料
-- 不再承担最终产品主架构职责
+- Local Operator（Ollama）
+- OpenClaw（深度能力与扩展）
 
-## 主链路
+## 2. 主链路
 
 ```text
-Windows Voice Shell
-  -> STT
-  -> POST /chat
-  -> OpenClaw Text Brain
-  -> response_text
-  -> Windows TTS/playback
+Input text (Windows / Android)
+  -> POST /v1/messages
+  -> Local operator quick reply + decision
+  -> append [本地接线员]
+  -> if forward_openclaw:
+       send to OpenClaw with message_id
+       timeout 30s, retry <= 5
+  -> append [龙虾大脑] or [系统失败提示]
 ```
+
+## 3. 状态机
+
+- `NEW`
+- `LOCAL_REPLIED`
+- `FORWARDED`
+- `WAITING_OPENCLAW`
+- `RETRYING`
+- `OPENCLAW_RECEIVED`
+- `DELIVERED`
+- `FAILED`
+
+## 4. 一致性与可靠性
+
+- 每条消息包含 `session_id + turn_id + message_id + client_id`
+- 同一 `session_id` 使用串行锁保证顺序
+- 至少一次投递语义 + 幂等 `message_id`
+- 未完成消息重启后自动恢复重试

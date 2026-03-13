@@ -1,85 +1,104 @@
-# Voice Brain HTTP API
+# Voice Bridge HTTP API (V1)
 
-当前已验证可用的 Gateway 原生插件接口为：
+默认本地地址：
 
-- `GET /api/voice-brain/health`
-- `POST /api/voice-brain/chat`
+- `http://127.0.0.1:8765`
 
-基础地址：
+鉴权：
 
-```text
-http://127.0.0.1:18789
-```
+- 如配置了 token，走 `Authorization: Bearer <token>`
 
-需要携带 Gateway token：
+## 1. POST `/v1/messages`
 
-```text
-Authorization: Bearer <gateway-token>
-```
+提交文本消息，返回本地接线员首答并进入异步流程。
 
-## 1. GET /api/voice-brain/health
-
-### Response
+请求示例：
 
 ```json
 {
-  "status": "ok",
-  "role": "text-brain-plugin",
-  "route": "/api/voice-brain/chat",
-  "backend": "openclaw",
-  "sessionId": "voice-bridge-session"
+  "text": "帮我整理今天的工作计划",
+  "client_id": "windows-cli",
+  "session_id": "voice-bridge-session",
+  "source": "windows",
+  "message_id": "msg-123"
 }
 ```
 
-## 2. POST /api/voice-brain/chat
-
-### Request
-
-```json
-{
-  "text": "你好"
-}
-```
-
-### Response
+响应示例：
 
 ```json
 {
   "ok": true,
-  "input_text": "你好",
-  "response_text": "你好。",
-  "reply_backend": "openclaw",
-  "session_id": "voice-bridge-session"
+  "accepted": true,
+  "deduped": false,
+  "message_id": "msg-123",
+  "status": "WAITING_OPENCLAW",
+  "decision": "forward_openclaw",
+  "local_reply": "收到，我先快速处理。",
+  "local_source": "local-operator",
+  "local_source_label": "本地接线员",
+  "retry": {
+    "count": 0,
+    "max": 5,
+    "timeout_sec": 30
+  }
 }
 ```
 
-## 推荐架构
+## 2. GET `/v1/messages/{message_id}`
 
-- Windows 端负责：wakeword / STT / TTS / 播放
-- Gateway 插件负责：文字智能处理
+查询消息状态和来源消息列表（追加展示用）。
 
-也就是：
+响应示例：
 
-- Windows = 耳朵 + 嘴巴
-- OpenClaw = 脑子
-
-## PowerShell 示例
-
-### health
-
-```powershell
-$headers = @{ Authorization = "Bearer <gateway-token>" }
-Invoke-RestMethod -Uri "http://127.0.0.1:18789/api/voice-brain/health" -Method Get -Headers $headers
-```
-
-### chat
-
-```powershell
-$headers = @{
-  Authorization = "Bearer <gateway-token>"
-  "Content-Type" = "application/json"
+```json
+{
+  "ok": true,
+  "message_id": "msg-123",
+  "status": "DELIVERED",
+  "messages": [
+    {
+      "source": "local-operator",
+      "source_label": "本地接线员",
+      "kind": "quick_reply",
+      "text": "收到，我先快速处理。"
+    },
+    {
+      "source": "openclaw",
+      "source_label": "龙虾大脑",
+      "kind": "final_reply",
+      "text": "这是详细计划..."
+    }
+  ],
+  "retry": {
+    "count": 1,
+    "max": 5,
+    "timeout_sec": 30
+  }
 }
-
-$body = @{ text = "你好" } | ConvertTo-Json
-Invoke-RestMethod -Uri "http://127.0.0.1:18789/api/voice-brain/chat" -Method Post -Headers $headers -Body $body
 ```
+
+## 3. GET `/v1/events` (WebSocket)
+
+用于推送：
+
+- `accepted`
+- `local_reply`
+- `forwarded`
+- `waiting_openclaw`
+- `retrying`
+- `openclaw_reply`
+- `delivered`
+- `failed`
+
+支持 query 过滤：
+
+- `session_id`
+- `client_id`
+
+## 4. 兼容接口
+
+- `GET /health`
+- `POST /chat`
+- `POST /audio`
+- `POST /tts`
