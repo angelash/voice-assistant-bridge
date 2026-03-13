@@ -45,5 +45,8 @@ dependencies {
 
     // 传输层（后续 WP4 使用）
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("com.google.code.gson:gson:2.8.8")
+    implementation(files("libs/SparkChain.aar"))
+    implementation(files("libs/Codec.aar"))
 }
 

@@ -1,0 +1,17 @@
+<resources>
+    <string name="app_name">SparkChainDemo</string>
+    <!-->您的APPID三元组，请从控制台https://console.xfyun.cn/services/iat 中查看三元组的值，填入此处。<-->
+    <string name="appid"></string>
+    <string name="apiSecret"></string>
+    <string name="apikey"></string>
+<!--    &lt;!&ndash;>您的RAASRAPIKEY，请从控制台https://console.xfyun.cn/services/lfasr 中查看SecretKey的值，填入此处。<&ndash;&gt;-->
+    <string name="RAASRAPIKEY"></string>
+<!--    &lt;!&ndash;>您的RTASRAPIKEY，请从控制台 https://console.xfyun.cn/services/rta 中查看APIKey的值填入此处。<&ndash;&gt;-->
+    <string name="RTASRAPIKEY"></string>
+    <string name="TTS_TEXT">科大讯飞成立于1999年，总部位于合肥，是中国人工智能领域领军企业，专注智能语音、自然语言处理及认知智能技术研发。其语音合成、语音识别等核心能力国际领先，产品覆盖教育、医疗、办公等领域，赋能全球开发者超600万，系亚太地区最具价值AI企业之一。</string>
+</resources>
+
+
+
+
+

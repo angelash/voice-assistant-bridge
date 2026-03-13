@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".llm.online_llm.image_understanding.ImageUnderstanding">
+
+    <TextView
+        android:id="@+id/online_llm_image_understanding_Notification"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_above="@+id/online_llm_image_understanding_input"
+        android:layout_alignParentTop="true"
+        android:scrollbars="vertical" />
+
+    <LinearLayout
+        android:id="@+id/online_llm_image_understanding_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginLeft="10dp"
+        android:layout_marginRight="10dp"
+        android:layout_above="@+id/online_llm_image_understanding_operation"
+        android:orientation="horizontal">
+        <Button
+            android:id="@+id/online_llm_image_understanding_imginput"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_weight="2"
+            android:text="传入图片"/>
+        <EditText
+            android:id="@+id/online_llm_image_understanding_input_text"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_weight="1"
+            android:hint="用户输入"/>
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/online_llm_image_understanding_operation"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:layout_marginLeft="10dp"
+        android:layout_marginRight="10dp"
+        android:layout_marginBottom="10dp"
+        android:orientation="horizontal">
+        <Button
+            android:id="@+id/online_llm_image_understanding_arun_start_btn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="SEND"/>
+        <Button
+            android:id="@+id/online_llm_image_understanding_arun_stop_btn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="STOP"/>
+    </LinearLayout>
+
+
+</RelativeLayout>

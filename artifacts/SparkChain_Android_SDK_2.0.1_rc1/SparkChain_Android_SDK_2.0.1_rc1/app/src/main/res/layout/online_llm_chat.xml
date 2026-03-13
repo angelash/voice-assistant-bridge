@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    tools:context=".llm.online_llm.chat.ChatActivity">
+
+    <TextView
+        android:id="@+id/online_llm_chat_notification"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_above="@+id/online_llm_chat_input"
+        android:layout_alignParentTop="true"
+        android:layout_marginTop="0dp"
+        android:layout_marginBottom="0dp"
+        android:scrollbars="vertical" />
+
+    <EditText
+        android:layout_above="@+id/online_llm_chat_linearLayout"
+        android:id="@+id/online_llm_chat_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="用户输入"/>
+
+    <LinearLayout
+        android:id="@+id/online_llm_chat_linearLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:layout_marginLeft="10dp"
+        android:layout_marginRight="10dp"
+        android:layout_marginBottom="10dp"
+        android:orientation="horizontal">
+        <Button
+            android:id="@+id/online_llm_chat_start"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="SEND"/>
+        <Button
+            android:id="@+id/online_llm_chat_stop"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="STOP"/>
+    </LinearLayout>
+
+
+</RelativeLayout>

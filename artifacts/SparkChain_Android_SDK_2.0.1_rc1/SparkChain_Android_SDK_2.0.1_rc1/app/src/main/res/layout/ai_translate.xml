@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:focusable="true"
+    android:focusableInTouchMode="true">
+    <TextView
+        android:id="@+id/ai_trans_result_info"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:textColor="#333333"
+        android:textSize="16dp"
+        android:text="翻译结果："/>
+
+    <TextView
+        android:id="@+id/ai_trans_result"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="#333333"
+        android:scrollbars="vertical"
+        android:layout_below="@+id/ai_trans_result_info"
+        android:layout_above="@+id/ai_trans_language_layout"
+        android:textSize="16sp"/>
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:id = "@+id/ai_trans_language_layout"
+        android:layout_above="@+id/ai_trans_input_info"
+        android:orientation="vertical">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="horizontal"
+            >
+            <TextView
+                android:id="@+id/ai_trans_language_info"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:gravity="center"
+                android:text="选择语种："
+                android:textColor="#333333"
+                android:textSize="15dp" />
+            <Spinner
+                android:id="@+id/ai_trans_language"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent" />
+
+        </LinearLayout>
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="horizontal"
+            >
+            <TextView
+                android:id="@+id/ai_trans_itrans_type_info"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:text="翻译类型："
+                android:gravity="center"
+                android:textColor="#333333"
+                android:textSize="15dp" />
+            <Spinner
+                android:id="@+id/ai_trans_itrans_type"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent" />
+
+        </LinearLayout>
+
+
+    </LinearLayout>
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:textColor="#333333"
+        android:id = "@+id/ai_trans_input_info"
+        android:layout_above="@+id/ai_trans_input"
+        android:textSize="16dp"
+        android:text="输入翻译内容："/>
+    <EditText
+        android:id="@+id/ai_trans_input"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_above="@+id/ai_trans_translate_btn"
+        android:textColor="#333333" />
+    <Button
+        android:id="@+id/ai_trans_translate_btn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:text="翻译"
+        android:layout_marginBottom="10dp"
+        android:textColor="#ffffff" />
+    </RelativeLayout>

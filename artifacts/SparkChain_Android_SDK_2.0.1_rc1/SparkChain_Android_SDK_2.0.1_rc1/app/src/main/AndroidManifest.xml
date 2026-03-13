@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    package="com.example.sparkchaindemo">
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:requestLegacyExternalStorage="true"
+        android:theme="@style/Theme.ChatDemoProj">
+        <activity
+            android:name="com.example.sparkchaindemo.MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".llm.online_llm.chat.ChatActivity"
+            android:label="大模型通用对话" />
+        <activity
+            android:name=".llm.online_llm.tti.ttiDemoActivity"
+            android:label="图片生成" />
+        <activity
+            android:name=".llm.online_llm.image_understanding.ImageUnderstanding"
+            android:label="图片理解" />
+        <activity
+            android:name=".llm.online_llm.embedding.EmbeddingActivity"
+            android:label="文本向量化" />
+        <activity
+            android:name=".llm.online_llm.personatetts.PersonateTTSActivity"
+            android:label="超拟人合成" />
+        <activity
+            android:name=".llm.online_llm.bm.bmmDemoActivity"
+            android:label="多语种识别大模型" />
+        <activity
+            android:name=".llm.online_llm.bm.bmcDemoActivity"
+            android:label="中文识别大模型" />
+        <activity
+            android:name=".llm.online_llm.bm.bmModeChoiceActivity"
+            android:label="大模型识别" />
+        <activity
+            android:name=".llm.online_llm.function.ChatWithFuctionCallActivity"
+            android:label="FunctionCall" />
+        <activity
+            android:name=".llm.online_llm.rtasr.RTASRLLMActivity"
+            android:label="大模型实时语音转写" />
+        <activity
+            android:name=".llm.online_llm.raasr.RAASRLLMActivity"
+            android:label="大模型录音文件转写" />
+        <activity
+            android:name=".llm.online_llm.online_llm_mainActivity"
+            android:label="大模型能力" />
+        <activity
+            android:name=".ai.AIMainActivity"
+            android:label="语音能力" />
+        <activity
+            android:name=".ai.rtasr.RTASRActivity"
+            android:label="实时语音转写" />
+        <activity
+            android:name=".ai.itrans.ITSActivity"
+            android:label="在线翻译" />
+        <activity
+            android:name=".ai.tts.TTSActivity"
+            android:label="在线合成" />
+        <activity
+            android:name=".ai.asr.asrActivity"
+            android:label="语音听写" />
+        <activity
+            android:name=".ai.raasr.RAASRActivity"
+            android:label="录音文件转写" />
+        <activity
+            android:name=".ai.imageTrans.IMTSActivity"
+            android:label="图片翻译" />
+        <activity
+            android:name=".ai.ist.ISTActivity"
+            android:label="极速转写" />
+
+
+    </application>
+
+</manifest>

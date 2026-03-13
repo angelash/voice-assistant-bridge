@@ -1,33 +1,36 @@
 package com.audiobridge.client
 
 import android.Manifest
-import android.content.ComponentName
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
 import android.net.wifi.WifiManager
 import android.os.Bundle
-import android.provider.Settings
-import android.speech.RecognitionListener
-import android.speech.RecognizerIntent
-import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Button
 import android.widget.EditText
 import android.widget.Switch
 import android.widget.TextView
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.iflytek.sparkchain.core.LogLvl
+import com.iflytek.sparkchain.core.SparkChain
+import com.iflytek.sparkchain.core.SparkChainConfig
+import com.iflytek.sparkchain.core.asr.ASR
+import com.iflytek.sparkchain.core.asr.AsrCallbacks
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
+import java.io.File
 import java.util.Locale
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : AppCompatActivity() {
 
@@ -39,6 +42,15 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "audiobridge"
         private const val REQ_RECORD_AUDIO = 1001
         private const val REQ_LOCATION = 1002
+
+        // iFlytek SparkChain credentials (as requested to hardcode)
+        private const val XFYUN_APP_ID = "5dd63117"
+        private const val XFYUN_API_SECRET = "6eb631b964b8e0c9585e6426cf0949b5"
+        private const val XFYUN_API_KEY = "c4d5af6436da6ac341a39e532042232c"
+
+        private const val STT_SAMPLE_RATE = 16000
+        private const val STT_CHANNEL = AudioFormat.CHANNEL_IN_MONO
+        private const val STT_ENCODING = AudioFormat.ENCODING_PCM_16BIT
     }
 
     private enum class LinkMode { LAN, TUNNEL }
@@ -60,38 +72,60 @@ class MainActivity : AppCompatActivity() {
     private lateinit var speakSwitch: Switch
 
     private var tts: TextToSpeech? = null
-    private var speechRecognizer: SpeechRecognizer? = null
+
+    private var sparkInitialized = false
+    private var asr: ASR? = null
+    private var asrToken = 0
+
+    private var audioRecord: AudioRecord? = null
+    private var audioThread: Thread? = null
+    private val audioWriting = AtomicBoolean(false)
+    private val sttFinished = AtomicBoolean(false)
+    @Volatile
     private var sttListening = false
+    @Volatile
+    private var lastAsrText = ""
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val speechLauncher =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-            sttListening = false
-            if (result.resultCode != RESULT_OK) {
-                appendResult("[system] speech recognition canceled")
-                statusText.text = "Speech recognition canceled"
-                return@registerForActivityResult
+    private val asrCallbacks = object : AsrCallbacks {
+        override fun onResult(asrResult: ASR.ASRResult, userTag: Any?) {
+            val status = asrResult.status
+            val textRaw = asrResult.bestMatchText?.trim().orEmpty()
+            if (textRaw.isNotBlank()) {
+                lastAsrText = textRaw
             }
 
-            val spoken = result.data
-                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                ?.firstOrNull()
-                ?.trim()
-                .orEmpty()
-
-            if (spoken.isBlank()) {
-                appendResult("[system] no valid speech text")
-                statusText.text = "No speech result"
-                return@registerForActivityResult
+            when (status) {
+                0, 1 -> runOnUiThread { statusText.text = "Recognizing..." }
+                2 -> {
+                    sttListening = false
+                    stopAudioCapture()
+                    runOnUiThread {
+                        sttButton.text = "Speak To Text"
+                        statusText.text = "Speech recognized"
+                    }
+                    emitSpeechResult(textRaw.ifBlank { lastAsrText })
+                }
+                else -> runOnUiThread { statusText.text = "Recognizing..." }
             }
-
-            textInput.setText(spoken)
-            sendTextToBridge(spoken)
         }
+
+        override fun onError(asrError: ASR.ASRError, userTag: Any?) {
+            sttListening = false
+            stopAudioCapture()
+            runOnUiThread {
+                sttButton.text = "Speak To Text"
+                statusText.text = "STT failed: ${asrError.code}"
+            }
+            val msg = asrError.errMsg ?: "unknown"
+            appendResult("[system] STT failed: code=${asrError.code}, msg=$msg")
+            sttFinished.set(true)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -120,7 +154,13 @@ class MainActivity : AppCompatActivity() {
             sendTextToBridge(text)
         }
 
-        sttButton.setOnClickListener { startSpeechToText() }
+        sttButton.setOnClickListener {
+            if (sttListening) {
+                stopSpeechToText()
+            } else {
+                startSpeechToText()
+            }
+        }
 
         if (!hasLocationPermission()) {
             requestLocationPermission()
@@ -142,7 +182,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        releaseSpeechRecognizer()
+        stopAudioCapture()
+        try {
+            asr?.stop(true)
+        } catch (_: Exception) {
+            // ignore
+        }
+        asr = null
+        if (sparkInitialized) {
+            try {
+                SparkChain.getInst().unInit()
+            } catch (e: Exception) {
+                Log.w(TAG, "SparkChain unInit failed: ${e.message}")
+            }
+            sparkInitialized = false
+        }
+
         tts?.stop()
         tts?.shutdown()
         tts = null
@@ -338,14 +393,34 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun buildRecognizerIntent(): Intent {
-        return Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
-            putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Locale.getDefault().toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak your message")
-            putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+    private fun ensureSparkInitialized(): Boolean {
+        if (sparkInitialized) return true
+        return try {
+            val logFile = File(filesDir, "sparkchain.log")
+            val config = SparkChainConfig.builder()
+                .appID(XFYUN_APP_ID)
+                .apiKey(XFYUN_API_KEY)
+                .apiSecret(XFYUN_API_SECRET)
+                .logPath(logFile.absolutePath)
+                .logLevel(LogLvl.WARN.value)
+            val ret = SparkChain.getInst().init(applicationContext, config)
+            sparkInitialized = ret == 0
+            if (!sparkInitialized) {
+                appendResult("[system] SparkChain init failed: $ret")
+                statusText.text = "STT init failed: $ret"
+            }
+            sparkInitialized
+        } catch (e: Exception) {
+            appendResult("[system] SparkChain init exception: ${e.message ?: "unknown"}")
+            statusText.text = "STT init exception"
+            false
+        }
+    }
+
+    private fun ensureAsr() {
+        if (asr != null) return
+        asr = ASR().also {
+            it.registerCallbacks(asrCallbacks)
         }
     }
 
@@ -357,157 +432,177 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        val intent = buildRecognizerIntent()
-        val canLaunchActivity = intent.resolveActivity(packageManager) != null
-        if (canLaunchActivity) {
-            sttListening = true
-            statusText.text = "Starting speech recognition"
-            speechLauncher.launch(intent)
+        if (!ensureSparkInitialized()) {
             return
         }
 
-        Log.w(TAG, "No activity for ACTION_RECOGNIZE_SPEECH, fallback to RecognitionService")
-        startSpeechRecognizerFallback(intent)
+        ensureAsr()
+        val asrClient = asr ?: return
+        asrClient.language("zh_cn")
+        asrClient.domain("iat")
+        asrClient.accent("mandarin")
+        asrClient.vinfo(true)
+        asrClient.dwa("wpgs")
+
+        lastAsrText = ""
+        sttFinished.set(false)
+        asrToken += 1
+        val ret = asrClient.start("voice-bridge-$asrToken")
+        if (ret != 0) {
+            appendResult("[system] STT start failed: $ret")
+            statusText.text = "STT start failed: $ret"
+            sttListening = false
+            return
+        }
+
+        if (!startAudioCapture(asrClient)) {
+            asrClient.stop(true)
+            appendResult("[system] microphone unavailable")
+            statusText.text = "Microphone unavailable"
+            sttListening = false
+            return
+        }
+
+        sttListening = true
+        sttButton.text = "Stop Listening"
+        statusText.text = "Listening..."
     }
 
-    private fun startSpeechRecognizerFallback(intent: Intent) {
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            val currentService = Settings.Secure.getString(contentResolver, "voice_recognition_service")
-            val msg = if (currentService.isNullOrBlank()) {
-                "STT unavailable: no speech service configured."
+    private fun stopSpeechToText() {
+        if (!sttListening) return
+        sttListening = false
+        sttButton.text = "Speak To Text"
+        statusText.text = "Processing..."
+        stopAudioCapture()
+        val ret = asr?.stop(false) ?: -1
+        if (ret != 0 && sttFinished.compareAndSet(false, true)) {
+            val fallback = lastAsrText.trim()
+            if (fallback.isNotBlank()) {
+                emitSpeechResult(fallback)
             } else {
-                "STT unavailable: recognition service not ready ($currentService)"
+                appendResult("[system] STT stop failed: $ret")
+                statusText.text = "STT stop failed: $ret"
             }
-            appendResult("[system] $msg")
-            statusText.text = "STT unavailable"
-            openVoiceInputSettings()
+        }
+    }
+
+    private fun emitSpeechResult(text: String) {
+        if (!sttFinished.compareAndSet(false, true)) return
+        val spoken = text.trim()
+        if (spoken.isBlank()) {
+            appendResult("[system] no valid speech text")
+            runOnUiThread { statusText.text = "No speech result" }
             return
         }
 
-        releaseSpeechRecognizer()
+        runOnUiThread {
+            textInput.setText(spoken)
+            statusText.text = "Speech recognized"
+        }
+        sendTextToBridge(spoken)
+    }
 
-        val component = findRecognitionServiceComponent()
-        speechRecognizer = if (component != null) {
-            Log.i(TAG, "Using RecognitionService: $component")
-            SpeechRecognizer.createSpeechRecognizer(this, component)
-        } else {
-            Log.i(TAG, "Using default RecognitionService")
-            SpeechRecognizer.createSpeechRecognizer(this)
+    private fun startAudioCapture(asrClient: ASR): Boolean {
+        stopAudioCapture()
+
+        val minBuffer = AudioRecord.getMinBufferSize(STT_SAMPLE_RATE, STT_CHANNEL, STT_ENCODING)
+        if (minBuffer <= 0) {
+            Log.e(TAG, "Invalid min buffer size: $minBuffer")
+            return false
         }
 
-        speechRecognizer?.setRecognitionListener(object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                runOnUiThread { statusText.text = "Speak now..." }
-            }
+        val recorder = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                STT_SAMPLE_RATE,
+                STT_CHANNEL,
+                STT_ENCODING,
+                minBuffer * 2,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Create AudioRecord failed", e)
+            return false
+        }
 
-            override fun onBeginningOfSpeech() {
-                runOnUiThread { statusText.text = "Listening..." }
-            }
+        if (recorder.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "AudioRecord not initialized")
+            recorder.release()
+            return false
+        }
 
-            override fun onRmsChanged(rmsdB: Float) {}
-
-            override fun onBufferReceived(buffer: ByteArray?) {}
-
-            override fun onEndOfSpeech() {
-                runOnUiThread { statusText.text = "Processing..." }
-            }
-
-            override fun onError(error: Int) {
-                sttListening = false
-                val msg = speechErrorMessage(error)
-                appendResult("[system] STT failed: $msg")
-                runOnUiThread { statusText.text = "Speech failed: $msg" }
-                releaseSpeechRecognizer()
-            }
-
-            override fun onResults(results: Bundle?) {
-                sttListening = false
-                val spoken = results
-                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()
-                    ?.trim()
-                    .orEmpty()
-                if (spoken.isBlank()) {
-                    appendResult("[system] no valid speech text")
-                    runOnUiThread { statusText.text = "No speech result" }
-                } else {
-                    runOnUiThread { textInput.setText(spoken) }
-                    sendTextToBridge(spoken)
+        audioRecord = recorder
+        audioWriting.set(true)
+        val buffer = ByteArray(minBuffer)
+        audioThread = Thread {
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO)
+            try {
+                recorder.startRecording()
+                while (audioWriting.get()) {
+                    val read = recorder.read(buffer, 0, buffer.size)
+                    if (read <= 0) continue
+                    val payload = if (read == buffer.size) buffer.clone() else buffer.copyOf(read)
+                    val ret = asrClient.write(payload)
+                    if (ret != 0) {
+                        Log.e(TAG, "ASR write failed: $ret")
+                        audioWriting.set(false)
+                        sttListening = false
+                        runOnUiThread {
+                            sttButton.text = "Speak To Text"
+                            statusText.text = "STT write failed: $ret"
+                            appendResult("[system] STT write failed: $ret")
+                        }
+                        try {
+                            asrClient.stop(true)
+                        } catch (_: Exception) {
+                            // ignore
+                        }
+                        break
+                    }
                 }
-                releaseSpeechRecognizer()
+            } catch (e: Exception) {
+                Log.e(TAG, "Audio capture failed", e)
+                runOnUiThread {
+                    appendResult("[system] audio capture failed: ${e.message ?: "unknown"}")
+                    statusText.text = "Audio capture failed"
+                }
+            } finally {
+                try {
+                    recorder.stop()
+                } catch (_: Exception) {
+                    // ignore
+                }
             }
-
-            override fun onPartialResults(partialResults: Bundle?) {}
-
-            override fun onEvent(eventType: Int, params: Bundle?) {}
-        })
-
-        try {
-            sttListening = true
-            statusText.text = "Listening..."
-            speechRecognizer?.startListening(intent)
-        } catch (e: Exception) {
-            sttListening = false
-            appendResult("[system] STT start failed: ${e.message ?: "unknown"}")
-            statusText.text = "STT start failed"
-            releaseSpeechRecognizer()
         }
+        audioThread?.start()
+        return true
     }
 
-    private fun openVoiceInputSettings() {
-        try {
-            startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
-        } catch (_: Exception) {
-            // ignore
+    private fun stopAudioCapture() {
+        audioWriting.set(false)
+
+        val thread = audioThread
+        audioThread = null
+        if (thread != null && thread.isAlive) {
+            try {
+                thread.join(500)
+            } catch (_: Exception) {
+                // ignore
+            }
         }
-    }
 
-    private fun findRecognitionServiceComponent(): ComponentName? {
-        return try {
-            val services = packageManager.queryIntentServices(Intent("android.speech.RecognitionService"), 0)
-            if (services.isEmpty()) return null
-
-            val preferred = services.firstOrNull {
-                it.serviceInfo?.packageName == "com.google.android.googlequicksearchbox"
-            } ?: services.firstOrNull {
-                it.serviceInfo?.packageName == "com.vivo.voicerecognition"
-            } ?: services.first()
-
-            val info = preferred.serviceInfo ?: return null
-            val className = if (info.name.startsWith(".")) "${info.packageName}${info.name}" else info.name
-            ComponentName(info.packageName, className)
-        } catch (e: Exception) {
-            Log.w(TAG, "findRecognitionServiceComponent failed: ${e.message}")
-            null
-        }
-    }
-
-    private fun speechErrorMessage(error: Int): String {
-        return when (error) {
-            SpeechRecognizer.ERROR_AUDIO -> "Audio capture error"
-            SpeechRecognizer.ERROR_CLIENT -> "Client error"
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Missing audio permission"
-            SpeechRecognizer.ERROR_NETWORK -> "Network error"
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
-            SpeechRecognizer.ERROR_NO_MATCH -> "No match"
-            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy"
-            SpeechRecognizer.ERROR_SERVER -> "Service error"
-            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Speech timeout"
-            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "Language not supported"
-            SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "Language unavailable"
-            else -> "Unknown error($error)"
-        }
-    }
-
-    private fun releaseSpeechRecognizer() {
-        try {
-            speechRecognizer?.cancel()
-            speechRecognizer?.destroy()
-        } catch (_: Exception) {
-            // ignore
-        } finally {
-            speechRecognizer = null
-            sttListening = false
+        val recorder = audioRecord
+        audioRecord = null
+        if (recorder != null) {
+            try {
+                recorder.stop()
+            } catch (_: Exception) {
+                // ignore
+            }
+            try {
+                recorder.release()
+            } catch (_: Exception) {
+                // ignore
+            }
         }
     }
 
@@ -569,6 +664,9 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_LOCATION) {
             refreshRouteInfo()
+        }
+        if (requestCode == REQ_RECORD_AUDIO && hasRecordAudioPermission()) {
+            statusText.text = "Microphone permission granted"
         }
     }
 }

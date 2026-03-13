@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:focusable="true"
+    android:focusableInTouchMode="true">
+    <TextView
+        android:id="@+id/online_llm_bmc_result_info"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="10dp"
+        android:textColor="#333333"
+        android:textSize="16dp"
+        android:text="信息显示："/>
+
+    <TextView
+        android:id="@+id/online_llm_bmc_result"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textColor="#333333"
+        android:layout_below="@+id/online_llm_bmc_result_info"
+        android:layout_above="@+id/online_llm_bmc_audio_start_btn"
+        android:scrollbars="vertical"
+        android:textSize="16sp"/>
+
+    <Button
+        android:id="@+id/online_llm_bmc_audio_start_btn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_above="@+id/online_llm_bmc_file_start_btn"
+        android:text="麦克风识别"
+        android:textColor="#ffffff" />
+
+
+    <Button
+        android:id="@+id/online_llm_bmc_file_start_btn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_above="@+id/online_llm_bmc_stop_btn"
+        android:text="文件识别"
+        android:textColor="#ffffff" />
+    <Button
+        android:id="@+id/online_llm_bmc_stop_btn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_alignParentBottom="true"
+        android:text="停止识别"
+        android:layout_marginBottom="10dp"
+        android:textColor="#ffffff" />
+</RelativeLayout>

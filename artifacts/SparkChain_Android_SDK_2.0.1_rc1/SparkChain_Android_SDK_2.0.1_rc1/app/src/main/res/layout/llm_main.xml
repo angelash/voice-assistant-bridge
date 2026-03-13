@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    >
+    <Button
+        android:id="@+id/llm_main_online"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="online_llm" />
+    <Button
+        android:id="@+id/llm_main_offline"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="offline_llm(敬请期待)"
+        />
+</LinearLayout>

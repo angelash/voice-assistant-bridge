@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    >
+    <Button
+        android:id="@+id/online_llm_main_initSDK"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="SDK初始化" />
+    <Button
+        android:id="@+id/online_llm_main_chat"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="大模型通用对话" />
+
+    <Button
+        android:id="@+id/online_llm_main_imageGeneration"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="图片生成" />
+    <Button
+        android:id="@+id/online_llm_main_imageUnderstanding"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="图片理解" />
+    <Button
+        android:id="@+id/online_llm_main_embedding"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Embedding" />
+    <Button
+        android:id="@+id/online_llm_main_personatetts"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="超拟人合成" />
+    <Button
+        android:id="@+id/online_llm_main_asr"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="大模型识别" />
+    <Button
+        android:id="@+id/online_llm_main_rtasr"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="大模型实时转写" />
+    <Button
+        android:id="@+id/online_llm_main_raasr"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="大模型录音文件转写" />
+    <Button
+        android:id="@+id/online_llm_main_fuction"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="FuctionCall测试" />
+
+
+    <TextView
+        android:id="@+id/online_llm_main_notification"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:text="请先初始化SDK" />
+
+</LinearLayout>

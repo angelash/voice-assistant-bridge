@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_alignParentTop="true"
+            android:paddingBottom="20dp"
+            android:layout_above="@+id/start_init"
+            android:layout_height="wrap_content">
+            <TextView
+                android:id="@+id/chat_output_text"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textIsSelectable="true"
+                android:layout_above="@+id/chat_input_text" />
+        </ScrollView>
+
+        <Button
+            android:id="@+id/start_init"
+            android:layout_above="@+id/select_audio_btn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="10dp"
+            android:layout_marginRight="10dp"
+            android:layout_marginBottom="10dp"
+            android:visibility="gone"
+            android:text="初始化"/>
+
+        <Button
+            android:id="@+id/select_audio_btn"
+            android:layout_above="@+id/test_ll"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="10dp"
+            android:layout_marginRight="10dp"
+            android:layout_marginBottom="10dp"
+            android:text="选择音频文件"/>
+
+        <LinearLayout
+            android:id="@+id/test_ll"
+            android:layout_above="@+id/test_btn_stop"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="10dp"
+            android:layout_marginRight="10dp"
+            android:orientation="horizontal">
+                <Button
+                    android:id="@+id/test_btn"
+                    android:layout_weight="1"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginRight="10dp"
+                    android:layout_marginBottom="10dp"
+                    android:text="上传音频"/>
+                <Button
+                    android:id="@+id/test_btn_bm"
+                    android:layout_weight="1"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="10dp"
+                    android:text="切片上传音频"/>
+        </LinearLayout>
+
+        <Button
+            android:id="@+id/test_btn_stop"
+            android:layout_above="@+id/creat_task_btn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="10dp"
+            android:layout_marginRight="10dp"
+            android:layout_marginBottom="10dp"
+            android:text="停止上传"/>
+        <Button
+            android:id="@+id/creat_task_btn"
+            android:layout_above="@+id/get_result_btn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="10dp"
+            android:layout_marginRight="10dp"
+            android:layout_marginBottom="10dp"
+            android:text="创建订单"/>
+        <Button
+            android:id="@+id/get_result_btn"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_alignParentBottom="true"
+            android:layout_marginLeft="10dp"
+            android:layout_marginRight="10dp"
+            android:layout_marginBottom="10dp"
+            android:text="taskId获取结果"/>
+
+</RelativeLayout>
