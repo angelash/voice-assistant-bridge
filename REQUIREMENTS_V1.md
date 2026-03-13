@@ -1,109 +1,29 @@
-# Voice Assistant Bridge V1 需求规格（归档）
+# Voice Assistant Bridge V1 闇€姹傚綊妗?鏇存柊鏃堕棿锛?026-03-13  
+閫傜敤鑼冨洿锛歚f:\workspace\voice-assistant-bridge`
 
-更新时间：2026-03-13  
-适用范围：`voice-assistant-bridge` 仓库（Windows 端 + Android 端）
+## 1. 鐩爣
+鏋勫缓涓€鏉♀€淎ndroid 璇煶鍏ュ彛 + Windows 妗ユ帴 + OpenClaw 澶ц剳鈥濈殑绋冲畾瀵硅瘽閾捐矾锛屾弧瓒筹細
 
-## 1. 背景与目标
-
-本项目将从“单端语音桥接”升级为“多端输入 + 双脑协同 + 可靠转发”架构：
-
-1. Windows 端本地模型负责低延迟响应与路由决策（接线员角色）。
-2. OpenClaw（龙虾）负责复杂推理与扩展能力调用（大脑角色）。
-3. 若 OpenClaw 反馈丢失，需要可检测、可重发、可追踪。
-4. 新增 Android 端，Android 只做 STT/TTS，文本传入 Windows 后走与 Windows 本地输入一致的流程。
-
-## 2. 冻结决策（已确认）
-
-1. 回复策略：采用“追加显示”，并显示来源标记，不覆盖已有回复。
-2. 网络链路：支持双链路。
-3. 局域网环境：走局域网链路（按 Android 当前连接 Wi-Fi 进行判定）。
-4. 公网环境：走穿透链路。
-5. Android 端需支持单独配置局域网/穿透链路参数。
-6. 路由策略：由 Windows 本地模型进行分类决策。
-7. 超时与重试：单次超时 30 秒，最大重试 5 次。
-
-## 3. 角色与职责
-
-### 3.1 Android 客户端
-
-1. 语音输入（STT）与语音播报（TTS）。
-2. 文本消息上行到 Windows Bridge。
-3. 接收文本结果并显示/播报。
-4. 负责链路选择（局域网/穿透）和链路配置管理。
-
+1. 瀹夊崜璐熻矗璇煶杞枃鏈紙STT锛夊拰鏂囨湰杞闊筹紙TTS锛夈€?2. Windows 缁熶竴鎺ユ敹鏂囨湰骞惰浆鍙戝埌 OpenClaw銆?3. 鏈湴妯″瀷浠呬綔涓衡€滄帴绾垮憳鈥濓紝鐢ㄤ簬鍗虫椂鍝嶅簲涓庨摼璺彲鐢ㄦ€у弽棣堬紝涓嶅啀鍋氳矾鐢卞喅绛栥€?4. 瀵硅瘽灞曠ず鏀寔杩藉姞鏄剧ず鍜屾潵婧愭爣璇嗐€?5. OpenClaw 鍙嶉寮傚父鏃跺彲妫€娴嬨€侀噸璇曘€佸け璐ュ彲瑙併€?
+## 2. 宸插喕缁撳喅绛?1. 灞曠ず绛栫暐锛氳拷鍔犳樉绀猴紝涓嶈鐩栧巻鍙诧紱鎵€鏈夊洖澶嶆樉绀烘潵婧愩€?2. 璺敱绛栫暐锛氭瘡娆℃秷鎭兘鍙戦€佸埌 OpenClaw锛屼笉鍐嶇敱鏈湴妯″瀷鍒嗙被鍐崇瓥銆?3. 鏈湴妯″瀷鑱岃矗锛?   - 鐢熸垚鍗虫椂鈥滄帴绾垮憳鈥濆洖澶嶏紱
+   - 鎵ц閾捐矾鍙敤鎬ф帰娴嬪苟鍙嶉寮傚父鐘舵€併€?4. 瓒呮椂涓庨噸璇曪細鍗曟瓒呮椂 `30` 绉掞紝鏈€澶ч噸璇?`5` 娆°€?5. Android 鍙岄摼璺細
+   - Wi-Fi SSID 绛変簬 `4399` 鏃惰蛋灞€鍩熺綉锛?   - 鍏朵粬缃戠粶璧板叕缃戠┛閫忛摼璺€?6. Android 鍥哄寲鍦板潃锛?   - 灞€鍩熺綉锛歚http://10.3.91.22:8765`
+   - 鍏綉锛歚http://voice-bridge.iepose.cn`
+7. Android 宸ョ▼鍩虹嚎锛氱嫭绔嬪伐绋?`android/AudioBridgeClient`锛屾妧鏈柟妗堜笌鍘熷弬鑰冨伐绋嬩繚鎸佷竴鑷淬€?
+## 3. 瑙掕壊涓庤亴璐?### 3.1 Android 瀹㈡埛绔?1. 閲囬泦璇煶骞惰浆鍐欐垚鏂囨湰锛圫TT锛夈€?2. 灏嗘枃鏈姹傚彂閫佸埌 Windows Bridge锛堣嚜鍔ㄩ€夋嫨 LAN/TUNNEL锛夈€?3. 鎺ユ敹鏈湴鎺ョ嚎鍛樺洖澶嶅拰 OpenClaw 缁堢瓟骞惰拷鍔犳樉绀恒€?4. 瀵归渶瑕佹挱鎶ョ殑鏂囨湰鎵ц娓呮礂鍚庡啀杩涜 TTS銆?
 ### 3.2 Windows Bridge
-
-1. 统一文本入口（Windows 本地输入 + Android 输入）。
-2. 本地模型快速首答 + 路由判定。
-3. 转发 OpenClaw、处理 ACK/超时/重试。
-4. 汇总并下发“本地首答 + OpenClaw 终答（追加）”。
-5. 维护消息状态机、去重与日志。
-
-### 3.3 Local LLM（Windows）
-
-1. 生成低延迟首答（operator quick reply）。
-2. 输出路由决策：是否转发 OpenClaw。
-
-### 3.4 OpenClaw（龙虾）
-
-1. 处理复杂任务、扩展能力、工具链调用。
-2. 返回可追加展示的终答内容。
-
-## 4. 端到端流程
-
-```text
-Windows/Android 文本输入
-  -> Windows Bridge
-  -> Local LLM: quick reply + route decision
-  -> 立即返回本地首答（source=local-operator）
-  -> 若 decision=forward:
-       发送到 OpenClaw（带 message_id）
-       等待反馈（30s timeout）
-       超时则重试，最多 5 次
-  -> 收到 OpenClaw 终答后追加返回（source=openclaw）
+1. 瀵瑰鎻愪緵缁熶竴娑堟伅鎺ュ彛锛坄/v1/messages`銆乣/v1/messages/{message_id}`銆乣/v1/events`锛夈€?2. 鏈湴鎺ョ嚎鍛樺厛鍥炰竴鏉″揩閫熷搷搴旓紝鍐嶈繘鍏?OpenClaw 杞彂娴佺▼銆?3. 缁存姢鐘舵€佹満銆侀噸璇曘€佸け璐ヨ褰曞拰浜嬩欢鎺ㄩ€併€?4. 缁熶竴鏉ユ簮鏍囩锛堟湰鍦版帴绾垮憳 / 榫欒櫨澶ц剳 / 绯荤粺锛夈€?
+### 3.3 Local Operator锛堟湰鍦版ā鍨嬶級
+1. 浠呰礋璐?quick reply锛堜笉杈撳嚭璺敱鍐崇瓥锛夈€?2. 鍦ㄩ摼璺紓甯告椂閰嶅悎绯荤粺杩斿洖鍙劅鐭ュ弽棣堟枃妗堛€?
+### 3.4 OpenClaw
+1. 璐熻矗鏈€缁堝鏉傚洖澶嶃€?2. 杩斿洖缁堢瓟鏂囨湰锛岀敱妗ユ帴灞傝拷鍔犲埌鍚屼竴杞璇濅腑銆?
+## 4. 瀵硅瘽閾捐矾锛堝綋鍓嶇増锛?```text
+Android STT / Windows 鏂囨湰杈撳叆
+  -> Windows Bridge /v1/messages
+  -> Local Operator quick reply锛堟湰鍦版帴绾垮憳锛?  -> OpenClaw 鍋ュ悍鎺㈡祴锛堝け璐ュ垯涓婃姤鐘舵€侊紝浣嗕粛杩涘叆杞彂闃熷垪锛?  -> 杞彂 OpenClaw锛堟瘡杞繀杞彂锛?  -> 鎴愬姛鍒?DELIVERED 骞惰拷鍔犵粓绛?  -> 澶辫触鍒?RETRYING锛堟渶澶?5 娆★紝鍗曟 30 绉掞級-> FAILED
 ```
 
-## 5. 展示与交互要求
-
-1. 聊天窗口按时间顺序追加消息，不覆盖历史。
-2. 每条助手消息必须带来源标签：
-3. `[本地接线员]`（本地模型首答）
-4. `[龙虾大脑]`（OpenClaw 终答）
-5. 若 OpenClaw 最终失败，追加一条失败状态提示，不删除本地首答。
-
-## 6. 路由决策要求（本地模型分类）
-
-## 6.1 分类输出（逻辑要求）
-
-本地模型至少输出以下语义字段：
-
-1. `quick_reply`: 可直接显示的低延迟答复。
-2. `decision`: `local_only` 或 `forward_openclaw`。
-3. `reason`: 分类依据（用于日志与调试）。
-4. `confidence`: 0~1（可选但建议保留）。
-
-## 6.2 最低可用策略
-
-1. `local_only`：闲聊、短问答、低风险解释类。
-2. `forward_openclaw`：需要工具、复杂推理、上下文长链路、外部能力调用。
-
-## 7. 可靠性与重发机制
-
-## 7.1 标识与幂等
-
-每个会话消息需具备：
-
-1. `session_id`
-2. `turn_id`
-3. `message_id`（全局唯一）
-4. `client_id`
-
-OpenClaw 转发必须携带 `message_id`，用于去重和重放保护。
-
-## 7.2 状态机
-
-建议状态：
-
+## 5. 鐘舵€佹満
 1. `NEW`
 2. `LOCAL_REPLIED`
 3. `FORWARDED`
@@ -113,106 +33,11 @@ OpenClaw 转发必须携带 `message_id`，用于去重和重放保护。
 7. `DELIVERED`
 8. `FAILED`
 
-## 7.3 超时与重试策略（冻结参数）
-
-1. 单次等待超时：30 秒。
-2. 最大重试次数：5 次。
-3. 重试触发条件：未收到 OpenClaw 反馈或反馈不可解析。
-4. 重试需记录：`retry_count`、最后错误、最后发送时间。
-5. 达到上限后标记 `FAILED`，并向前端追加失败消息。
-
-## 8. Android 双链路支持需求
-
-## 8.1 配置项（Android 端）
-
-1. 局域网链路：
-2. `lan_base_url`
-3. `lan_auth_token`
-4. `lan_wifi_match_rule`（至少支持 SSID）
-5. 穿透链路：
-6. `tunnel_base_url`
-7. `tunnel_auth_token`
-8. `tunnel_enabled`
-
-## 8.2 链路选择逻辑
-
-1. 若当前 Wi-Fi 命中 `lan_wifi_match_rule`，优先走局域网。
-2. 否则走穿透链路。
-3. 若首选链路失败，可按策略回退到另一链路（建议可配置开关）。
-
-## 8.3 Android 基线工程对齐要求（新增冻结）
-
-基线工程路径（外部参考）：
-
-1. `F:\workspace\voice-assistant-bridge\android\AudioBridgeClient`
-
-对齐要求：
-
-1. Android 端技术方案与默认配置以该工程为基准，不另起炉灶。
-2. 保持现有工程栈：Kotlin + Android AppCompat/View + OkHttp WebSocket + 前台服务。
-3. 保持基础构建参数：`minSdk=21`、`compileSdk/targetSdk=34`、`Java/Kotlin=17`。
-4. 保持前台服务模型：`AudioBridgeForegroundService` 负责后台保活、连接管理、重连和音频链路。
-5. 保持现有核心配置项语义：`host`、`token`、`enableUplink`、`enableDownlink`、`tuningMode`。
-6. 在现有配置基础上扩展双链路字段，不破坏原有配置读取与启动流程。
-7. 保持现有音频链路默认参数：48kHz、mono、PCM16、20ms 帧；可协商 `adpcm/pcm`。
-8. 默认通信入口保持 WebSocket（`/abp`），文本业务字段在该链路上按新协议扩展。
-
-## 9. Windows 对外接口（建议）
-
-## 9.1 POST `/v1/messages`
-
-用途：提交文本，返回受理结果与本地首答（若已生成）。
-
-请求字段建议：
-
-1. `client_id`
-2. `session_id`
-3. `text`
-4. `source`（`android`/`windows`）
-5. `timestamp`
-
-响应字段建议：
-
-1. `message_id`
-2. `accepted`
-3. `local_reply`（可空）
-4. `local_source`（固定 `local-operator`）
-5. `status`
-
-## 9.2 GET `/v1/messages/{message_id}`
-
-用途：查询当前 turn 状态、重试信息和终答。
-
-## 9.3 WS `/v1/events`（可选但推荐）
-
-用途：推送异步事件（OpenClaw 终答、重试、失败）。
-
-## 10. 日志与可观测性
-
-每个 turn 必须可追踪：
-
-1. `message_id/session_id/client_id`
-2. 本地决策结果与置信度
-3. OpenClaw 发送次数与每次耗时
-4. 最终状态（成功/失败）
-5. 失败原因（超时、网络、解析、后端错误）
-
-## 11. 非功能要求（V1）
-
-1. 本地首答低延迟：目标 P95 小于 1.5 秒（可按设备调整）。
-2. 重启可恢复：未完成 turn 建议持久化（如 SQLite）。
-3. 并发安全：同一 `session_id` 内保持顺序一致性。
-4. 向后兼容：不破坏现有 Windows CLI/GUI 基本使用。
-
-## 12. 实施里程碑（建议）
-
-1. M1：Windows 双阶段回复 + 来源标记 + 本地分类路由。
-2. M2：OpenClaw 超时检测 + 5 次重试 + 去重。
-3. M3：Android 双链路配置与文本接入。
-4. M4：联调与压测（局域网/穿透两场景）。
-
-## 13. 非目标（V1 不做）
-
-1. Android 端直接接入 OpenClaw（绕过 Windows）不在本期。
-2. 复杂权限系统与多租户管理不在本期。
-3. 端到端音频流转（非文本形态）不在本期。
+## 6. 娑堟伅灞曠ず涓庢潵婧愯姹?1. 鏈湴鎺ョ嚎鍛樻秷鎭細鏉ユ簮 `local-operator`锛屾樉绀烘爣绛?`鏈湴鎺ョ嚎鍛榒銆?2. OpenClaw 娑堟伅锛氭潵婧?`openclaw`锛屾樉绀烘爣绛?`榫欒櫨澶ц剳`銆?3. 绯荤粺閿欒娑堟伅锛氭潵婧?`system`锛屾樉绀烘爣绛?`绯荤粺`銆?4. 澶辫触鏃朵笉寰楄鐩栨垨鍒犻櫎鏈湴鎺ョ嚎鍛樻秷鎭紝蹇呴』杩藉姞澶辫触鎻愮ず銆?
+## 7. Android 鏂囨湰涓庤闊虫竻娲楄鍒?### 7.1 灞曠ず娓呮礂
+1. 鍘婚櫎 `[[...]]` 鍓嶇紑鏍囩锛堝 `[[reply_to_current]]`锛夈€?2. 淇濈暀姝ｆ枃璇箟鍜屾潵婧愭爣璇嗐€?
+### 7.2 鎾姤娓呮礂锛堝榻?Windows 绔級
+1. 鍘婚櫎 `emoji`/绗﹀彿琛ㄦ儏瀛楃銆?2. 鍘婚櫎甯歌 markdown 鎺у埗绗︼紙濡?`` ` * _ ~ # > ``锛夈€?3. 鍚堝苟澶氫綑绌虹櫧锛岄伩鍏?TTS 鎾斁寮傚父銆?
+## 8. 鍙潬鎬ц姹?1. 鎵€鏈夎浆鍙戣姹傛惡甯?`message_id`锛堝箓绛夊拰杩借釜锛夈€?2. 澶辫触閲嶈瘯闇€璁板綍 `retry_count` 涓?`last_error`銆?3. 鏈嶅姟閲嶅惎鍚庡彲鎭㈠ pending 娑堟伅鐨勭户缁浆鍙戙€?
+## 9. 楠屾敹瑕佺偣
+1. 姣忔鎻愪氦閮戒骇鐢熸湰鍦?quick reply 骞惰繘鍏?OpenClaw 杞彂銆?2. OpenClaw 鍙揪鏃讹紝鏈€缁堢姸鎬佽繘鍏?`DELIVERED` 骞惰拷鍔犵粓绛斻€?3. OpenClaw 涓嶅彲杈炬椂锛屾寜 30s/5 娆＄瓥鐣ラ噸璇曪紝鏈€缁?`FAILED` 涓旀湁閿欒鎻愮ず銆?4. Android 鍦?SSID=`4399` 鏃跺懡涓?LAN 鍦板潃锛屽惁鍒欏懡涓叕缃戝湴鍧€銆?5. Android 鎾姤鏂囨湰缁忚繃涓?Windows 瀵归綈鐨勬牸寮?琛ㄦ儏娓呮礂銆?

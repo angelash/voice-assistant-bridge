@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import os
+import re
 import sqlite3
 import threading
 import uuid
@@ -227,19 +228,26 @@ class EventHub:
 
 
 class LocalOperator:
+    DEFAULT_QUICK_REPLY = "收到，我正在转给龙虾大脑处理。"
+
     def __init__(self, endpoint: str, model: str, timeout_sec: int):
         self.endpoint = endpoint.rstrip("/")
         self.model = model
         self.timeout_sec = timeout_sec
 
+    @classmethod
+    def _normalize_quick_reply(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            return cls.DEFAULT_QUICK_REPLY
+        quick = re.sub(r"\s+", " ", value).strip()
+        if len(quick) < 6:
+            return cls.DEFAULT_QUICK_REPLY
+        return quick
+
     def _fallback(self, text: str) -> dict[str, Any]:
-        low = text.lower()
-        keys = ("龙虾", "openclaw", "工具", "执行", "搜索", "联网", "代码", "脚本", "排查", "帮我做")
-        forward = any(k in low for k in keys) or len(text) > 45
         return {
-            "quick_reply": "收到，我先快速处理。",
-            "decision": "forward_openclaw" if forward else "local_only",
-            "reason": "fallback_heuristic",
+            "quick_reply": self.DEFAULT_QUICK_REPLY,
+            "reason": "fallback_quick_reply",
             "confidence": 0.45,
         }
 
@@ -253,9 +261,10 @@ class LocalOperator:
             if item.get("final_reply"):
                 ctx.append(f"助手: {item['final_reply']}")
         prompt = (
-            "你是语音助手接线员。仅输出 JSON。"
-            "字段 quick_reply decision reason confidence。"
-            "decision 只能是 local_only 或 forward_openclaw。"
+            "你是语音助手接线员。只做两件事：快速回应 + 告知已转给龙虾大脑。"
+            "仅输出 JSON，字段：quick_reply reason confidence。"
+            "quick_reply 必须是完整短句，不要承诺具体结果。"
+            "quick_reply 需包含“龙虾大脑”或“已转交处理中”语义，不能只输出单个词。"
             f"\n上下文:\n{chr(10).join(ctx[-8:]) or '(无)'}\n用户输入:\n{text}"
         )
         payload = {"model": self.model, "prompt": prompt, "stream": False}
@@ -273,18 +282,16 @@ class LocalOperator:
             obj = extract_json_obj(raw)
             if not obj:
                 raise RuntimeError("operator output is not json")
-            decision = (obj.get("decision") or "").strip().lower()
-            if decision not in {"local_only", "forward_openclaw"}:
-                decision = "forward_openclaw"
             conf = obj.get("confidence", 0.6)
             try:
                 conf = max(0.0, min(1.0, float(conf)))
             except Exception:
                 conf = 0.6
+            reason = (obj.get("reason") or "local_operator").strip() or "local_operator"
+            reason = reason[:80]
             return {
-                "quick_reply": (obj.get("quick_reply") or "收到。").strip() or "收到。",
-                "decision": decision,
-                "reason": (obj.get("reason") or "local_operator").strip() or "local_operator",
+                "quick_reply": self._normalize_quick_reply(obj.get("quick_reply")),
+                "reason": reason,
                 "confidence": conf,
             }
         except Exception as exc:
@@ -293,15 +300,40 @@ class LocalOperator:
 
 
 class OpenClawClient:
-    def __init__(self, base_url: str, chat_path: str, token: str):
+    def __init__(self, base_url: str, chat_path: str, health_path: str, token: str):
         self.base_url = (base_url or "").rstrip("/")
         path = (chat_path or "").strip()
         self.chat_path = path if path.startswith("/") else f"/{path}"
+        hp = (health_path or "").strip()
+        self.health_path = hp if hp.startswith("/") else f"/{hp}"
         self.token = (token or "").strip()
 
     @property
     def enabled(self) -> bool:
         return bool(self.base_url and self.chat_path)
+
+    async def health(self, timeout_sec: int = 3) -> tuple[bool, str]:
+        import aiohttp
+
+        if not self.enabled:
+            return False, "openclaw disabled"
+        url = f"{self.base_url}{self.health_path}"
+        headers: dict[str, str] = {}
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=max(1, timeout_sec)),
+                ) as resp:
+                    if resp.status == 200:
+                        return True, "ok"
+                    body = (await resp.text()).strip()
+                    return False, f"http {resp.status}: {body[:160]}"
+        except Exception as exc:
+            return False, str(exc).strip() or exc.__class__.__name__
 
     async def chat(self, text: str, session_id: str, message_id: str, timeout_sec: int) -> str:
         import aiohttp
@@ -340,6 +372,7 @@ class VoiceAssistantServer:
         self.forward_timeout = clamp_int(cfg.get("openclaw_forward_timeout", 30), 30, 5, 300)
         self.forward_max_retries = clamp_int(cfg.get("openclaw_max_retries", 5), 5, 1, 20)
         self.forward_backoff = float(cfg.get("openclaw_retry_backoff", 1.5))
+        self.openclaw_probe_timeout = clamp_int(cfg.get("openclaw_probe_timeout", 3), 3, 1, 20)
 
         self.local_operator = LocalOperator(
             endpoint=os.getenv("VOICE_OPERATOR_ENDPOINT", cfg.get("ollama_endpoint", "http://127.0.0.1:11434/api/generate")),
@@ -349,6 +382,7 @@ class VoiceAssistantServer:
         self.openclaw = OpenClawClient(
             base_url=os.getenv("VOICE_OPENCLAW_GATEWAY_URL", cfg.get("openclaw_gateway_url", cfg.get("gateway_url", "http://127.0.0.1:18789"))),
             chat_path=os.getenv("VOICE_OPENCLAW_CHAT_PATH", cfg.get("openclaw_chat_path", "/api/voice-brain/chat")),
+            health_path=os.getenv("VOICE_OPENCLAW_HEALTH_PATH", cfg.get("openclaw_health_path", "/api/voice-brain/health")),
             token=os.getenv("VOICE_OPENCLAW_GATEWAY_TOKEN", cfg.get("openclaw_gateway_token", cfg.get("gateway_token", ""))),
         )
         db_path = Path(cfg.get("bridge_db_path", str(Path(__file__).with_name("bridge_state.db"))))
@@ -404,30 +438,48 @@ class VoiceAssistantServer:
                 return row or {}
 
             decision = await self.local_operator.decide(row["text"], self.store.recent_session(row["session_id"]))
+            reason = (decision.get("reason") or "local_operator").strip() or "local_operator"
+            quick_reply = (decision.get("quick_reply") or "").strip() or "收到，我正在转给龙虾大脑处理。"
+
+            if not self.openclaw.enabled:
+                reason = f"{reason}|openclaw_disabled"
+                quick_reply = f"{quick_reply}（链路不可用：OpenClaw 未配置）"
+                self.store.update(
+                    message_id,
+                    status=STATUS_FAILED,
+                    decision="forward_openclaw",
+                    decision_reason=reason,
+                    decision_confidence=decision.get("confidence", 0.6),
+                    local_reply=quick_reply,
+                    last_error="openclaw disabled",
+                    updated_at=now_iso(),
+                )
+                row = self.store.get(message_id) or row
+                await self._emit_reply(row, SOURCE_LOCAL, row.get("local_reply") or "", "local_reply")
+                await self._emit_status(row, "failed")
+                return row
+
+            ok, probe_msg = await self.openclaw.health(timeout_sec=self.openclaw_probe_timeout)
+            if not ok:
+                reason = f"{reason}|openclaw_probe_failed"
+                quick_reply = f"{quick_reply}（链路检测异常，已进入重试队列）"
+
             self.store.update(
                 message_id,
                 status=STATUS_LOCAL_REPLIED,
-                decision=decision["decision"],
-                decision_reason=decision["reason"],
-                decision_confidence=decision["confidence"],
-                local_reply=decision["quick_reply"],
+                decision="forward_openclaw",
+                decision_reason=reason,
+                decision_confidence=decision.get("confidence", 0.6),
+                local_reply=quick_reply,
                 updated_at=now_iso(),
             )
             row = self.store.get(message_id) or row
             await self._emit_reply(row, SOURCE_LOCAL, row.get("local_reply") or "", "local_reply")
 
-            if row.get("decision") == "local_only" or not self.openclaw.enabled:
-                if row.get("decision") != "local_only" and not self.openclaw.enabled:
-                    self.store.update(
-                        message_id,
-                        decision="local_only",
-                        decision_reason=f"{row.get('decision_reason') or ''}|openclaw_disabled",
-                        updated_at=now_iso(),
-                    )
-                self.store.update(message_id, status=STATUS_DELIVERED, updated_at=now_iso())
+            if not ok:
+                self.store.update(message_id, last_error=f"probe_failed: {probe_msg}", updated_at=now_iso())
                 row = self.store.get(message_id) or row
-                await self._emit_status(row, "delivered", source=SOURCE_LOCAL)
-                return row
+                await self._emit_status(row, "openclaw_probe_failed")
 
             self.store.update(message_id, status=STATUS_FORWARDED, updated_at=now_iso())
             row = self.store.get(message_id) or row
@@ -461,7 +513,7 @@ class VoiceAssistantServer:
             return
         async with self._session_lock(row["session_id"]):
             row = self.store.get(message_id)
-            if not row or row["status"] in TERMINAL or row.get("decision") != "forward_openclaw":
+            if not row or row["status"] in TERMINAL:
                 return
             done_failures = int(row.get("retry_count") or 0)
             max_retry = int(row.get("max_retries") or self.forward_max_retries)

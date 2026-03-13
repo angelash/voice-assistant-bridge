@@ -33,9 +33,12 @@ class MainActivity : AppCompatActivity() {
 
     private companion object {
         private const val TAG = "VoiceBridgeMain"
-        private const val HARDCODED_LAN_BASE_URL = "http://10.3.91.22:8765"
-        private const val HARDCODED_PUBLIC_BASE_URL = "http://voice-bridge.iepose.cn"
-        private const val HARDCODED_LAN_WIFI_KEYWORD = "4399"
+        private const val LAN_BASE_URL = "http://10.3.91.22:8765"
+        private const val PUBLIC_BASE_URL = "http://voice-bridge.iepose.cn"
+        private const val LAN_WIFI_SSID = "4399"
+        private const val PREFS_NAME = "audiobridge"
+        private const val REQ_RECORD_AUDIO = 1001
+        private const val REQ_LOCATION = 1002
     }
 
     private enum class LinkMode { LAN, TUNNEL }
@@ -65,31 +68,30 @@ class MainActivity : AppCompatActivity() {
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
 
-    private val speechLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        if (result.resultCode != RESULT_OK) {
-            appendResult("[系统] 语音识别已取消")
-            statusText.text = "语音识别已取消"
-            return@registerForActivityResult
-        }
+    private val speechLauncher =
+        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+            sttListening = false
+            if (result.resultCode != RESULT_OK) {
+                appendResult("[system] speech recognition canceled")
+                statusText.text = "Speech recognition canceled"
+                return@registerForActivityResult
+            }
 
-        val data = result.data
-        if (data == null) {
-            appendResult("[系统] 语音识别返回为空")
-            statusText.text = "语音识别失败"
-            return@registerForActivityResult
-        }
+            val spoken = result.data
+                ?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                ?.firstOrNull()
+                ?.trim()
+                .orEmpty()
 
-        val texts = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-        val spoken = texts?.firstOrNull()?.trim().orEmpty()
-        if (spoken.isBlank()) {
-            appendResult("[系统] 未识别到有效文本")
-            statusText.text = "语音识别无结果"
-            return@registerForActivityResult
-        }
+            if (spoken.isBlank()) {
+                appendResult("[system] no valid speech text")
+                statusText.text = "No speech result"
+                return@registerForActivityResult
+            }
 
-        textInput.setText(spoken)
-        sendTextToBridge(spoken)
-    }
+            textInput.setText(spoken)
+            sendTextToBridge(spoken)
+        }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -112,20 +114,17 @@ class MainActivity : AppCompatActivity() {
         sendTextButton.setOnClickListener {
             val text = textInput.text?.toString()?.trim().orEmpty()
             if (text.isBlank()) {
-                statusText.text = "请输入文本"
+                statusText.text = "Please enter text"
                 return@setOnClickListener
             }
             sendTextToBridge(text)
         }
 
-        sttButton.setOnClickListener {
-            startSpeechToText()
-        }
+        sttButton.setOnClickListener { startSpeechToText() }
 
         if (!hasLocationPermission()) {
             requestLocationPermission()
         }
-
         if (!hasRecordAudioPermission()) {
             requestRecordAudioPermission()
         }
@@ -162,11 +161,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun resolveBridgeEndpoint(): BridgeEndpoint {
         val wifi = currentWifiSsid()
-        val useLan = wifi?.contains(HARDCODED_LAN_WIFI_KEYWORD, ignoreCase = true) == true
+        val useLan = wifi?.equals(LAN_WIFI_SSID, ignoreCase = true) == true
         return if (useLan) {
-            BridgeEndpoint(LinkMode.LAN, HARDCODED_LAN_BASE_URL, wifi)
+            BridgeEndpoint(LinkMode.LAN, LAN_BASE_URL, wifi)
         } else {
-            BridgeEndpoint(LinkMode.TUNNEL, HARDCODED_PUBLIC_BASE_URL, wifi)
+            BridgeEndpoint(LinkMode.TUNNEL, PUBLIC_BASE_URL, wifi)
         }
     }
 
@@ -176,11 +175,11 @@ class MainActivity : AppCompatActivity() {
             appendLine("Auto Route:")
             appendLine("  current wifi: ${endpoint.wifiSsid ?: "N/A"}")
             appendLine("  location perm: ${if (hasLocationPermission()) "granted" else "missing"}")
-            appendLine("  wifi keyword: $HARDCODED_LAN_WIFI_KEYWORD")
+            appendLine("  lan wifi: $LAN_WIFI_SSID")
             appendLine("  selected mode: ${endpoint.mode}")
             appendLine("  selected base: ${endpoint.baseUrl}")
-            appendLine("  lan base: $HARDCODED_LAN_BASE_URL")
-            appendLine("  public base: $HARDCODED_PUBLIC_BASE_URL")
+            appendLine("  lan base: $LAN_BASE_URL")
+            appendLine("  public base: $PUBLIC_BASE_URL")
         }
     }
 
@@ -192,13 +191,33 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun normalizeForDisplay(text: String): String {
+        return text
+            .trim()
+            .replace(Regex("""^\s*\[\[[^\]]+\]\]\s*"""), "")
+            .trim()
+    }
+
+    private fun normalizeForSpeech(text: String): String {
+        var cleaned = normalizeForDisplay(text)
+        cleaned = cleaned.replace(
+            Regex(
+                """[\x{1F300}-\x{1F5FF}\x{1F600}-\x{1F64F}\x{1F680}-\x{1F6FF}\x{1F700}-\x{1F77F}\x{1F780}-\x{1F7FF}\x{1F800}-\x{1F8FF}\x{1F900}-\x{1F9FF}\x{1FA00}-\x{1FAFF}\x{2700}-\x{27BF}\x{2600}-\x{26FF}\x{FE00}-\x{FE0F}\x{1F1E6}-\x{1F1FF}]""",
+            ),
+            "",
+        )
+        cleaned = cleaned.replace(Regex("""`{1,3}"""), " ")
+        cleaned = cleaned.replace(Regex("""[*_~#>]"""), " ")
+        cleaned = cleaned.replace(Regex("""\s{2,}"""), " ").trim()
+        return cleaned
+    }
+
     private fun sendTextToBridge(text: String) {
         val input = text.trim()
         if (input.isBlank()) return
         textInput.setText("")
         savePrefs()
-
-        appendResult("[用户] $input")
+        appendResult("[user] $input")
 
         Thread {
             try {
@@ -207,7 +226,7 @@ class MainActivity : AppCompatActivity() {
                 val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
 
                 runOnUiThread {
-                    statusText.text = "文本发送中 (${endpoint.mode}, wifi=${endpoint.wifiSsid ?: "N/A"}, ${endpoint.baseUrl})"
+                    statusText.text = "Sending (${endpoint.mode}, wifi=${endpoint.wifiSsid ?: "N/A"})"
                     refreshRouteInfo()
                 }
 
@@ -220,31 +239,32 @@ class MainActivity : AppCompatActivity() {
                 val submitResp = postJson(endpoint, "/v1/messages", submitBody)
 
                 val shown = linkedSetOf<String>()
-                val localReply = submitResp.optString("local_reply").trim()
+                val localReplyRaw = submitResp.optString("local_reply").trim()
+                val localReply = normalizeForDisplay(localReplyRaw)
                 if (localReply.isNotBlank()) {
-                    val label = submitResp.optString("local_source_label").ifBlank { "本地接线员" }
+                    val label = submitResp.optString("local_source_label").ifBlank { "Local Operator" }
                     appendResult("[$label] $localReply")
-                    speak(localReply)
+                    speak(localReplyRaw)
                     shown.add("$label::$localReply")
                 }
 
                 val messageId = submitResp.optString("message_id").trim()
-                val initialState = submitResp.optString("status").uppercase(Locale.getDefault())
-                if (messageId.isNotBlank() && initialState !in setOf("DELIVERED", "FAILED")) {
+                val state = submitResp.optString("status").uppercase(Locale.getDefault())
+                if (messageId.isNotBlank() && state !in setOf("DELIVERED", "FAILED")) {
                     val terminal = pollTerminal(endpoint, messageId, timeoutSec = 180, intervalMs = 1000)
                     if (terminal != null) {
                         renderStatusMessages(terminal, shown)
                     } else {
-                        appendResult("[系统] 终答等待超时")
+                        appendResult("[system] timeout waiting final reply")
                     }
                 } else {
                     renderStatusMessages(submitResp, shown)
                 }
 
-                runOnUiThread { statusText.text = "文本发送完成" }
+                runOnUiThread { statusText.text = "Send complete" }
             } catch (e: Exception) {
-                appendResult("[系统] 文本发送失败: ${e.message}")
-                runOnUiThread { statusText.text = "文本发送失败" }
+                appendResult("[system] send failed: ${e.message ?: "unknown"}")
+                runOnUiThread { statusText.text = "Send failed" }
             }
         }.start()
     }
@@ -254,15 +274,16 @@ class MainActivity : AppCompatActivity() {
         if (messages != null) {
             for (i in 0 until messages.length()) {
                 val item = messages.optJSONObject(i) ?: continue
-                val text = item.optString("text").trim()
+                val textRaw = item.optString("text").trim()
+                val text = normalizeForDisplay(textRaw)
                 if (text.isBlank()) continue
-                val label = item.optString("source_label").ifBlank { "助手" }
+                val label = item.optString("source_label").ifBlank { "Assistant" }
                 val key = "$label::$text"
                 if (shown.contains(key)) continue
                 shown.add(key)
                 appendResult("[$label] $text")
                 if (item.optString("kind") != "error") {
-                    speak(text)
+                    speak(textRaw)
                 }
             }
         }
@@ -270,11 +291,16 @@ class MainActivity : AppCompatActivity() {
         val state = payload.optString("status").uppercase(Locale.getDefault())
         if (state == "FAILED") {
             val err = payload.optString("last_error").ifBlank { "openclaw_failed" }
-            appendResult("[系统] 龙虾大脑失败: $err")
+            appendResult("[system] openclaw failed: $err")
         }
     }
 
-    private fun pollTerminal(endpoint: BridgeEndpoint, messageId: String, timeoutSec: Int, intervalMs: Long): JSONObject? {
+    private fun pollTerminal(
+        endpoint: BridgeEndpoint,
+        messageId: String,
+        timeoutSec: Int,
+        intervalMs: Long,
+    ): JSONObject? {
         val started = System.currentTimeMillis()
         while (System.currentTimeMillis() - started < timeoutSec * 1000L) {
             val status = getJson(endpoint, "/v1/messages/$messageId")
@@ -293,7 +319,6 @@ class MainActivity : AppCompatActivity() {
             .url(endpoint.baseUrl.trimEnd('/') + path)
             .post(reqBody)
             .build()
-
         httpClient.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: $text")
@@ -306,7 +331,6 @@ class MainActivity : AppCompatActivity() {
             .url(endpoint.baseUrl.trimEnd('/') + path)
             .get()
             .build()
-
         httpClient.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
             if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: $text")
@@ -319,7 +343,7 @@ class MainActivity : AppCompatActivity() {
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
             putExtra(RecognizerIntent.EXTRA_LANGUAGE, Locale.getDefault())
             putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, Locale.getDefault().toLanguageTag())
-            putExtra(RecognizerIntent.EXTRA_PROMPT, "请说出要发送的内容")
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak your message")
             putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
             putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
@@ -336,12 +360,13 @@ class MainActivity : AppCompatActivity() {
         val intent = buildRecognizerIntent()
         val canLaunchActivity = intent.resolveActivity(packageManager) != null
         if (canLaunchActivity) {
-            statusText.text = "正在启动系统语音识别"
+            sttListening = true
+            statusText.text = "Starting speech recognition"
             speechLauncher.launch(intent)
             return
         }
 
-        Log.w(TAG, "No activity can handle ACTION_RECOGNIZE_SPEECH, fallback to SpeechRecognizer service")
+        Log.w(TAG, "No activity for ACTION_RECOGNIZE_SPEECH, fallback to RecognitionService")
         startSpeechRecognizerFallback(intent)
     }
 
@@ -349,12 +374,12 @@ class MainActivity : AppCompatActivity() {
         if (!SpeechRecognizer.isRecognitionAvailable(this)) {
             val currentService = Settings.Secure.getString(contentResolver, "voice_recognition_service")
             val msg = if (currentService.isNullOrBlank()) {
-                "STT不可用：系统未配置语音识别服务，请在系统语音输入设置里启用"
+                "STT unavailable: no speech service configured."
             } else {
-                "STT不可用：语音识别服务不可用($currentService)"
+                "STT unavailable: recognition service not ready ($currentService)"
             }
-            appendResult("[系统] $msg")
-            statusText.text = "STT不可用"
+            appendResult("[system] $msg")
+            statusText.text = "STT unavailable"
             openVoiceInputSettings()
             return
         }
@@ -372,11 +397,11 @@ class MainActivity : AppCompatActivity() {
 
         speechRecognizer?.setRecognitionListener(object : RecognitionListener {
             override fun onReadyForSpeech(params: Bundle?) {
-                runOnUiThread { statusText.text = "请开始说话..." }
+                runOnUiThread { statusText.text = "Speak now..." }
             }
 
             override fun onBeginningOfSpeech() {
-                runOnUiThread { statusText.text = "识别中..." }
+                runOnUiThread { statusText.text = "Listening..." }
             }
 
             override fun onRmsChanged(rmsdB: Float) {}
@@ -384,14 +409,14 @@ class MainActivity : AppCompatActivity() {
             override fun onBufferReceived(buffer: ByteArray?) {}
 
             override fun onEndOfSpeech() {
-                runOnUiThread { statusText.text = "处理中..." }
+                runOnUiThread { statusText.text = "Processing..." }
             }
 
             override fun onError(error: Int) {
                 sttListening = false
                 val msg = speechErrorMessage(error)
-                appendResult("[系统] STT失败: $msg")
-                runOnUiThread { statusText.text = "语音识别失败: $msg" }
+                appendResult("[system] STT failed: $msg")
+                runOnUiThread { statusText.text = "Speech failed: $msg" }
                 releaseSpeechRecognizer()
             }
 
@@ -402,10 +427,9 @@ class MainActivity : AppCompatActivity() {
                     ?.firstOrNull()
                     ?.trim()
                     .orEmpty()
-
                 if (spoken.isBlank()) {
-                    appendResult("[系统] 未识别到有效文本")
-                    runOnUiThread { statusText.text = "语音识别无结果" }
+                    appendResult("[system] no valid speech text")
+                    runOnUiThread { statusText.text = "No speech result" }
                 } else {
                     runOnUiThread { textInput.setText(spoken) }
                     sendTextToBridge(spoken)
@@ -420,12 +444,12 @@ class MainActivity : AppCompatActivity() {
 
         try {
             sttListening = true
-            statusText.text = "正在语音识别..."
+            statusText.text = "Listening..."
             speechRecognizer?.startListening(intent)
         } catch (e: Exception) {
             sttListening = false
-            appendResult("[系统] STT启动失败: ${e.message}")
-            statusText.text = "语音识别启动失败"
+            appendResult("[system] STT start failed: ${e.message ?: "unknown"}")
+            statusText.text = "STT start failed"
             releaseSpeechRecognizer()
         }
     }
@@ -434,15 +458,13 @@ class MainActivity : AppCompatActivity() {
         try {
             startActivity(Intent(Settings.ACTION_VOICE_INPUT_SETTINGS))
         } catch (_: Exception) {
+            // ignore
         }
     }
 
     private fun findRecognitionServiceComponent(): ComponentName? {
         return try {
-            val services = packageManager.queryIntentServices(
-                Intent("android.speech.RecognitionService"),
-                0,
-            )
+            val services = packageManager.queryIntentServices(Intent("android.speech.RecognitionService"), 0)
             if (services.isEmpty()) return null
 
             val preferred = services.firstOrNull {
@@ -462,18 +484,18 @@ class MainActivity : AppCompatActivity() {
 
     private fun speechErrorMessage(error: Int): String {
         return when (error) {
-            SpeechRecognizer.ERROR_AUDIO -> "音频采集错误"
-            SpeechRecognizer.ERROR_CLIENT -> "客户端错误"
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "缺少录音权限"
-            SpeechRecognizer.ERROR_NETWORK -> "网络错误"
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "网络超时"
-            SpeechRecognizer.ERROR_NO_MATCH -> "未识别到内容"
-            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别服务忙"
-            SpeechRecognizer.ERROR_SERVER -> "识别服务异常"
-            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "说话超时"
-            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "语言不支持"
-            SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "语言暂不可用"
-            else -> "未知错误($error)"
+            SpeechRecognizer.ERROR_AUDIO -> "Audio capture error"
+            SpeechRecognizer.ERROR_CLIENT -> "Client error"
+            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "Missing audio permission"
+            SpeechRecognizer.ERROR_NETWORK -> "Network error"
+            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "Network timeout"
+            SpeechRecognizer.ERROR_NO_MATCH -> "No match"
+            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "Recognizer busy"
+            SpeechRecognizer.ERROR_SERVER -> "Service error"
+            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "Speech timeout"
+            SpeechRecognizer.ERROR_LANGUAGE_NOT_SUPPORTED -> "Language not supported"
+            SpeechRecognizer.ERROR_LANGUAGE_UNAVAILABLE -> "Language unavailable"
+            else -> "Unknown error($error)"
         }
     }
 
@@ -482,8 +504,10 @@ class MainActivity : AppCompatActivity() {
             speechRecognizer?.cancel()
             speechRecognizer?.destroy()
         } catch (_: Exception) {
+            // ignore
         } finally {
             speechRecognizer = null
+            sttListening = false
         }
     }
 
@@ -497,10 +521,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun speak(text: String) {
         if (!speakSwitch.isChecked) return
-        tts?.speak(text, TextToSpeech.QUEUE_ADD, null, "msg-${System.currentTimeMillis()}")
+        val speakText = normalizeForSpeech(text)
+        if (speakText.isBlank()) return
+        tts?.speak(speakText, TextToSpeech.QUEUE_ADD, null, "msg-${System.currentTimeMillis()}")
     }
 
-    private fun prefs() = getSharedPreferences("audiobridge", MODE_PRIVATE)
+    private fun prefs() = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
 
     private fun loadPrefs() {
         val p = prefs()
@@ -510,11 +536,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun savePrefs() {
-        val p = prefs().edit()
-        p.putString("sessionId", sessionIdInput.text?.toString()?.trim().orEmpty())
-        p.putString("clientId", clientIdInput.text?.toString()?.trim().orEmpty())
-        p.putBoolean("speakEnabled", speakSwitch.isChecked)
-        p.apply()
+        prefs().edit()
+            .putString("sessionId", sessionIdInput.text?.toString()?.trim().orEmpty())
+            .putString("clientId", clientIdInput.text?.toString()?.trim().orEmpty())
+            .putBoolean("speakEnabled", speakSwitch.isChecked)
+            .apply()
     }
 
     private fun hasRecordAudioPermission(): Boolean {
@@ -528,11 +554,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestRecordAudioPermission() {
-        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1001)
+        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), REQ_RECORD_AUDIO)
     }
 
     private fun requestLocationPermission() {
-        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), 1002)
+        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.ACCESS_FINE_LOCATION), REQ_LOCATION)
     }
 
     override fun onRequestPermissionsResult(
@@ -541,7 +567,7 @@ class MainActivity : AppCompatActivity() {
         grantResults: IntArray,
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == 1002) {
+        if (requestCode == REQ_LOCATION) {
             refreshRouteInfo()
         }
     }
