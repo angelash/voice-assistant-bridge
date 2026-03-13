@@ -140,6 +140,23 @@ OpenClaw 转发必须携带 `message_id`，用于去重和重放保护。
 2. 否则走穿透链路。
 3. 若首选链路失败，可按策略回退到另一链路（建议可配置开关）。
 
+## 8.3 Android 基线工程对齐要求（新增冻结）
+
+基线工程路径（外部参考）：
+
+1. `F:\workspace\github\MyChatGPT\src\android\AudioBridgeClient`
+
+对齐要求：
+
+1. Android 端技术方案与默认配置以该工程为基准，不另起炉灶。
+2. 保持现有工程栈：Kotlin + Android AppCompat/View + OkHttp WebSocket + 前台服务。
+3. 保持基础构建参数：`minSdk=21`、`compileSdk/targetSdk=34`、`Java/Kotlin=17`。
+4. 保持前台服务模型：`AudioBridgeForegroundService` 负责后台保活、连接管理、重连和音频链路。
+5. 保持现有核心配置项语义：`host`、`token`、`enableUplink`、`enableDownlink`、`tuningMode`。
+6. 在现有配置基础上扩展双链路字段，不破坏原有配置读取与启动流程。
+7. 保持现有音频链路默认参数：48kHz、mono、PCM16、20ms 帧；可协商 `adpcm/pcm`。
+8. 默认通信入口保持 WebSocket（`/abp`），文本业务字段在该链路上按新协议扩展。
+
 ## 9. Windows 对外接口（建议）
 
 ## 9.1 POST `/v1/messages`
@@ -199,4 +216,3 @@ OpenClaw 转发必须携带 `message_id`，用于去重和重放保护。
 1. Android 端直接接入 OpenClaw（绕过 Windows）不在本期。
 2. 复杂权限系统与多租户管理不在本期。
 3. 端到端音频流转（非文本形态）不在本期。
-
