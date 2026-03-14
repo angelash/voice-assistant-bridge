@@ -62,6 +62,15 @@ EVT_TRANSCRIPTION_STARTED = "transcription.started"
 EVT_TRANSCRIPTION_COMPLETED = "transcription.completed"
 EVT_TRANSCRIPTION_FAILED = "transcription.failed"
 
+# M4: Speaker diarization event types
+EVT_SPEAKER_IDENTIFIED = "speaker.identified"
+EVT_SPEAKER_RENAMED = "speaker.renamed"
+
+# M4: Speaker name source constants
+SPEAKER_SOURCE_DIARIZATION = "diarization"  # Auto-detected by diarization
+SPEAKER_SOURCE_MANUAL = "manual"  # Manually assigned
+SPEAKER_SOURCE_HISTORY = "history"  # Reused from historical mapping
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -145,6 +154,39 @@ class MeetingStore:
                     created_at TEXT NOT NULL
                 )
             """)
+            # M4: Refined meeting segments with speaker info
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS meeting_segments_refined (
+                    segment_ref_id TEXT PRIMARY KEY,
+                    meeting_id TEXT NOT NULL,
+                    audio_segment_id TEXT,
+                    seq INTEGER NOT NULL,
+                    start_ts REAL NOT NULL,
+                    end_ts REAL NOT NULL,
+                    text TEXT NOT NULL,
+                    speaker_cluster_id TEXT,
+                    speaker_confidence REAL,
+                    speaker_name TEXT,
+                    speaker_name_source TEXT,
+                    revision INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+            # M4: Speaker name mappings (audit history)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS speaker_name_mappings (
+                    mapping_id TEXT PRIMARY KEY,
+                    meeting_id TEXT NOT NULL,
+                    speaker_cluster_id TEXT NOT NULL,
+                    old_name TEXT,
+                    new_name TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    changed_by TEXT,
+                    changed_at TEXT NOT NULL,
+                    notes TEXT
+                )
+            """)
             # Indexes
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_events_meeting ON meeting_events(meeting_id, ts_server)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_events_type ON meeting_events(event_type)")
@@ -153,6 +195,11 @@ class MeetingStore:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audio_segments_upload ON audio_segments(upload_status)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_transcription_jobs_meeting ON transcription_jobs(meeting_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_transcription_jobs_status ON transcription_jobs(status)")
+            # M4 indexes
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_refined_segments_meeting ON meeting_segments_refined(meeting_id, seq)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_refined_segments_speaker ON meeting_segments_refined(meeting_id, speaker_cluster_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_speaker_mappings_meeting ON speaker_name_mappings(meeting_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_speaker_mappings_cluster ON speaker_name_mappings(speaker_cluster_id)")
             self.conn.commit()
 
     @staticmethod
@@ -460,6 +507,189 @@ class MeetingStore:
         with self.lock:
             self.conn.execute(f"UPDATE transcription_jobs SET {sets} WHERE job_id=?", args)
             self.conn.commit()
+
+    # --- M4: Refined Meeting Segments ---
+
+    def create_refined_segment(
+        self,
+        *,
+        meeting_id: str,
+        seq: int,
+        start_ts: float,
+        end_ts: float,
+        text: str,
+        audio_segment_id: Optional[str] = None,
+        speaker_cluster_id: Optional[str] = None,
+        speaker_confidence: Optional[float] = None,
+        speaker_name: Optional[str] = None,
+        speaker_name_source: Optional[str] = None,
+        revision: int = 1,
+    ) -> dict[str, Any]:
+        """Create a refined segment with speaker info."""
+        segment_ref_id = f"sref-{uuid.uuid4().hex}"
+        ts = now_iso()
+        row = {
+            "segment_ref_id": segment_ref_id,
+            "meeting_id": meeting_id,
+            "audio_segment_id": audio_segment_id,
+            "seq": seq,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "text": text,
+            "speaker_cluster_id": speaker_cluster_id,
+            "speaker_confidence": speaker_confidence,
+            "speaker_name": speaker_name,
+            "speaker_name_source": speaker_name_source,
+            "revision": revision,
+            "created_at": ts,
+            "updated_at": ts,
+        }
+        with self.lock:
+            cols = ", ".join(row.keys())
+            vals = ", ".join("?" for _ in row)
+            self.conn.execute(f"INSERT INTO meeting_segments_refined ({cols}) VALUES ({vals})", list(row.values()))
+            self.conn.commit()
+        return row
+
+    def get_refined_segments(self, meeting_id: str) -> list[dict[str, Any]]:
+        """Get all refined segments for a meeting."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM meeting_segments_refined WHERE meeting_id=? ORDER BY seq ASC",
+                (meeting_id,),
+            ).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def get_refined_segment(self, segment_ref_id: str) -> Optional[dict[str, Any]]:
+        """Get a single refined segment by ID."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM meeting_segments_refined WHERE segment_ref_id=?",
+                (segment_ref_id,),
+            ).fetchone()
+        return self._dict(row) if row else None
+
+    def update_refined_segment(self, segment_ref_id: str, **fields: Any) -> None:
+        """Update refined segment fields."""
+        if not fields:
+            return
+        fields["updated_at"] = now_iso()
+        keys = list(fields.keys())
+        sets = ", ".join(f"{k}=?" for k in keys)
+        args = [fields[k] for k in keys] + [segment_ref_id]
+        with self.lock:
+            self.conn.execute(f"UPDATE meeting_segments_refined SET {sets} WHERE segment_ref_id=?", args)
+            self.conn.commit()
+
+    def update_speaker_for_cluster(
+        self,
+        meeting_id: str,
+        speaker_cluster_id: str,
+        speaker_name: str,
+        source: str = "manual",
+    ) -> int:
+        """Update speaker name for all segments with a given cluster ID."""
+        ts = now_iso()
+        with self.lock:
+            cursor = self.conn.execute(
+                "UPDATE meeting_segments_refined SET speaker_name=?, speaker_name_source=?, updated_at=? WHERE meeting_id=? AND speaker_cluster_id=?",
+                (speaker_name, source, ts, meeting_id, speaker_cluster_id),
+            )
+            self.conn.commit()
+        return cursor.rowcount
+
+    def get_speakers_for_meeting(self, meeting_id: str) -> list[dict[str, Any]]:
+        """Get unique speakers with their segment counts for a meeting."""
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT 
+                    speaker_cluster_id,
+                    speaker_name,
+                    speaker_name_source,
+                    COUNT(*) as segment_count,
+                    AVG(speaker_confidence) as avg_confidence,
+                    MIN(start_ts) as first_appearance,
+                    MAX(end_ts) as last_appearance
+                FROM meeting_segments_refined
+                WHERE meeting_id=?
+                GROUP BY speaker_cluster_id
+                ORDER BY first_appearance ASC
+                """,
+                (meeting_id,),
+            ).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def clear_refined_segments(self, meeting_id: str) -> None:
+        """Clear all refined segments for a meeting (for re-processing)."""
+        with self.lock:
+            self.conn.execute(
+                "DELETE FROM meeting_segments_refined WHERE meeting_id=?",
+                (meeting_id,),
+            )
+            self.conn.commit()
+
+    # --- M4: Speaker Name Mappings (Audit History) ---
+
+    def create_speaker_mapping(
+        self,
+        *,
+        meeting_id: str,
+        speaker_cluster_id: str,
+        old_name: Optional[str],
+        new_name: str,
+        source: str = "manual",
+        changed_by: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Create a speaker name mapping record for audit."""
+        mapping_id = f"smap-{uuid.uuid4().hex}"
+        ts = now_iso()
+        row = {
+            "mapping_id": mapping_id,
+            "meeting_id": meeting_id,
+            "speaker_cluster_id": speaker_cluster_id,
+            "old_name": old_name,
+            "new_name": new_name,
+            "source": source,
+            "changed_by": changed_by,
+            "changed_at": ts,
+            "notes": notes,
+        }
+        with self.lock:
+            cols = ", ".join(row.keys())
+            vals = ", ".join("?" for _ in row)
+            self.conn.execute(f"INSERT INTO speaker_name_mappings ({cols}) VALUES ({vals})", list(row.values()))
+            self.conn.commit()
+        return row
+
+    def get_speaker_mapping_history(
+        self,
+        meeting_id: str,
+        speaker_cluster_id: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Get speaker name mapping history for a meeting."""
+        with self.lock:
+            if speaker_cluster_id:
+                rows = self.conn.execute(
+                    "SELECT * FROM speaker_name_mappings WHERE meeting_id=? AND speaker_cluster_id=? ORDER BY changed_at DESC",
+                    (meeting_id, speaker_cluster_id),
+                ).fetchall()
+            else:
+                rows = self.conn.execute(
+                    "SELECT * FROM speaker_name_mappings WHERE meeting_id=? ORDER BY changed_at DESC",
+                    (meeting_id,),
+                ).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def get_latest_speaker_name(self, meeting_id: str, speaker_cluster_id: str) -> Optional[str]:
+        """Get the latest speaker name for a cluster from mapping history."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT new_name FROM speaker_name_mappings WHERE meeting_id=? AND speaker_cluster_id=? ORDER BY changed_at DESC LIMIT 1",
+                (meeting_id, speaker_cluster_id),
+            ).fetchone()
+        return row["new_name"] if row else None
 
     def close(self) -> None:
         with self.lock:

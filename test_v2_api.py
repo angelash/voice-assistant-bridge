@@ -807,5 +807,274 @@ class TestConcurrentAPIDuringTranscription(unittest.TestCase):
         self.assertEqual(response.status, 200)
 
 
+class TestM4SpeakerDiarization(unittest.TestCase):
+    """Test M4: Speaker diarization functionality"""
+    
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_m4.db"
+        self.store = MeetingStore(self.db_path)
+        self.event_hub = MockEventHub()
+        self.api = V2MeetingAPI(self.store, self.event_hub)
+        
+    def tearDown(self):
+        self.store.close()
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+    
+    def test_create_refined_segment(self):
+        """Test creating refined segments with speaker info"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        segment = self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            start_ts=0.0,
+            end_ts=5.0,
+            text="Hello world",
+            speaker_cluster_id="speaker_0",
+            speaker_confidence=0.85,
+        )
+        
+        self.assertIsNotNone(segment)
+        self.assertTrue(segment["segment_ref_id"].startswith("sref-"))
+        self.assertEqual(segment["speaker_cluster_id"], "speaker_0")
+        self.assertEqual(segment["speaker_confidence"], 0.85)
+        
+    def test_get_refined_segments(self):
+        """Test getting refined segments for a meeting"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create multiple segments
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1, start_ts=0.0, end_ts=5.0, text="First",
+            speaker_cluster_id="speaker_0",
+        )
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=2, start_ts=5.0, end_ts=10.0, text="Second",
+            speaker_cluster_id="speaker_1",
+        )
+        
+        segments = self.store.get_refined_segments(meeting["meeting_id"])
+        self.assertEqual(len(segments), 2)
+        
+    def test_update_speaker_for_cluster(self):
+        """Test updating speaker name for all segments with a cluster ID"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create segments with same speaker
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1, start_ts=0.0, end_ts=5.0, text="First",
+            speaker_cluster_id="speaker_0",
+        )
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=2, start_ts=5.0, end_ts=10.0, text="Second",
+            speaker_cluster_id="speaker_0",
+        )
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=3, start_ts=10.0, end_ts=15.0, text="Third",
+            speaker_cluster_id="speaker_1",
+        )
+        
+        # Update speaker_0 name
+        updated_count = self.store.update_speaker_for_cluster(
+            meeting_id=meeting["meeting_id"],
+            speaker_cluster_id="speaker_0",
+            speaker_name="Alice",
+            source="manual",
+        )
+        
+        self.assertEqual(updated_count, 2)
+        
+        # Verify update
+        segments = self.store.get_refined_segments(meeting["meeting_id"])
+        for seg in segments:
+            if seg["speaker_cluster_id"] == "speaker_0":
+                self.assertEqual(seg["speaker_name"], "Alice")
+                self.assertEqual(seg["speaker_name_source"], "manual")
+            else:
+                self.assertIsNone(seg["speaker_name"])
+        
+    def test_get_speakers_for_meeting(self):
+        """Test getting unique speakers for a meeting"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create segments with different speakers
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1, start_ts=0.0, end_ts=5.0, text="First",
+            speaker_cluster_id="speaker_0",
+            speaker_confidence=0.9,
+        )
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=2, start_ts=5.0, end_ts=10.0, text="Second",
+            speaker_cluster_id="speaker_0",
+            speaker_confidence=0.8,
+        )
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=3, start_ts=10.0, end_ts=15.0, text="Third",
+            speaker_cluster_id="speaker_1",
+            speaker_confidence=0.7,
+        )
+        
+        speakers = self.store.get_speakers_for_meeting(meeting["meeting_id"])
+        self.assertEqual(len(speakers), 2)
+        
+        # Check speaker_0 stats
+        speaker_0 = next(s for s in speakers if s["speaker_cluster_id"] == "speaker_0")
+        self.assertEqual(speaker_0["segment_count"], 2)
+        self.assertAlmostEqual(speaker_0["avg_confidence"], 0.85, places=2)
+        
+    def test_create_speaker_mapping(self):
+        """Test creating speaker name mapping for audit"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        mapping = self.store.create_speaker_mapping(
+            meeting_id=meeting["meeting_id"],
+            speaker_cluster_id="speaker_0",
+            old_name=None,
+            new_name="Alice",
+            source="manual",
+            changed_by="user-123",
+            notes="Initial naming",
+        )
+        
+        self.assertIsNotNone(mapping)
+        self.assertTrue(mapping["mapping_id"].startswith("smap-"))
+        self.assertEqual(mapping["new_name"], "Alice")
+        self.assertEqual(mapping["source"], "manual")
+        
+    def test_get_speaker_mapping_history(self):
+        """Test getting speaker mapping history"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create multiple mappings
+        self.store.create_speaker_mapping(
+            meeting_id=meeting["meeting_id"],
+            speaker_cluster_id="speaker_0",
+            old_name=None,
+            new_name="Alice",
+            source="manual",
+        )
+        self.store.create_speaker_mapping(
+            meeting_id=meeting["meeting_id"],
+            speaker_cluster_id="speaker_0",
+            old_name="Alice",
+            new_name="Bob",
+            source="manual",
+        )
+        
+        history = self.store.get_speaker_mapping_history(
+            meeting_id=meeting["meeting_id"],
+            speaker_cluster_id="speaker_0",
+        )
+        
+        self.assertEqual(len(history), 2)
+        # Most recent first
+        self.assertEqual(history[0]["new_name"], "Bob")
+        self.assertEqual(history[1]["new_name"], "Alice")
+        
+    def test_api_handle_get_refined_segments(self):
+        """Test GET /v2/meetings/{meeting_id}/refined endpoint"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create a refined segment
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1, start_ts=0.0, end_ts=5.0, text="Test",
+            speaker_cluster_id="speaker_0",
+        )
+        
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        
+        response = asyncio.run(self.api.handle_get_refined_segments(request))
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertEqual(len(body["segments"]), 1)
+        self.assertEqual(body["segments"][0]["text"], "Test")
+        
+    def test_api_handle_get_speakers(self):
+        """Test GET /v2/meetings/{meeting_id}/speakers endpoint"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create segments with speakers
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1, start_ts=0.0, end_ts=5.0, text="First",
+            speaker_cluster_id="speaker_0",
+        )
+        
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        
+        response = asyncio.run(self.api.handle_get_speakers(request))
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertEqual(len(body["speakers"]), 1)
+        self.assertEqual(body["speakers"][0]["speaker_cluster_id"], "speaker_0")
+        
+    def test_api_handle_rename_speaker(self):
+        """Test PATCH /v2/meetings/{meeting_id}/speakers/{speaker_cluster_id} endpoint"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create segments with speaker
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1, start_ts=0.0, end_ts=5.0, text="First",
+            speaker_cluster_id="speaker_0",
+        )
+        
+        request = MagicMock()
+        request.match_info = {
+            "meeting_id": meeting["meeting_id"],
+            "speaker_cluster_id": "speaker_0",
+        }
+        request.json = AsyncMock(return_value={"speaker_name": "Alice"})
+        
+        response = asyncio.run(self.api.handle_rename_speaker(request))
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["new_name"], "Alice")
+        self.assertEqual(body["segments_updated"], 1)
+        
+        # Verify segment was updated
+        segments = self.store.get_refined_segments(meeting["meeting_id"])
+        self.assertEqual(segments[0]["speaker_name"], "Alice")
+        
+    def test_api_handle_get_speaker_history(self):
+        """Test GET /v2/meetings/{meeting_id}/speakers/history endpoint"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create a mapping
+        self.store.create_speaker_mapping(
+            meeting_id=meeting["meeting_id"],
+            speaker_cluster_id="speaker_0",
+            old_name=None,
+            new_name="Alice",
+            source="manual",
+        )
+        
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        
+        response = asyncio.run(self.api.handle_get_speaker_history(request))
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertEqual(len(body["history"]), 1)
+        self.assertEqual(body["history"][0]["new_name"], "Alice")
+
+
 if __name__ == "__main__":
     unittest.main()

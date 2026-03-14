@@ -550,6 +550,247 @@ class TranscriptionTaskWidget(QWidget):
         self.status_label.setText(f"{len(jobs)} 个任务")
 
 
+class SpeakerPanelWidget(QWidget):
+    """M4: Speaker panel with rename functionality"""
+    
+    def __init__(self, client: MeetingClient, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self._current_meeting_id: Optional[str] = None
+        self._build_ui()
+        
+        # Auto-refresh timer
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._on_refresh_timer)
+        self._refresh_timer.start(10000)  # Refresh every 10 seconds
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Title
+        title = QLabel("👥 说话人")
+        title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        layout.addWidget(title)
+        
+        # Speaker list
+        self.speaker_list = QListWidget()
+        self.speaker_list.setMaximumHeight(150)
+        self.speaker_list.itemDoubleClicked.connect(self._on_speaker_double_clicked)
+        layout.addWidget(self.speaker_list)
+        
+        # Rename button
+        self.rename_btn = QPushButton("重命名")
+        self.rename_btn.clicked.connect(self._on_rename_clicked)
+        layout.addWidget(self.rename_btn)
+        
+        # Status label
+        self.status_label = QLabel("无说话人数据")
+        self.status_label.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(self.status_label)
+    
+    def set_meeting(self, meeting_id: Optional[str]):
+        """Set the current meeting ID for speaker operations."""
+        self._current_meeting_id = meeting_id
+        if meeting_id:
+            asyncio.create_task(self._refresh())
+    
+    def _on_refresh_timer(self):
+        if self._current_meeting_id:
+            asyncio.create_task(self._refresh())
+    
+    async def _refresh(self):
+        if not self._current_meeting_id:
+            return
+        
+        try:
+            result = await self._get_speakers(self._current_meeting_id)
+            if result.get("ok"):
+                speakers = result.get("speakers", [])
+                self._update_ui(speakers)
+        except Exception as e:
+            self.status_label.setText(f"刷新失败: {e}")
+    
+    async def _get_speakers(self, meeting_id: str) -> dict:
+        """Get speakers for a meeting."""
+        session = self.client._session
+        if session is None:
+            session = await self.client._get_session()
+        
+        async with session.get(
+            f"{self.client.base_url}/v2/meetings/{meeting_id}/speakers",
+        ) as resp:
+            return await resp.json()
+    
+    def _update_ui(self, speakers: list):
+        self.speaker_list.clear()
+        
+        if not speakers:
+            self.status_label.setText("无说话人数据")
+            return
+        
+        for speaker in speakers:
+            speaker_id = speaker.get("speaker_cluster_id", "unknown")
+            name = speaker.get("speaker_name", "")
+            segment_count = speaker.get("segment_count", 0)
+            confidence = speaker.get("avg_confidence", 0) or 0
+            
+            display_name = name if name else speaker_id.replace("speaker_", "说话人 ")
+            confidence_pct = int(confidence * 100)
+            
+            item_text = f"🎤 {display_name} ({segment_count}段, {confidence_pct}%)"
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, {
+                "speaker_cluster_id": speaker_id,
+                "speaker_name": name,
+                "segment_count": segment_count,
+            })
+            
+            self.speaker_list.addItem(item)
+        
+        self.status_label.setText(f"{len(speakers)} 位说话人")
+    
+    def _on_speaker_double_clicked(self, item: QListWidgetItem):
+        self._do_rename(item)
+    
+    def _on_rename_clicked(self):
+        item = self.speaker_list.currentItem()
+        if item:
+            self._do_rename(item)
+    
+    def _do_rename(self, item: QListWidgetItem):
+        from PySide6.QtWidgets import QInputDialog
+        
+        data = item.data(Qt.UserRole)
+        speaker_id = data.get("speaker_cluster_id")
+        current_name = data.get("speaker_name", "")
+        
+        text, ok = QInputDialog.getText(
+            self,
+            "重命名说话人",
+            f"输入新名称 ({speaker_id}):",
+            text=current_name,
+        )
+        
+        if ok and text.strip():
+            asyncio.create_task(self._rename_speaker(speaker_id, text.strip()))
+    
+    async def _rename_speaker(self, speaker_cluster_id: str, new_name: str):
+        if not self._current_meeting_id:
+            return
+        
+        try:
+            session = self.client._session
+            if session is None:
+                session = await self.client._get_session()
+            
+            async with session.patch(
+                f"{self.client.base_url}/v2/meetings/{self._current_meeting_id}/speakers/{speaker_cluster_id}",
+                json={"speaker_name": new_name},
+            ) as resp:
+                result = await resp.json()
+            
+            if result.get("ok"):
+                self.status_label.setText(f"已重命名为: {new_name}")
+                await self._refresh()
+            else:
+                self.status_label.setText(f"重命名失败: {result.get('error')}")
+        except Exception as e:
+            self.status_label.setText(f"重命名失败: {e}")
+
+
+class RefinedTranscriptWidget(QWidget):
+    """M4: Refined transcript view with speaker names"""
+    
+    def __init__(self, client: MeetingClient, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self._current_meeting_id: Optional[str] = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Title
+        header = QHBoxLayout()
+        title = QLabel("📄 稳定稿")
+        title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        header.addWidget(title)
+        
+        self.refresh_btn = QPushButton("刷新")
+        self.refresh_btn.clicked.connect(self._on_refresh_clicked)
+        header.addWidget(self.refresh_btn)
+        layout.addLayout(header)
+        
+        # Transcript view
+        self.transcript_view = QTextEdit()
+        self.transcript_view.setReadOnly(True)
+        self.transcript_view.setFont(QFont("Microsoft YaHei", 10))
+        layout.addWidget(self.transcript_view)
+        
+        # Status
+        self.status_label = QLabel("无转写数据")
+        self.status_label.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(self.status_label)
+    
+    def set_meeting(self, meeting_id: Optional[str]):
+        """Set the current meeting ID."""
+        self._current_meeting_id = meeting_id
+        if meeting_id:
+            asyncio.create_task(self._refresh())
+    
+    def _on_refresh_clicked(self):
+        if self._current_meeting_id:
+            asyncio.create_task(self._refresh())
+    
+    async def _refresh(self):
+        if not self._current_meeting_id:
+            return
+        
+        try:
+            session = self.client._session
+            if session is None:
+                session = await self.client._get_session()
+            
+            async with session.get(
+                f"{self.client.base_url}/v2/meetings/{self._current_meeting_id}/refined",
+            ) as resp:
+                result = await resp.json()
+            
+            if result.get("ok"):
+                segments = result.get("segments", [])
+                self._update_ui(segments)
+            else:
+                self.status_label.setText(f"获取失败: {result.get('error')}")
+        except Exception as e:
+            self.status_label.setText(f"刷新失败: {e}")
+    
+    def _update_ui(self, segments: list):
+        self.transcript_view.clear()
+        
+        if not segments:
+            self.status_label.setText("无转写数据")
+            return
+        
+        # Build formatted transcript
+        html_parts = []
+        for seg in segments:
+            speaker_name = seg.get("speaker_name") or seg.get("speaker_cluster_id", "").replace("speaker_", "说话人 ")
+            text = seg.get("text", "")
+            start_ts = seg.get("start_ts", 0)
+            
+            # Format timestamp
+            mins = int(start_ts // 60)
+            secs = int(start_ts % 60)
+            timestamp = f"[{mins:02d}:{secs:02d}]"
+            
+            # Format line with speaker
+            line = f'<span style="color: #666;">{timestamp}</span> <b style="color: #2196F3;">{speaker_name}:</b> {text}'
+            html_parts.append(line)
+        
+        self.transcript_view.setHtml("<br>".join(html_parts))
+        self.status_label.setText(f"{len(segments)} 段转写")
+
+
 class MeetingConsoleWindow(QMainWindow):
     """Main window for meeting console"""
 
@@ -559,7 +800,7 @@ class MeetingConsoleWindow(QMainWindow):
         self._meeting_client: Optional[MeetingClient] = None
 
         self.setWindowTitle("Meeting Console - Voice Assistant Bridge V2")
-        self.resize(1200, 700)
+        self.resize(1400, 800)
         self._build_ui()
 
     def _build_ui(self):
@@ -572,6 +813,18 @@ class MeetingConsoleWindow(QMainWindow):
         self.console = MeetingConsoleWidget(self._get_client())
         self.console.meeting_started.connect(self._on_meeting_started)
         self.console.meeting_ended.connect(self._on_meeting_ended)
+        
+        # Middle panel: Speaker panel and Refined transcript
+        middle_panel = QWidget()
+        middle_layout = QVBoxLayout(middle_panel)
+        
+        # M4: Speaker panel
+        self.speaker_panel = SpeakerPanelWidget(self._get_client())
+        middle_layout.addWidget(self.speaker_panel)
+        
+        # M4: Refined transcript view
+        self.refined_transcript = RefinedTranscriptWidget(self._get_client())
+        middle_layout.addWidget(self.refined_transcript, stretch=1)
         
         # Right panel: History, Backup status, and Transcription tasks
         right_panel = QWidget()
@@ -592,8 +845,9 @@ class MeetingConsoleWindow(QMainWindow):
         # Splitter
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(self.console)
+        splitter.addWidget(middle_panel)
         splitter.addWidget(right_panel)
-        splitter.setSizes([800, 400])
+        splitter.setSizes([400, 500, 300])
         
         layout.addWidget(splitter)
         
@@ -613,6 +867,9 @@ class MeetingConsoleWindow(QMainWindow):
 
     def _on_meeting_started(self, meeting_id: str):
         self.statusBar().showMessage(f"Meeting started: {meeting_id}")
+        # Update speaker panel with current meeting
+        self.speaker_panel.set_meeting(meeting_id)
+        self.refined_transcript.set_meeting(meeting_id)
 
     def _on_meeting_ended(self, meeting_id: str):
         self.statusBar().showMessage(f"Meeting ended: {meeting_id}")
@@ -622,6 +879,10 @@ class MeetingConsoleWindow(QMainWindow):
         await self.history._refresh()
         await self.backup_status._refresh()
         await self.transcription_tasks._refresh()
+        # Refresh speaker panel and transcript for the ended meeting
+        if self.console.current_meeting_id:
+            self.speaker_panel.set_meeting(self.console.current_meeting_id)
+            self.refined_transcript.set_meeting(self.console.current_meeting_id)
 
     def closeEvent(self, event):
         if self._meeting_client:

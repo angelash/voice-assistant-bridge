@@ -1,5 +1,5 @@
 """
-Voice Assistant Bridge - Transcription Worker (M3)
+Voice Assistant Bridge - Transcription Worker (M3/M4)
 
 Background worker for post-meeting audio transcription using faster-whisper.
 
@@ -8,6 +8,7 @@ Features:
 - Progress reporting via events
 - Error handling with retries
 - Output to refined.jsonl with versioning
+- M4: Speaker diarization integration
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import asyncio
 import json
 import logging
 import threading
+import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +32,10 @@ from meeting import (
     EVT_TRANSCRIPTION_STARTED,
     EVT_TRANSCRIPTION_COMPLETED,
     EVT_TRANSCRIPTION_FAILED,
+    EVT_SPEAKER_IDENTIFIED,
+    EVT_SPEAKER_RENAMED,
+    SPEAKER_SOURCE_DIARIZATION,
+    SPEAKER_SOURCE_MANUAL,
     build_event_envelope,
     now_iso,
 )
@@ -220,9 +226,15 @@ class TranscriptionWorker:
         
         output_path = transcript_dir / "refined.jsonl"
         
+        # Clear existing refined segments for re-processing
+        self.store.clear_refined_segments(meeting_id)
+        
         # Process each audio segment
         all_results = []
         total_segments = len(uploaded_segments)
+        
+        # M4: Speaker diarization - collect all segments first
+        all_whisper_segments = []
         
         for idx, seg in enumerate(uploaded_segments):
             audio_path = seg.get("local_path")
@@ -231,33 +243,167 @@ class TranscriptionWorker:
                 continue
             
             # Transcribe
-            audio_array, _ = self._load_audio(audio_path)
+            audio_array, sample_rate = self._load_audio(audio_path)
             whisper_segments, info = whisper.transcribe(audio_array, language="zh", beam_size=5)
             
-            # Convert to JSONL format
+            # Collect segments with timing info
             for ws in whisper_segments:
-                all_results.append({
-                    "segment_id": seg["segment_id"],
-                    "seq": seg["seq"],
+                all_whisper_segments.append({
+                    "audio_segment_id": seg["segment_id"],
+                    "audio_seq": seg["seq"],
                     "start": ws.start,
                     "end": ws.end,
                     "text": ws.text.strip(),
                 })
             
-            # Report progress
-            progress = int((idx + 1) * 100 / total_segments)
+            # Report progress (50% for transcription)
+            progress = int((idx + 1) * 50 / total_segments)
             self.store.update_transcription_job(job_id, progress_percent=progress)
             self.on_job_progress and self.on_job_progress(job_id, progress)
         
-        # Write output
+        # M4: Run diarization on collected segments
+        logger.info(f"Running speaker diarization for {len(all_whisper_segments)} segments")
+        diarized_segments = self._run_diarization(all_whisper_segments, meeting_id)
+        
+        # Store refined segments with speaker info
+        for idx, seg in enumerate(diarized_segments):
+            refined = self.store.create_refined_segment(
+                meeting_id=meeting_id,
+                seq=idx,
+                start_ts=seg["start"],
+                end_ts=seg["end"],
+                text=seg["text"],
+                audio_segment_id=seg.get("audio_segment_id"),
+                speaker_cluster_id=seg.get("speaker_cluster_id"),
+                speaker_confidence=seg.get("speaker_confidence"),
+                speaker_name=seg.get("speaker_name"),
+                speaker_name_source=seg.get("speaker_name_source"),
+            )
+            all_results.append({
+                "segment_ref_id": refined["segment_ref_id"],
+                "seq": idx,
+                "start": seg["start"],
+                "end": seg["end"],
+                "text": seg["text"],
+                "speaker_cluster_id": seg.get("speaker_cluster_id"),
+                "speaker_name": seg.get("speaker_name"),
+            })
+            
+            # Report progress (50-100% for storage)
+            if idx % 10 == 0:
+                progress = 50 + int((idx + 1) * 50 / len(diarized_segments))
+                self.store.update_transcription_job(job_id, progress_percent=progress)
+        
+        # Write output JSONL
         with open(output_path, "w", encoding="utf-8") as f:
             for item in all_results:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
         
+        # M4: Emit speaker identified event if we have speakers
+        speakers = self.store.get_speakers_for_meeting(meeting_id)
+        if speakers:
+            event = self.store.append_event(
+                meeting_id=meeting_id,
+                source="transcription-worker",
+                event_type=EVT_SPEAKER_IDENTIFIED,
+                payload={
+                    "job_id": job_id,
+                    "speakers_count": len(speakers),
+                    "speakers": [
+                        {
+                            "speaker_cluster_id": s["speaker_cluster_id"],
+                            "segment_count": s["segment_count"],
+                            "avg_confidence": s.get("avg_confidence"),
+                        }
+                        for s in speakers
+                    ],
+                },
+            )
+            asyncio.create_task(self._publish_event(event))
+        
         return {
             "output_path": str(output_path),
             "segments_count": len(all_results),
+            "speakers_count": len(speakers),
         }
+
+    async def _publish_event(self, event: dict) -> None:
+        """Publish an event to the event hub."""
+        await self.event_hub.publish(build_event_envelope(event))
+
+    def _run_diarization(
+        self,
+        segments: list[dict],
+        meeting_id: str,
+    ) -> list[dict]:
+        """
+        Run speaker diarization on transcribed segments.
+        
+        V1 Implementation: Simple pause-based clustering.
+        When there's a significant pause (>2s) between segments, 
+        assume a speaker change.
+        
+        Future: Integrate pyannote.audio for more accurate diarization.
+        """
+        if not segments:
+            return segments
+        
+        PAUSE_THRESHOLD_SEC = 2.0  # Seconds of silence to assume speaker change
+        
+        # Sort by start time
+        sorted_segments = sorted(segments, key=lambda s: (s.get("audio_seq", 0), s.get("start", 0)))
+        
+        # Assign speaker clusters based on pauses
+        current_speaker = "speaker_0"
+        speaker_counter = 0
+        prev_end = 0.0
+        prev_audio_seq = -1
+        
+        for seg in sorted_segments:
+            # Check for pause (gap between segments)
+            gap = seg["start"] - prev_end
+            
+            # Also consider audio segment boundaries
+            if seg.get("audio_seq", 0) != prev_audio_seq:
+                # Reset timing across audio segment boundaries
+                gap = PAUSE_THRESHOLD_SEC + 1  # Force new speaker check
+            
+            if gap > PAUSE_THRESHOLD_SEC and prev_end > 0:
+                # Significant pause - likely speaker change
+                speaker_counter += 1
+                current_speaker = f"speaker_{speaker_counter}"
+            
+            seg["speaker_cluster_id"] = current_speaker
+            seg["speaker_confidence"] = 0.7  # Default confidence for pause-based
+            seg["speaker_name"] = None  # Will be set by user or history
+            seg["speaker_name_source"] = SPEAKER_SOURCE_DIARIZATION
+            
+            prev_end = seg["end"]
+            prev_audio_seq = seg.get("audio_seq", 0)
+        
+        # Apply historical speaker names if available
+        self._apply_historical_speaker_names(sorted_segments, meeting_id)
+        
+        return sorted_segments
+
+    def _apply_historical_speaker_names(
+        self,
+        segments: list[dict],
+        meeting_id: str,
+    ) -> None:
+        """Apply speaker names from historical mappings."""
+        # Get unique speakers
+        speakers = set(seg["speaker_cluster_id"] for seg in segments if seg.get("speaker_cluster_id"))
+        
+        for speaker_id in speakers:
+            # Check for historical name
+            latest_name = self.store.get_latest_speaker_name(meeting_id, speaker_id)
+            if latest_name:
+                # Apply to all segments with this speaker
+                for seg in segments:
+                    if seg.get("speaker_cluster_id") == speaker_id:
+                        seg["speaker_name"] = latest_name
+                        seg["speaker_name_source"] = "history"
 
     def _load_audio(self, audio_path: str) -> tuple:
         """Load audio file for transcription."""

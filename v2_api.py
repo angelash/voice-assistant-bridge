@@ -29,6 +29,8 @@ from meeting import (
     EVT_TRANSCRIPTION_STARTED,
     EVT_TRANSCRIPTION_COMPLETED,
     EVT_TRANSCRIPTION_FAILED,
+    EVT_SPEAKER_IDENTIFIED,
+    EVT_SPEAKER_RENAMED,
     MEETING_STATUS_IDLE,
     MEETING_STATUS_PREP,
     MEETING_STATUS_ACTIVE,
@@ -38,6 +40,7 @@ from meeting import (
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCESS,
     JOB_STATUS_FAILED,
+    SPEAKER_SOURCE_MANUAL,
     build_event_envelope,
     now_iso,
 )
@@ -711,6 +714,167 @@ class V2MeetingAPI:
             "count": len(queued),
         })
 
+    # --- M4: Refined Segments and Speaker Management ---
+
+    async def handle_get_refined_segments(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/refined - Get refined segments with speaker info.
+        
+        M4: Returns all refined segments for a meeting.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        segments = self.store.get_refined_segments(meeting_id)
+        
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "segments": segments,
+            "count": len(segments),
+        })
+
+    async def handle_get_speakers(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/speakers - Get speakers for a meeting.
+        
+        M4: Returns unique speakers with segment counts and timing.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        speakers = self.store.get_speakers_for_meeting(meeting_id)
+        
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "speakers": speakers,
+            "count": len(speakers),
+        })
+
+    async def handle_rename_speaker(self, request: web.Request) -> web.Response:
+        """PATCH /v2/meetings/{meeting_id}/speakers/{speaker_cluster_id} - Rename a speaker.
+        
+        M4: Renames a speaker and updates all associated segments.
+        Records the change in audit history.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        speaker_cluster_id = request.match_info.get("speaker_cluster_id", "").strip()
+        
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+        if not speaker_cluster_id:
+            return web.json_response({"ok": False, "error": "speaker_cluster_id required"}, status=400)
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+
+        new_name = (data.get("speaker_name") or "").strip()
+        if not new_name:
+            return web.json_response({
+                "ok": False,
+                "error": "speaker_name required",
+            }, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        # Get current speaker name
+        speakers = self.store.get_speakers_for_meeting(meeting_id)
+        speaker_info = next((s for s in speakers if s["speaker_cluster_id"] == speaker_cluster_id), None)
+        if not speaker_info:
+            return web.json_response({
+                "ok": False,
+                "error": "speaker_not_found",
+                "message": f"Speaker {speaker_cluster_id} not found in meeting",
+            }, status=404)
+
+        old_name = speaker_info.get("speaker_name")
+
+        # Update all segments with this speaker
+        updated_count = self.store.update_speaker_for_cluster(
+            meeting_id=meeting_id,
+            speaker_cluster_id=speaker_cluster_id,
+            speaker_name=new_name,
+            source=SPEAKER_SOURCE_MANUAL,
+        )
+
+        # Create audit record
+        mapping = self.store.create_speaker_mapping(
+            meeting_id=meeting_id,
+            speaker_cluster_id=speaker_cluster_id,
+            old_name=old_name,
+            new_name=new_name,
+            source=SPEAKER_SOURCE_MANUAL,
+            changed_by=data.get("changed_by"),
+            notes=data.get("notes"),
+        )
+
+        # Emit event
+        event = self.store.append_event(
+            meeting_id=meeting_id,
+            source="api",
+            event_type=EVT_SPEAKER_RENAMED,
+            payload={
+                "speaker_cluster_id": speaker_cluster_id,
+                "old_name": old_name,
+                "new_name": new_name,
+                "segments_updated": updated_count,
+                "mapping_id": mapping["mapping_id"],
+            },
+        )
+        await self.event_hub.publish(build_event_envelope(event))
+
+        logger.info(f"Renamed speaker {speaker_cluster_id} to '{new_name}' in meeting {meeting_id} ({updated_count} segments)")
+
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "speaker_cluster_id": speaker_cluster_id,
+            "old_name": old_name,
+            "new_name": new_name,
+            "segments_updated": updated_count,
+            "mapping_id": mapping["mapping_id"],
+        })
+
+    async def handle_get_speaker_history(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/speakers/history - Get speaker rename history.
+        
+        M4: Returns the audit log of speaker name changes.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        speaker_cluster_id = request.match_info.get("speaker_cluster_id")
+        
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        history = self.store.get_speaker_mapping_history(
+            meeting_id=meeting_id,
+            speaker_cluster_id=speaker_cluster_id,
+        )
+
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "history": history,
+            "count": len(history),
+        })
+
     def register_routes(self, app: web.Application) -> None:
         """Register V2 API routes."""
         app.router.add_post("/v2/meetings", self.handle_create_meeting)
@@ -730,3 +894,8 @@ class V2MeetingAPI:
         app.router.add_get("/v2/transcription/{job_id}", self.handle_get_transcription_job)
         app.router.add_post("/v2/transcription/{job_id}:cancel", self.handle_cancel_transcription_job)
         app.router.add_get("/v2/transcription/queue", self.handle_list_transcription_queue)
+        # M4 routes - Refined segments and speaker management
+        app.router.add_get("/v2/meetings/{meeting_id}/refined", self.handle_get_refined_segments)
+        app.router.add_get("/v2/meetings/{meeting_id}/speakers", self.handle_get_speakers)
+        app.router.add_patch("/v2/meetings/{meeting_id}/speakers/{speaker_cluster_id}", self.handle_rename_speaker)
+        app.router.add_get("/v2/meetings/{meeting_id}/speakers/history", self.handle_get_speaker_history)
