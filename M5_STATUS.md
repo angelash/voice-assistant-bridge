@@ -161,4 +161,5 @@ python3 -m unittest test_v2_api -v
 ## Commit Hashes
 
 - Main commit: `54358c3` - feat(M5): Add image original upload pipeline
-- Android commit: [pending] - feat(M5): Add Android image capture and upload
+- Follow-up: `33c3ee4` - chore: add Pillow for M5 image thumbnail processing
+- Android commit: `8d5a1d5` - feat(M5): Add Android image capture/upload and backend thumbnail generation
