@@ -20,6 +20,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.audiobridge.client.audio.AudioConfig
 import com.audiobridge.client.audio.AudioRecordCapture
 import com.audiobridge.client.audio.DiskWriterConsumer
 import com.audiobridge.client.audio.KwsDetectorConsumer
@@ -165,7 +166,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 2 -> {
                     sttListening = false
-                    stopAudioCapture()
+                    // Disable STT forwarder and stop unified capture if not in meeting mode
+                    sttForwarderConsumer?.enabled = false
+                    stopUnifiedAudioCapture()
                     runOnUiThread {
                         sttButton.text = "Speak To Text"
                         statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
@@ -183,7 +186,9 @@ class MainActivity : AppCompatActivity() {
         override fun onError(asrError: ASR.ASRError, userTag: Any?) {
             val purpose = currentSpeechPurpose
             sttListening = false
-            stopAudioCapture()
+            // Disable STT forwarder and stop unified capture if not in meeting mode
+            sttForwarderConsumer?.enabled = false
+            stopUnifiedAudioCapture()
             runOnUiThread {
                 sttButton.text = "Speak To Text"
             }
@@ -267,7 +272,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         clearPendingLongReply()
-        stopAudioCapture()
+        stopUnifiedAudioCapture()
+        stopAudioCapture()  // Legacy cleanup
 
         // Clean up meeting mode
         if (meetingManager.isActive) {
@@ -275,6 +281,9 @@ class MainActivity : AppCompatActivity() {
         }
         stopMeetingAudioCapture()
         wakeWordStateMachine.destroy()
+
+        // Flush STT forwarder
+        sttForwarderConsumer?.flush()
 
         try {
             asr?.stop(true)
@@ -665,7 +674,8 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (!startAudioCapture(asrClient)) {
+        // Use unified audio capture via PcmDistributionBus
+        if (!startUnifiedAudioCapture()) {
             asrClient.stop(true)
             sttListening = false
             if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
@@ -691,7 +701,11 @@ class MainActivity : AppCompatActivity() {
         sttListening = false
         sttButton.text = "Speak To Text"
         statusText.text = "Processing..."
-        stopAudioCapture()
+        
+        // Disable STT forwarder and stop unified capture if not in meeting mode
+        sttForwarderConsumer?.enabled = false
+        stopUnifiedAudioCapture()
+        
         val purpose = currentSpeechPurpose
         val ret = asr?.stop(false) ?: -1
         if (ret != 0 && sttFinished.compareAndSet(false, true)) {
@@ -779,6 +793,62 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Start unified audio capture via PcmDistributionBus.
+     * This is the single audio capture chain used by both STT and meeting mode.
+     * 
+     * Strategy:
+     * - If meeting mode is active, audio capture is already running - just enable STT consumer
+     * - If meeting mode is not active, start a dedicated STT-only capture
+     */
+    private fun startUnifiedAudioCapture(): Boolean {
+        // Check if audio capture is already running (meeting mode)
+        if (audioCapture?.isRunning == true) {
+            Log.i(TAG, "Reusing existing meeting audio capture for STT")
+            sttForwarderConsumer?.enabled = true
+            return true
+        }
+
+        // Start a new audio capture for STT-only mode
+        audioCapture = AudioRecordCapture()
+        val capture = audioCapture!!
+
+        if (!capture.start()) {
+            Log.e(TAG, "Failed to start STT audio capture")
+            audioCapture = null
+            return false
+        }
+
+        // Enable STT forwarder before starting distribution
+        sttForwarderConsumer?.enabled = true
+
+        // Connect capture to distribution bus
+        pcmBus.startDistribution(capture)
+        
+        Log.i(TAG, "Started STT-only audio capture via unified bus")
+        return true
+    }
+
+    /**
+     * Stop unified audio capture.
+     * Only stops if not in meeting mode (to preserve meeting recording).
+     */
+    private fun stopUnifiedAudioCapture() {
+        // Don't stop if meeting mode is active
+        if (meetingManager.isActive) {
+            Log.i(TAG, "Meeting mode active, keeping audio capture running")
+            return
+        }
+
+        // Stop the STT-only audio capture
+        pcmBus.stopDistribution()
+        audioCapture?.stop()
+        audioCapture = null
+        
+        Log.i(TAG, "Stopped STT-only audio capture")
+    }
+
+    // Legacy method kept for reference - now replaced by unified approach
     private fun startAudioCapture(asrClient: ASR): Boolean {
         stopAudioCapture()
 
@@ -910,10 +980,26 @@ class MainActivity : AppCompatActivity() {
         // Create consumers
         diskWriterConsumer = DiskWriterConsumer(meetingManager)
         kwsConsumer = KwsDetectorConsumer()
+        
+        // Create STT forwarder with resampling (48kHz -> 16kHz)
+        sttForwarderConsumer = SttForwarderConsumer(
+            onPcmCallback = { data16k ->
+                // Forward resampled 16kHz PCM to ASR
+                asr?.let { asrClient ->
+                    val ret = asrClient.write(data16k)
+                    if (ret != 0) {
+                        Log.e(TAG, "ASR write failed via bus: $ret")
+                    }
+                }
+            },
+            sourceSampleRate = AudioConfig.SAMPLE_RATE, // 48000
+            targetSampleRate = STT_SAMPLE_RATE           // 16000
+        )
 
         // Register consumers with the bus
         pcmBus.registerConsumer(diskWriterConsumer)
         pcmBus.registerConsumer(kwsConsumer)
+        pcmBus.registerConsumer(sttForwarderConsumer!!)
 
         // Wire wake word detection
         kwsConsumer.onWakeWordDetected = {
