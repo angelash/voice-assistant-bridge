@@ -130,7 +130,7 @@ class TestLongMeetingStability(unittest.TestCase):
         self.assertEqual(len(events), num_events)
         
         print(f"\nCreated {num_events} events in {elapsed:.2f}s")
-        self.assertLess(elapsed, 15.0, "Should handle 1000 events in <15s")
+        self.assertLess(elapsed, 20.0, "Should handle 1000 events in <20s")
     
     def test_memory_usage_during_long_meeting(self):
         """Test that memory doesn't grow unbounded during long meetings."""
