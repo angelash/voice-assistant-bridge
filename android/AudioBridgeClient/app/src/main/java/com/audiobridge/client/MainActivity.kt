@@ -27,8 +27,11 @@ import com.audiobridge.client.audio.KwsDetectorConsumer
 import com.audiobridge.client.audio.PcmDistributionBus
 import com.audiobridge.client.audio.SttForwarderConsumer
 import com.audiobridge.client.meeting.MeetingManager
+import com.audiobridge.client.upload.UploadQueueManager
+import com.audiobridge.client.upload.UploadStatus
 import com.audiobridge.client.wakeword.WakeWordController
 import com.audiobridge.client.wakeword.WakeWordStateMachine
+import com.audiobridge.client.wakeword.WakewordEventReporter
 import com.iflytek.sparkchain.core.LogLvl
 import com.iflytek.sparkchain.core.SparkChain
 import com.iflytek.sparkchain.core.SparkChainConfig
@@ -115,6 +118,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var pcmBus: PcmDistributionBus
     private lateinit var wakeWordStateMachine: WakeWordStateMachine
     private lateinit var wakeWordController: WakeWordController
+    private lateinit var wakewordEventReporter: WakewordEventReporter
+    private lateinit var uploadQueueManager: UploadQueueManager
     private lateinit var diskWriterConsumer: DiskWriterConsumer
     private lateinit var kwsConsumer: KwsDetectorConsumer
     private var sttForwarderConsumer: SttForwarderConsumer? = null
@@ -281,6 +286,11 @@ class MainActivity : AppCompatActivity() {
         }
         stopMeetingAudioCapture()
         wakeWordStateMachine.destroy()
+        
+        // M2: Stop upload queue processing
+        if (::uploadQueueManager.isInitialized) {
+            uploadQueueManager.stopProcessing()
+        }
 
         // Flush STT forwarder
         sttForwarderConsumer?.flush()
@@ -976,6 +986,41 @@ class MainActivity : AppCompatActivity() {
         // Initialize wake word components
         wakeWordStateMachine = WakeWordStateMachine()
         wakeWordController = WakeWordController(wakeWordStateMachine)
+        
+        // Initialize wakeword event reporter (M2)
+        wakewordEventReporter = WakewordEventReporter(PUBLIC_BASE_URL, httpClient)
+        
+        // Initialize upload queue manager (M2)
+        uploadQueueManager = UploadQueueManager(PUBLIC_BASE_URL, httpClient)
+        
+        // Setup upload queue callbacks
+        uploadQueueManager.onTaskStatusChanged = { task ->
+            runOnUiThread {
+                when (task.status) {
+                    UploadQueueManager.UploadTask.Status.UPLOADED -> {
+                        appendResult("[upload] Segment ${task.seq} uploaded")
+                    }
+                    UploadQueueManager.UploadTask.Status.FAILED -> {
+                        appendResult("[upload] Segment ${task.seq} failed: ${task.lastError}")
+                    }
+                    else -> {}
+                }
+                updateMeetingStatusUI()
+            }
+        }
+        
+        uploadQueueManager.onQueueProgress = { pending, uploaded, failed ->
+            runOnUiThread {
+                meetingInfoText.text = "Upload: $uploaded done, $pending pending, $failed failed"
+            }
+        }
+        
+        uploadQueueManager.onAllTasksComplete = {
+            runOnUiThread {
+                appendResult("[upload] All segments uploaded")
+                meetingInfoText.text = "All uploads complete"
+            }
+        }
 
         // Create consumers
         diskWriterConsumer = DiskWriterConsumer(meetingManager)
@@ -1008,12 +1053,37 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Wake word detected!", Toast.LENGTH_SHORT).show()
             }
             wakeWordController.onWakeWordDetected()
+            
+            // M2: Report wakeword event to server
+            meetingManager.meetingId?.let { meetingId ->
+                wakewordEventReporter.reportWakeWordDetected(meetingId)
+            }
         }
 
         // Wire wake word state changes
         wakeWordStateMachine.onStateChanged = { oldState, newState ->
             runOnUiThread {
                 updateMeetingStatusUI()
+            }
+            
+            // M2: Report state transitions to server
+            meetingManager.meetingId?.let { meetingId ->
+                when (newState) {
+                    WakeWordStateMachine.State.COMMAND_WINDOW -> {
+                        wakewordEventReporter.reportCommandWindowStarted(meetingId)
+                    }
+                    WakeWordStateMachine.State.COOLDOWN -> {
+                        wakewordEventReporter.reportCooldownStarted(meetingId)
+                    }
+                    WakeWordStateMachine.State.LISTENING -> {
+                        if (oldState == WakeWordStateMachine.State.COMMAND_WINDOW) {
+                            wakewordEventReporter.reportCommandWindowEnded(meetingId, false)
+                        } else if (oldState == WakeWordStateMachine.State.COOLDOWN) {
+                            wakewordEventReporter.reportCooldownEnded(meetingId)
+                        }
+                    }
+                    else -> {}
+                }
             }
         }
 
@@ -1031,6 +1101,31 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 appendResult("[meeting] Ended: $meetingId")
                 updateMeetingStatusUI()
+            }
+            
+            // M2: Trigger upload of all segments after meeting ends
+            val manifest = meetingManager.getUploadManifest()
+            if (manifest != null) {
+                val segments = manifest.optJSONArray("segments")
+                if (segments != null && segments.length() > 0) {
+                    for (i in 0 until segments.length()) {
+                        val seg = segments.optJSONObject(i)
+                        val seq = seg.optInt("seq")
+                        val fileName = seg.optString("file")
+                        val file = File(meetingManager.meetingId?.let { 
+                            File(filesDir, "meetings/$it/audio/raw/$fileName")
+                        } ?: continue)
+                        if (file.exists()) {
+                            uploadQueueManager.enqueue(
+                                meetingId = meetingId,
+                                seq = seq,
+                                file = file,
+                                checksum = computeFileChecksum(file)
+                            )
+                        }
+                    }
+                    Log.i(TAG, "Queued ${segments.length()} segments for upload")
+                }
             }
         }
 
@@ -1054,6 +1149,18 @@ class MainActivity : AppCompatActivity() {
         }
 
         updateMeetingStatusUI()
+    }
+    
+    private fun computeFileChecksum(file: File): String {
+        val digest = java.security.MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { input ->
+            val buffer = ByteArray(8192)
+            var read: Int
+            while (input.read(buffer).also { read = it } > 0) {
+                digest.update(buffer, 0, read)
+            }
+        }
+        return digest.digest().joinToString("") { "%02x".format(it) }
     }
 
     private fun onMeetingModeToggled(enabled: Boolean) {
@@ -1138,9 +1245,15 @@ class MainActivity : AppCompatActivity() {
             if (pcmBus.isRunning) {
                 val activeConsumers = pcmBus.getActiveConsumerNames()
                 if (activeConsumers.isNotEmpty()) {
-                    sb.append("Audio: ${activeConsumers.joinToString(", ")}")
+                    sb.append("Audio: ${activeConsumers.joinToString(", ")}\n")
                 }
             }
+            
+            // M2: Show upload queue status
+            if (::uploadQueueManager.isInitialized && uploadQueueManager.isQueueActive) {
+                sb.append("Upload: ${uploadQueueManager.uploadedCount}/${uploadQueueManager.pendingCount + uploadQueueManager.uploadedCount + uploadQueueManager.failedCount}\n")
+            }
+            
             if (sb.isEmpty()) {
                 sb.append("Idle")
             }

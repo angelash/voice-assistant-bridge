@@ -48,9 +48,10 @@ logger = logging.getLogger(__name__)
 class V2MeetingAPI:
     """V2 Meeting API handler."""
 
-    def __init__(self, store: MeetingStore, event_hub: Any):
+    def __init__(self, store: MeetingStore, event_hub: Any, transcription_worker: Any = None):
         self.store = store
         self.event_hub = event_hub
+        self.transcription_worker = transcription_worker
 
     async def handle_create_meeting(self, request: web.Request) -> web.Response:
         """POST /v2/meetings - Create a new meeting session."""
@@ -177,15 +178,38 @@ class V2MeetingAPI:
             )
             await self.event_hub.publish(build_event_envelope(event))
 
-            # After brief processing, mark as archived
-            self.store.update_meeting(meeting_id, status=MEETING_STATUS_ENDING)
+            # M3: Auto-create transcription job when meeting ends
+            transcription_job = None
+            segments = self.store.get_audio_segments(meeting_id)
+            uploaded_segments = [s for s in segments if s.get("upload_status") == "uploaded"]
+            
+            if uploaded_segments:
+                # Check for existing job
+                existing = self.store.get_latest_transcription_job(meeting_id)
+                if not existing or existing.get("status") in (JOB_STATUS_FAILED, JOB_STATUS_CANCELLED):
+                    job = self.store.create_transcription_job(meeting_id=meeting_id)
+                    transcription_job = {
+                        "job_id": job["job_id"],
+                        "status": job["status"],
+                    }
+                    logger.info(f"Auto-created transcription job {job['job_id']} for meeting {meeting_id}")
+                elif existing:
+                    transcription_job = {
+                        "job_id": existing["job_id"],
+                        "status": existing["status"],
+                        "existing": True,
+                    }
+
+            # Mark as archived
+            self.store.update_meeting(meeting_id, status=MEETING_STATUS_ARCHIVED)
 
             return web.json_response({
                 "ok": True,
                 "meeting_id": meeting_id,
-                "status": MEETING_STATUS_ENDING,
+                "status": MEETING_STATUS_ARCHIVED,
                 "mode": "off",
                 "ended_at": ts,
+                "transcription_job": transcription_job,
             })
 
     async def handle_list_meetings(self, request: web.Request) -> web.Response:
@@ -530,63 +554,6 @@ class V2MeetingAPI:
             return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
 
         failed = self.store.get_failed_audio_segments(meeting_id)
-        reset_count = 0
-        
-        for segment in failed:
-            self.store.update_audio_segment(
-                segment["segment_id"],
-                upload_status="pending",
-                upload_error=None,
-            )
-            reset_count += 1
-        
-        return web.json_response({
-            "ok": True,
-            "meeting_id": meeting_id,
-            "reset_count": reset_count,
-            "message": f"Reset {reset_count} failed segments to pending status",
-        })
-
-    async def handle_get_pending_uploads(self, request: web.Request) -> web.Response:
-        """GET /v2/meetings/{meeting_id}/audio/pending - Get pending uploads.
-        
-        M2: Returns segments that need to be uploaded (for retry queue).
-        """
-        meeting_id = request.match_info.get("meeting_id", "").strip()
-        if not meeting_id:
-            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
-
-        meeting = self.store.get_meeting(meeting_id)
-        if not meeting:
-            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
-
-        pending = self.store.get_pending_audio_segments(meeting_id)
-        failed = self.store.get_failed_audio_segments(meeting_id) if hasattr(self.store, 'get_failed_audio_segments') else []
-        
-        return web.json_response({
-            "ok": True,
-            "meeting_id": meeting_id,
-            "pending_segments": pending,
-            "failed_segments": failed,
-            "pending_count": len(pending),
-            "failed_count": len(failed),
-            "total_needs_upload": len(pending) + len(failed),
-        })
-
-    async def handle_reset_failed_upload(self, request: web.Request) -> web.Response:
-        """POST /v2/meetings/{meeting_id}/audio:reset-failed - Reset failed uploads for retry.
-        
-        M2: Resets failed segments back to pending status so they can be retried.
-        """
-        meeting_id = request.match_info.get("meeting_id", "").strip()
-        if not meeting_id:
-            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
-
-        meeting = self.store.get_meeting(meeting_id)
-        if not meeting:
-            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
-
-        failed = self.store.get_failed_audio_segments(meeting_id) if hasattr(self.store, 'get_failed_audio_segments') else []
         reset_count = 0
         
         for segment in failed:

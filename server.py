@@ -24,6 +24,7 @@ from aiohttp import web
 # V2 Meeting Mode support
 from meeting import MeetingStore
 from v2_api import V2MeetingAPI
+from transcription_worker import TranscriptionWorker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -455,7 +456,13 @@ class VoiceAssistantServer:
 
         # V2 Meeting Mode
         self.meeting_store = MeetingStore(db_path)
-        self.v2_api = V2MeetingAPI(self.meeting_store, self.events)
+        self.transcription_worker = TranscriptionWorker(
+            self.meeting_store,
+            self.events,  # Will be set to actual event_hub after init
+            artifacts_dir=Path("artifacts/meetings"),
+            max_workers=2,
+        )
+        self.v2_api = V2MeetingAPI(self.meeting_store, self.events, self.transcription_worker)
 
         self.tts_voice = os.getenv("VOICE_TTS_VOICE", cfg.get("tts_edge_voice", "zh-CN-XiaoxiaoNeural"))
         self.stt = None
@@ -977,6 +984,11 @@ class VoiceAssistantServer:
         )
 
     async def on_startup(self, _app: web.Application) -> None:
+        # Start transcription worker
+        await self.transcription_worker.start()
+        logger.info("Transcription worker started")
+        
+        # Recover pending V1 messages
         pend = self.store.pending()
         if not pend:
             return
@@ -985,6 +997,10 @@ class VoiceAssistantServer:
             self._ensure_forward_task(row["message_id"])
 
     async def on_shutdown(self, _app: web.Application) -> None:
+        # Stop transcription worker
+        await self.transcription_worker.stop()
+        logger.info("Transcription worker stopped")
+        
         for task in list(self.forward_tasks.values()):
             task.cancel()
         if self.forward_tasks:
