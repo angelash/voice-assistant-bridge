@@ -17,7 +17,7 @@
 | ID | 优先级 | 模块 | 问题描述 | 当前策略 | 当前状态 |
 |---|---|---|---|---|---|
 | V2-006 | P2 | 图像分析链路 | `images/{id}:analyze` 仍为占位提示，未直连 OpenClaw worker | 已接入异步 worker（可回退到基础分析） | 已完成 |
-| V2-007 | P2 | 文案/UI | 部分 GUI 文本存在编码污染（乱码） | 不阻塞主链路，后续统一清洗 | 进行中（已清理 `windows_gui.py`） |
+| V2-007 | P2 | 文案/UI | 部分 GUI 文本存在编码污染（乱码） | 不阻塞主链路，后续统一清洗 | 已完成 |
 
 ## 执行记录
 
@@ -26,3 +26,5 @@
 - 2026-03-14: 完成 V2-006：`/images/:analyze` 改为异步入队，`server.py` 挂载 `ImageAnalysisWorker`。
 - 2026-03-14: 使用 JDK17 完成 Android `:app:compileDebugKotlin` 编译验证（通过）。
 - 2026-03-14: V2-007 继续推进，完成 `windows_gui.py` 文案清洗；`windows_meeting_gui.py` 源码为 UTF-8 正常文本，终端显示乱码为读取编码问题。
+- 2026-03-14: 完成 V2-007 收尾：源码级乱码扫描通过；新增图片分析 worker 回归测试，`pytest test_v2_api.py` 全量通过。
+- 2026-03-14: 组合回归通过：`pytest test_v2_api.py test_stability.py`（67 passed）。

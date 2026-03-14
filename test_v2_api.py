@@ -1297,6 +1297,41 @@ class TestM5ImageUpload(unittest.TestCase):
         # Verify image was updated
         updated = self.store.get_meeting_image(image["image_id"])
         self.assertEqual(updated["analysis_status"], "pending")
+
+    def test_api_handle_image_analysis_requeue_from_failed(self):
+        """Test :analyze can requeue a failed analysis back to pending"""
+        meeting = self.store.create_meeting(client_id="test-client")
+
+        image = self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            original_path="/test/path/image.jpg",
+            filename="image.jpg",
+            size_bytes=1024,
+            checksum="abc123",
+        )
+        self.store.update_meeting_image(
+            image["image_id"],
+            analysis_status="analysis_failed",
+            analysis_error="previous_failure",
+        )
+
+        request = MagicMock()
+        request.match_info = {
+            "meeting_id": meeting["meeting_id"],
+            "image_id": image["image_id"],
+        }
+
+        response = asyncio.run(self.api.handle_image_analysis(request))
+        body = json.loads(response.text)
+
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["analysis_status"], "pending")
+
+        updated = self.store.get_meeting_image(image["image_id"])
+        self.assertEqual(updated["analysis_status"], "pending")
+        self.assertIsNone(updated["analysis_error"])
+        self.assertIsNotNone(updated["analysis_result"])
     
     def test_api_handle_image_analysis_result(self):
         """Test PATCH /v2/meetings/{meeting_id}/images/{image_id}/analysis endpoint"""
@@ -1549,6 +1584,76 @@ class TestM5ImageUpload(unittest.TestCase):
         thumb_img = Image.open(thumbnail_path)
         self.assertLessEqual(thumb_img.width, 256)
         self.assertLessEqual(thumb_img.height, 256)
+
+
+class TestM5ImageAnalysisWorker(unittest.TestCase):
+    """Test M5: ImageAnalysisWorker async processing"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_worker_m5.db"
+        self.store = MeetingStore(self.db_path)
+        self.event_hub = MockEventHub()
+
+    def tearDown(self):
+        self.store.close()
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+
+    def test_worker_processes_pending_image(self):
+        """Worker should pick pending image and produce analyzed result"""
+        from image_analysis_worker import ImageAnalysisWorker
+
+        meeting = self.store.create_meeting(client_id="test-client")
+
+        image_path = Path(self.temp_dir) / "sample.png"
+        image_path.write_bytes(
+            b"\x89PNG\r\n\x1a\n"
+            b"\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x02\x00\x00\x00\x90wS\xde"
+            b"\x00\x00\x00\x0cIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01"
+            b"\x0d\n-\xb4"
+            b"\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+
+        image = self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            original_path=str(image_path),
+            filename="sample.png",
+            size_bytes=image_path.stat().st_size,
+            checksum="abc123",
+            format="png",
+        )
+
+        async def run_worker() -> dict:
+            worker = ImageAnalysisWorker(
+                self.store,
+                self.event_hub,
+                artifacts_dir=Path(self.temp_dir) / "artifacts",
+                openclaw_api_url="http://127.0.0.1:1",  # Force fast fallback path
+                max_workers=1,
+            )
+            worker._poll_interval = 0.05
+            await worker.start()
+            try:
+                for _ in range(80):
+                    await asyncio.sleep(0.05)
+                    current = self.store.get_meeting_image(image["image_id"])
+                    if current and current.get("analysis_status") in ("analyzed", "analysis_failed"):
+                        return current
+                return self.store.get_meeting_image(image["image_id"])
+            finally:
+                await worker.stop()
+
+        final = asyncio.run(run_worker())
+
+        self.assertIsNotNone(final)
+        self.assertEqual(final["analysis_status"], "analyzed")
+        self.assertIsNotNone(final["analysis_result"])
+        result = json.loads(final["analysis_result"]) if isinstance(final["analysis_result"], str) else final["analysis_result"]
+        self.assertEqual(result.get("analysis_source"), "fallback")
+        self.assertGreaterEqual(len(self.event_hub.events), 2)
 
 
 if __name__ == "__main__":
