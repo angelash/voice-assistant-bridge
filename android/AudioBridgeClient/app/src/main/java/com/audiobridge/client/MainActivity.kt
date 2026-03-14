@@ -1122,10 +1122,28 @@ class MainActivity : AppCompatActivity() {
             sb.append("Meeting: $meetingId\n")
             sb.append("Wake word: ${wakeWordStateMachine.getStateDescription()}\n")
 
+            // Show active consumers
+            val activeConsumers = pcmBus.getActiveConsumerNames()
+            if (activeConsumers.isNotEmpty()) {
+                sb.append("Audio: ${activeConsumers.joinToString(", ")}\n")
+            }
+
             val stats = meetingManager.getStorageStats()
             sb.append("Storage: %.1f MB in %d meetings".format(stats.totalMb, stats.totalMeetings))
         } else {
-            sb.append("Idle")
+            // Show STT status when not in meeting
+            if (sttListening) {
+                sb.append("STT: Listening...\n")
+            }
+            if (pcmBus.isRunning) {
+                val activeConsumers = pcmBus.getActiveConsumerNames()
+                if (activeConsumers.isNotEmpty()) {
+                    sb.append("Audio: ${activeConsumers.joinToString(", ")}")
+                }
+            }
+            if (sb.isEmpty()) {
+                sb.append("Idle")
+            }
         }
 
         meetingStatusText.text = sb.toString()
