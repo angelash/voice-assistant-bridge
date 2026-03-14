@@ -110,6 +110,41 @@ class MeetingClient:
         ) as resp:
             return await resp.json()
 
+    # M3: Transcription job API methods
+    
+    async def get_transcription_jobs(self, meeting_id: str) -> dict:
+        """Get transcription jobs for a meeting."""
+        session = await self._get_session()
+        async with session.get(
+            f"{self.base_url}/v2/meetings/{meeting_id}/transcription",
+        ) as resp:
+            return await resp.json()
+    
+    async def get_transcription_queue(self) -> dict:
+        """Get all queued and running transcription jobs."""
+        session = await self._get_session()
+        async with session.get(
+            f"{self.base_url}/v2/transcription/queue",
+        ) as resp:
+            return await resp.json()
+    
+    async def get_transcription_job(self, job_id: str) -> dict:
+        """Get a specific transcription job status."""
+        session = await self._get_session()
+        async with session.get(
+            f"{self.base_url}/v2/transcription/{job_id}",
+        ) as resp:
+            return await resp.json()
+    
+    async def run_transcription(self, meeting_id: str, model: str = "small") -> dict:
+        """Start a transcription job for a meeting."""
+        session = await self._get_session()
+        async with session.post(
+            f"{self.base_url}/v2/meetings/{meeting_id}/transcription:run",
+            json={"model": model},
+        ) as resp:
+            return await resp.json()
+
 
 class MeetingConsoleWidget(QWidget):
     """Meeting mode control panel"""
@@ -437,6 +472,84 @@ class BackupStatusWidget(QWidget):
             self.segment_list.addItem(item)
 
 
+class TranscriptionTaskWidget(QWidget):
+    """M3: Transcription task queue panel"""
+    
+    def __init__(self, client: MeetingClient, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self._build_ui()
+        
+        # Auto-refresh timer
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._on_refresh_timer)
+        self._refresh_timer.start(5000)  # Refresh every 5 seconds
+    
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Title
+        title = QLabel("📝 加精任务队列")
+        title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        layout.addWidget(title)
+        
+        # Task list
+        self.task_list = QListWidget()
+        self.task_list.setMaximumHeight(120)
+        layout.addWidget(self.task_list)
+        
+        # Status label
+        self.status_label = QLabel("无任务")
+        self.status_label.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(self.status_label)
+    
+    def _on_refresh_timer(self):
+        asyncio.create_task(self._refresh())
+    
+    async def _refresh(self):
+        try:
+            result = await self.client.get_transcription_queue()
+            if result.get("ok"):
+                jobs = result.get("queued_jobs", [])
+                self._update_ui(jobs)
+        except Exception as e:
+            self.status_label.setText(f"刷新失败: {e}")
+    
+    def _update_ui(self, jobs: list):
+        self.task_list.clear()
+        
+        if not jobs:
+            self.status_label.setText("无任务")
+            return
+        
+        for job in jobs:
+            job_id = job.get("job_id", "unknown")[:12]
+            meeting_id = job.get("meeting_id", "unknown")[:12]
+            status = job.get("status", "unknown")
+            progress = job.get("progress_percent", 0)
+            
+            status_icon = {
+                "queued": "⏳",
+                "running": "🔄",
+                "success": "✅",
+                "failed": "❌",
+            }.get(status, "❓")
+            
+            item_text = f"{status_icon} {job_id}... | {meeting_id}... | {status} ({progress}%)"
+            item = QListWidgetItem(item_text)
+            
+            if status == "running":
+                item.setForeground(QColor("#2196F3"))
+            elif status == "success":
+                item.setForeground(QColor("#4CAF50"))
+            elif status == "failed":
+                item.setForeground(QColor("#F44336"))
+            
+            self.task_list.addItem(item)
+        
+        self.status_label.setText(f"{len(jobs)} 个任务")
+
+
 class MeetingConsoleWindow(QMainWindow):
     """Main window for meeting console"""
 
@@ -460,7 +573,7 @@ class MeetingConsoleWindow(QMainWindow):
         self.console.meeting_started.connect(self._on_meeting_started)
         self.console.meeting_ended.connect(self._on_meeting_ended)
         
-        # Right panel: History and Backup status
+        # Right panel: History, Backup status, and Transcription tasks
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         
@@ -471,6 +584,10 @@ class MeetingConsoleWindow(QMainWindow):
         # M2: Backup status panel
         self.backup_status = BackupStatusWidget(self._get_client())
         right_layout.addWidget(self.backup_status)
+        
+        # M3: Transcription task panel
+        self.transcription_tasks = TranscriptionTaskWidget(self._get_client())
+        right_layout.addWidget(self.transcription_tasks)
         
         # Splitter
         splitter = QSplitter(Qt.Horizontal)
@@ -486,6 +603,7 @@ class MeetingConsoleWindow(QMainWindow):
     async def _initial_refresh(self):
         await self.history._refresh()
         await self.backup_status._refresh()
+        await self.transcription_tasks._refresh()
 
     def _get_client(self) -> MeetingClient:
         if self._meeting_client is None:
@@ -503,6 +621,7 @@ class MeetingConsoleWindow(QMainWindow):
     async def _refresh_after_meeting(self):
         await self.history._refresh()
         await self.backup_status._refresh()
+        await self.transcription_tasks._refresh()
 
     def closeEvent(self, event):
         if self._meeting_client:
