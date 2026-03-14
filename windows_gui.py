@@ -264,6 +264,8 @@ class MainWindow(QMainWindow):
         self._recorder = AudioRecorder()
         self._watch_tasks: set[asyncio.Task] = set()
         self._printed_by_message: dict[str, set[tuple[str, str]]] = {}
+        self._meeting_active = False
+        self._meeting_id: Optional[str] = None
 
         self.setWindowTitle("Voice Assistant Bridge")
         self.resize(930, 670)
@@ -337,7 +339,19 @@ class MainWindow(QMainWindow):
         chat_layout.addWidget(self.log_view, 1)
         chat_layout.addLayout(bottom)
 
+        # Meeting Mode Control Panel
+        meeting_box = QGroupBox("会议模式")
+        meeting_layout = QHBoxLayout(meeting_box)
+        self.meeting_mode_btn = QPushButton("开始会议")
+        self.meeting_status_label = QLabel("空闲")
+        self.meeting_info_label = QLabel("")
+        meeting_layout.addWidget(self.meeting_mode_btn)
+        meeting_layout.addWidget(self.meeting_status_label)
+        meeting_layout.addWidget(self.meeting_info_label, 1)
+        self.meeting_mode_btn.clicked.connect(self.on_meeting_toggle)
+
         outer.addLayout(top)
+        outer.addWidget(meeting_box)
         outer.addWidget(chat_box, 1)
 
         self.health_btn.clicked.connect(self.on_health_clicked)
@@ -381,6 +395,7 @@ class MainWindow(QMainWindow):
         self.voice_mode_combo.setEnabled((not self._busy) and (not recording))
         self.input_edit.setEnabled((not self._busy) and (not recording))
         self.voice_btn.setEnabled(not self._busy)
+        self.meeting_mode_btn.setEnabled(not self._busy)
 
         if self._busy:
             self.voice_btn.setText("澶勭悊涓?..")
@@ -389,10 +404,15 @@ class MainWindow(QMainWindow):
         else:
             self.voice_btn.setText("结束录音" if recording else "开始录音")
 
+        # Update meeting mode button text
+        self.meeting_mode_btn.setText("结束会议" if self._meeting_active else "开始会议")
+
         if self._busy:
             self.statusBar().showMessage("澶勭悊涓?..")
         elif recording:
             self.statusBar().showMessage("褰曢煶涓?..")
+        elif self._meeting_active:
+            self.statusBar().showMessage(f"会议中: {self._meeting_id[:16] if self._meeting_id else ''}...")
         else:
             self.statusBar().clearMessage()
 
@@ -693,6 +713,37 @@ class MainWindow(QMainWindow):
             self.settings = dialog.to_settings()
             self._save_settings()
             self._log("设置已保存。")
+
+    def on_meeting_toggle(self):
+        """Toggle meeting mode on/off."""
+        if self._meeting_active:
+            self._end_meeting()
+        else:
+            self._start_meeting()
+
+    def _start_meeting(self):
+        """Start a new meeting session."""
+        import uuid
+        self._meeting_id = f"mtg-{uuid.uuid4().hex[:24]}"
+        self._meeting_active = True
+        self.meeting_mode_btn.setText("结束会议")
+        self.meeting_status_label.setText("会议中")
+        self.meeting_info_label.setText(f"ID: {self._meeting_id[:16]}...")
+        self._log(f"[会议] 会议开始: {self._meeting_id}")
+        # TODO: Call /v2/meetings API to register meeting on server
+
+    def _end_meeting(self):
+        """End the current meeting session."""
+        if not self._meeting_active:
+            return
+        meeting_id = self._meeting_id
+        self._meeting_active = False
+        self._meeting_id = None
+        self.meeting_mode_btn.setText("开始会议")
+        self.meeting_status_label.setText("空闲")
+        self.meeting_info_label.setText("")
+        self._log(f"[会议] 会议结束: {meeting_id}")
+        # TODO: Call /v2/meetings/{id}/mode API to end meeting on server
 
     def closeEvent(self, event):
         try:
