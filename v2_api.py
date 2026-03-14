@@ -51,6 +51,8 @@ from meeting import (
     SPEAKER_SOURCE_MANUAL,
     IMAGE_STATUS_UPLOADED,
     IMAGE_STATUS_FAILED,
+    IMAGE_STATUS_ANALYZING,
+    IMAGE_STATUS_ANALYZED,
     build_event_envelope,
     now_iso,
 )
@@ -1202,9 +1204,7 @@ class V2MeetingAPI:
     async def handle_image_analysis(self, request: web.Request) -> web.Response:
         """POST /v2/meetings/{meeting_id}/images/{image_id}:analyze - Trigger image analysis.
         
-        M5: Triggers OpenClaw image analysis for a specific image.
-        This is a stub implementation that marks analysis as pending.
-        Actual OpenClaw integration would be done via background worker.
+        M5: Queue an image for asynchronous analysis by ImageAnalysisWorker.
         """
         meeting_id = request.match_info.get("meeting_id", "").strip()
         image_id = request.match_info.get("image_id", "").strip()
@@ -1220,45 +1220,35 @@ class V2MeetingAPI:
         if not image or image["meeting_id"] != meeting_id:
             return web.json_response({"ok": False, "error": "image_not_found"}, status=404)
 
-        # Emit analysis started event
-        event = self.store.append_event(
-            meeting_id=meeting_id,
-            source="server",
-            event_type=EVT_IMAGE_ANALYSIS_STARTED,
-            payload={
+        current_status = (image.get("analysis_status") or "pending").strip().lower()
+        if current_status in ("pending", IMAGE_STATUS_ANALYZING, IMAGE_STATUS_ANALYZED):
+            return web.json_response({
+                "ok": True,
                 "image_id": image_id,
-                "seq": image["seq"],
-                "original_path": image["original_path"],
-            },
-        )
-        await self.event_hub.publish(build_event_envelope(event))
-        
-        # Update status to analyzing
-        self.store.update_meeting_image(image_id, analysis_status="analyzing")
-        
-        # TODO: Integrate with OpenClaw image-analysis
-        # For now, create a stub result that indicates the integration point
-        stub_result = {
-            "status": "pending",
-            "message": "Image analysis queued. OpenClaw integration pending.",
-            "image_id": image_id,
-            "queued_at": now_iso(),
-        }
-        
-        # Store the stub result
+                "analysis_status": current_status,
+                "message": "Analysis already queued/running/completed.",
+            })
+
+        queued_at = now_iso()
         self.store.update_meeting_image(
             image_id,
-            analysis_status="analyzing",
-            analysis_result=stub_result,
+            analysis_status="pending",
+            analysis_error=None,
+            analysis_result={
+                "status": "queued",
+                "image_id": image_id,
+                "queued_at": queued_at,
+                "source": "image-analysis-worker",
+            },
         )
-        
-        logger.info(f"Image analysis queued: {image_id}")
-        
+
+        logger.info("Image analysis queued: %s", image_id)
+
         return web.json_response({
             "ok": True,
             "image_id": image_id,
-            "analysis_status": "analyzing",
-            "message": "Analysis queued. OpenClaw integration pending.",
+            "analysis_status": "pending",
+            "message": "Analysis queued. Worker will process asynchronously.",
         })
 
     async def handle_image_analysis_result(self, request: web.Request) -> web.Response:

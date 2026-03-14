@@ -162,7 +162,7 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: dict, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.settings = settings
-        self.setWindowTitle("璁剧疆")
+        self.setWindowTitle("设置")
         self.resize(640, 470)
         self._build_ui()
         self._load_values()
@@ -179,13 +179,13 @@ class SettingsDialog(QDialog):
         self.local_token_edit.setEchoMode(QLineEdit.Password)
         self.local_chat_path_edit = QLineEdit()
         self.local_health_path_edit = QLineEdit()
-        self.auto_start_local_chk = QCheckBox("鏈湴妯″紡鑷姩鎷夎捣 server.py")
+        self.auto_start_local_chk = QCheckBox("本地模式自动拉起 server.py")
         local_form.addRow("Local Gateway", self.local_gateway_edit)
         local_form.addRow("Local Token", self.local_token_edit)
         local_form.addRow("Local Chat Path", self.local_chat_path_edit)
         local_form.addRow("Local Health Path", self.local_health_path_edit)
         local_form.addRow("", self.auto_start_local_chk)
-        tabs.addTab(local_tab, "鏈湴妯″紡")
+        tabs.addTab(local_tab, "本地模式")
 
         openclaw_tab = QWidget()
         openclaw_form = QFormLayout(openclaw_tab)
@@ -209,9 +209,9 @@ class SettingsDialog(QDialog):
         self.stt_model_edit = QLineEdit()
         voice_form.addRow("System TTS Voice", self.tts_voice_edit)
         voice_form.addRow("Edge TTS Voice", self.tts_edge_voice_edit)
-        voice_form.addRow("褰曢煶鏈€澶х鏁?闃叉蹇樺仠)", self.record_seconds_spin)
-        voice_form.addRow("鏈湴STT妯″瀷", self.stt_model_edit)
-        tabs.addTab(voice_tab, "璇煶")
+        voice_form.addRow("录音最大秒数(防止忘停)", self.record_seconds_spin)
+        voice_form.addRow("本地 STT 模型", self.stt_model_edit)
+        tabs.addTab(voice_tab, "语音")
 
         button_box = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         button_box.accepted.connect(self.accept)
@@ -302,7 +302,7 @@ class MainWindow(QMainWindow):
 
         top = QHBoxLayout()
         self.mode_combo = QComboBox()
-        self.mode_combo.addItem("鏈湴妯″瀷", MODE_LOCAL)
+        self.mode_combo.addItem("本地模式", MODE_LOCAL)
         self.mode_combo.addItem("OpenClaw", MODE_OPENCLAW)
         self.mode_combo.currentIndexChanged.connect(self.on_mode_changed)
 
@@ -312,19 +312,19 @@ class MainWindow(QMainWindow):
         self.voice_mode_combo.currentIndexChanged.connect(self.on_voice_mode_changed)
 
         self.health_btn = QPushButton("健康检查")
-        self.settings_btn = QPushButton("璁剧疆")
-        self.clear_btn = QPushButton("娓呯┖")
+        self.settings_btn = QPushButton("设置")
+        self.clear_btn = QPushButton("清空")
 
-        top.addWidget(QLabel("妯″紡:"))
+        top.addWidget(QLabel("模式:"))
         top.addWidget(self.mode_combo)
-        top.addWidget(QLabel("璇煶杈撳叆:"))
+        top.addWidget(QLabel("语音输入:"))
         top.addWidget(self.voice_mode_combo)
         top.addWidget(self.health_btn)
         top.addStretch(1)
         top.addWidget(self.settings_btn)
         top.addWidget(self.clear_btn)
 
-        chat_box = QGroupBox("瀵硅瘽")
+        chat_box = QGroupBox("对话")
         chat_layout = QVBoxLayout(chat_box)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
@@ -398,9 +398,9 @@ class MainWindow(QMainWindow):
         self.meeting_mode_btn.setEnabled(not self._busy)
 
         if self._busy:
-            self.voice_btn.setText("澶勭悊涓?..")
+            self.voice_btn.setText("处理中...")
         elif mode == VOICE_MODE_HOLD:
-            self.voice_btn.setText("鏉惧紑缁撴潫" if recording else "鎸変綇璇磋瘽")
+            self.voice_btn.setText("松开结束" if recording else "按住说话")
         else:
             self.voice_btn.setText("结束录音" if recording else "开始录音")
 
@@ -408,9 +408,9 @@ class MainWindow(QMainWindow):
         self.meeting_mode_btn.setText("结束会议" if self._meeting_active else "开始会议")
 
         if self._busy:
-            self.statusBar().showMessage("澶勭悊涓?..")
+            self.statusBar().showMessage("处理中...")
         elif recording:
-            self.statusBar().showMessage("褰曢煶涓?..")
+            self.statusBar().showMessage("录音中...")
         elif self._meeting_active:
             self.statusBar().showMessage(f"会议中: {self._meeting_id[:16] if self._meeting_id else ''}...")
         else:
@@ -567,7 +567,7 @@ class MainWindow(QMainWindow):
             self._log("录音为空。")
             return
         if self._recorder.error:
-            self._log(f"褰曢煶寮傚父: {self._recorder.error}")
+            self._log(f"录音异常: {self._recorder.error}")
 
         self._set_busy(True)
         try:
@@ -578,24 +578,24 @@ class MainWindow(QMainWindow):
                 if audio_result:
                     input_text = (audio_result.get("input_text") or "").strip()
                     if input_text:
-                        self._log(f"浣?璇煶): {input_text}")
+                        self._log(f"你(语音): {input_text}")
                     reply = AudioBridgeClient._extract_reply_text(audio_result)
                     if reply:
-                        self._log(f"鍔╂墜: {reply}")
+                        self._log(f"助手: {reply}")
                         await asyncio.to_thread(client._speak_text_windows, reply)
                         return
 
-                self._log("鍚庣璇煶鎺ュ彛涓嶅彲鐢紝鍒囨崲鏈湴STT...")
+                self._log("后端语音接口不可用，切换本地 STT...")
                 text = await asyncio.to_thread(self._transcribe_local_blocking, audio_data)
                 if not text:
                     self._log("本地 STT 失败。")
                     return
-                self._log(f"浣?璇煶): {text}")
+                self._log(f"你(语音): {text}")
                 await self._chat_with_text(client, text)
             finally:
                 client.close()
         except Exception as e:
-            self._log(f"璇煶杈撳叆寮傚父: {e}")
+            self._log(f"语音输入异常: {e}")
         finally:
             self._set_busy(False)
 
@@ -624,7 +624,7 @@ class MainWindow(QMainWindow):
     async def _stop_recording_and_process(self):
         if not self._recorder.is_recording:
             return
-        self._log("鍋滄褰曢煶锛屽鐞嗕腑...")
+        self._log("停止录音，处理中...")
         audio_data = await asyncio.to_thread(self._recorder.stop)
         self._refresh_controls()
         await self._process_voice_audio(audio_data)
@@ -642,9 +642,9 @@ class MainWindow(QMainWindow):
                 self._log("health ok")
                 self._log(json.dumps(result, ensure_ascii=False, indent=2))
             else:
-                self._log("health 澶辫触")
+                self._log("health 失败")
         except Exception as e:
-            self._log(f"health 寮傚父: {e}")
+            self._log(f"health 异常: {e}")
         finally:
             client.close()
             self._set_busy(False)
@@ -657,7 +657,7 @@ class MainWindow(QMainWindow):
         if not text:
             return
         self.input_edit.clear()
-        self._log(f"浣? {text}")
+        self._log(f"你: {text}")
 
         self._set_busy(True)
         client = self._build_client()
@@ -665,7 +665,7 @@ class MainWindow(QMainWindow):
             await self._prepare_client(client)
             await self._chat_with_text(client, text)
         except Exception as e:
-            self._log(f"鍙戦€佸紓甯? {e}")
+            self._log(f"发送异常: {e}")
         finally:
             client.close()
             self._set_busy(False)
@@ -819,7 +819,7 @@ class MainWindow(QMainWindow):
                 task.cancel()
             self._save_settings()
         except Exception as e:
-            QMessageBox.warning(self, "淇濆瓨澶辫触", f"閰嶇疆淇濆瓨澶辫触: {e}")
+            QMessageBox.warning(self, "保存失败", f"配置保存失败: {e}")
         super().closeEvent(event)
 
 

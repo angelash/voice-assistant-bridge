@@ -27,6 +27,9 @@ from meeting import (
     EVT_IMAGE_ANALYSIS_STARTED,
     EVT_IMAGE_ANALYSIS_COMPLETED,
     EVT_IMAGE_ANALYSIS_FAILED,
+    IMAGE_STATUS_ANALYZING,
+    IMAGE_STATUS_ANALYZED,
+    IMAGE_STATUS_ANALYSIS_FAILED,
     build_event_envelope,
     now_iso,
 )
@@ -114,14 +117,14 @@ class ImageAnalysisWorker:
             logger.error(f"No original_path for image {image_id}")
             self.store.update_meeting_image(
                 image_id,
-                analysis_status="failed",
+                analysis_status=IMAGE_STATUS_ANALYSIS_FAILED,
                 analysis_error="no_original_path",
                 analysis_at=now_iso(),
             )
             return
         
         # Update status to analyzing
-        self.store.update_meeting_image(image_id, analysis_status="analyzing")
+        self.store.update_meeting_image(image_id, analysis_status=IMAGE_STATUS_ANALYZING)
         
         # Emit started event
         event = self.store.append_event(
@@ -151,7 +154,7 @@ class ImageAnalysisWorker:
             # Update with result
             self.store.update_meeting_image(
                 image_id,
-                analysis_status="analyzed",
+                analysis_status=IMAGE_STATUS_ANALYZED,
                 analysis_result=result,
                 analysis_at=now_iso(),
             )
@@ -177,7 +180,7 @@ class ImageAnalysisWorker:
             # Update status to failed
             self.store.update_meeting_image(
                 image_id,
-                analysis_status="failed",
+                analysis_status=IMAGE_STATUS_ANALYSIS_FAILED,
                 analysis_error=str(e),
                 analysis_at=now_iso(),
             )

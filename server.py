@@ -25,6 +25,7 @@ from aiohttp import web
 from meeting import MeetingStore
 from v2_api import V2MeetingAPI
 from transcription_worker import TranscriptionWorker
+from image_analysis_worker import ImageAnalysisWorker
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -461,6 +462,16 @@ class VoiceAssistantServer:
             self.events,  # Will be set to actual event_hub after init
             artifacts_dir=Path("artifacts/meetings"),
             max_workers=2,
+        )
+        self.image_analysis_worker = ImageAnalysisWorker(
+            self.meeting_store,
+            self.events,
+            artifacts_dir=Path("artifacts/meetings"),
+            openclaw_api_url=os.getenv(
+                "VOICE_OPENCLAW_IMAGE_API_URL",
+                cfg.get("openclaw_image_api_url", "http://127.0.0.1:8766"),
+            ),
+            max_workers=clamp_int(cfg.get("image_analysis_workers", 2), 2, 1, 8),
         )
         self.v2_api = V2MeetingAPI(self.meeting_store, self.events, self.transcription_worker)
 
@@ -987,6 +998,8 @@ class VoiceAssistantServer:
         # Start transcription worker
         await self.transcription_worker.start()
         logger.info("Transcription worker started")
+        await self.image_analysis_worker.start()
+        logger.info("Image analysis worker started")
         
         # Recover pending V1 messages
         pend = self.store.pending()
@@ -1000,6 +1013,8 @@ class VoiceAssistantServer:
         # Stop transcription worker
         await self.transcription_worker.stop()
         logger.info("Transcription worker stopped")
+        await self.image_analysis_worker.stop()
+        logger.info("Image analysis worker stopped")
         
         for task in list(self.forward_tasks.values()):
             task.cancel()

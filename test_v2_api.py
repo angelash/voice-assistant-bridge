@@ -1292,11 +1292,11 @@ class TestM5ImageUpload(unittest.TestCase):
         body = json.loads(response.text)
         
         self.assertTrue(body["ok"])
-        self.assertEqual(body["analysis_status"], "analyzing")
+        self.assertEqual(body["analysis_status"], "pending")
         
         # Verify image was updated
         updated = self.store.get_meeting_image(image["image_id"])
-        self.assertEqual(updated["analysis_status"], "analyzing")
+        self.assertEqual(updated["analysis_status"], "pending")
     
     def test_api_handle_image_analysis_result(self):
         """Test PATCH /v2/meetings/{meeting_id}/images/{image_id}/analysis endpoint"""
