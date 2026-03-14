@@ -147,17 +147,75 @@ class DiskWriterConsumer(
 /**
  * STT Forwarder Consumer
  * Forwards PCM data to the STT engine (iFlytek ASR)
+ * 
+ * Handles resampling from 48kHz (AudioConfig.SAMPLE_RATE) to 16kHz (STT expected rate).
+ * Buffers data to ensure clean resampling across frame boundaries.
  */
 class SttForwarderConsumer(
-    private val onPcmCallback: (ByteArray) -> Unit
+    private val onPcmCallback: (ByteArray) -> Unit,
+    private val sourceSampleRate: Int = AudioConfig.SAMPLE_RATE,
+    private val targetSampleRate: Int = 16000
 ) : PcmDistributionBus.PcmConsumer {
+
+    companion object {
+        private const val TAG = "SttForwarderConsumer"
+        // Buffer size: accumulate enough data for clean resampling (60ms at 48kHz = 2880 samples = 5760 bytes)
+        private const val BUFFER_SIZE_BYTES = 5760
+    }
 
     override val name: String = "stt-forwarder"
     override var enabled: Boolean = false
 
+    // Accumulation buffer for resampling
+    private val buffer = java.io.ByteArrayOutputStream()
+    private var bytesAccumulated = 0
+
     override fun onPcmData(data: ByteArray) {
         if (!enabled) return
-        onPcmCallback(data)
+
+        // If no resampling needed, pass through directly
+        if (sourceSampleRate == targetSampleRate) {
+            onPcmCallback(data)
+            return
+        }
+
+        // Accumulate data for clean resampling
+        synchronized(buffer) {
+            buffer.write(data)
+            bytesAccumulated += data.size
+
+            // When we have enough data, resample and forward
+            if (bytesAccumulated >= BUFFER_SIZE_BYTES) {
+                val rawData = buffer.toByteArray()
+                buffer.reset()
+                bytesAccumulated = 0
+
+                // Resample to target rate
+                val resampled = PcmResampler.downsample(rawData, sourceSampleRate, targetSampleRate)
+                Log.d(TAG, "Resampled ${rawData.size} bytes (${rawData.size / 2} samples) @ ${sourceSampleRate}Hz " +
+                        "-> ${resampled.size} bytes @ ${targetSampleRate}Hz")
+                onPcmCallback(resampled)
+            }
+        }
+    }
+
+    override fun flush() {
+        synchronized(buffer) {
+            if (bytesAccumulated > 0) {
+                val rawData = buffer.toByteArray()
+                buffer.reset()
+                bytesAccumulated = 0
+
+                if (sourceSampleRate != targetSampleRate) {
+                    val resampled = PcmResampler.downsample(rawData, sourceSampleRate, targetSampleRate)
+                    if (resampled.isNotEmpty()) {
+                        onPcmCallback(resampled)
+                    }
+                } else {
+                    onPcmCallback(rawData)
+                }
+            }
+        }
     }
 }
 
