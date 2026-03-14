@@ -44,6 +44,12 @@ EVT_WAKEWORD_CMD_WINDOW_ENDED = "wakeword.command_window.ended"
 EVT_WAKEWORD_COOLDOWN_STARTED = "wakeword.cooldown.started"
 EVT_WAKEWORD_COOLDOWN_ENDED = "wakeword.cooldown.ended"
 
+# Upload status constants
+UPLOAD_STATUS_PENDING = "pending"
+UPLOAD_STATUS_UPLOADED = "uploaded"
+UPLOAD_STATUS_FAILED = "failed"
+UPLOAD_STATUS_UPLOADING = "uploading"
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -269,10 +275,11 @@ class MeetingStore:
         *,
         meeting_id: str,
         seq: int,
+        segment_id: Optional[str] = None,
         local_path: Optional[str] = None,
     ) -> dict[str, Any]:
         """Create an audio segment record."""
-        segment_id = f"seg-{uuid.uuid4().hex}"
+        segment_id = segment_id or f"seg-{uuid.uuid4().hex}"
         ts = now_iso()
         row = {
             "segment_id": segment_id,
@@ -316,11 +323,29 @@ class MeetingStore:
             ).fetchall()
         return [self._dict(r) for r in rows]
 
+    def get_audio_segment(self, segment_id: str) -> Optional[dict[str, Any]]:
+        """Get a single audio segment by ID."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM audio_segments WHERE segment_id=?",
+                (segment_id,),
+            ).fetchone()
+        return self._dict(row) if row else None
+
     def get_pending_audio_segments(self, meeting_id: str) -> list[dict[str, Any]]:
         """Get pending (not yet uploaded) audio segments."""
         with self.lock:
             rows = self.conn.execute(
                 "SELECT * FROM audio_segments WHERE meeting_id=? AND upload_status='pending' ORDER BY seq ASC",
+                (meeting_id,),
+            ).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def get_failed_audio_segments(self, meeting_id: str) -> list[dict[str, Any]]:
+        """Get failed audio segments for retry."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM audio_segments WHERE meeting_id=? AND upload_status='failed' ORDER BY seq ASC",
                 (meeting_id,),
             ).fetchall()
         return [self._dict(r) for r in rows]

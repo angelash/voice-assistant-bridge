@@ -3,6 +3,12 @@ package com.audiobridge.client.wakeword
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.MediaType.Companion.toMediaType
+import org.json.JSONObject
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -272,4 +278,123 @@ class WakeWordController(
 
     val currentState: WakeWordStateMachine.State get() = stateMachine.state
     val isMeetingModeEnabled: Boolean get() = meetingModeEnabled
+}
+
+
+/**
+ * Wakeword Event Reporter
+ * 
+ * M2: Reports wakeword events to the server for tracking and history.
+ */
+class WakewordEventReporter(
+    private val baseUrl: String,
+    private val httpClient: OkHttpClient = OkHttpClient.Builder()
+        .connectTimeout(10, TimeUnit.SECONDS)
+        .readTimeout(30, TimeUnit.SECONDS)
+        .build()
+) {
+    companion object {
+        private const val TAG = "WakewordEventReporter"
+        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    }
+
+    /**
+     * Report a wakeword detection event
+     */
+    fun reportWakeWordDetected(
+        meetingId: String,
+        confidence: Float = 1.0f,
+        keyword: String = "default"
+    ) {
+        reportEvent(
+            meetingId = meetingId,
+            eventType = "wakeword.detected",
+            payload = JSONObject().apply {
+                put("confidence", confidence)
+                put("keyword", keyword)
+            }
+        )
+    }
+
+    /**
+     * Report command window start
+     */
+    fun reportCommandWindowStarted(meetingId: String) {
+        reportEvent(
+            meetingId = meetingId,
+            eventType = "wakeword.command_window.started",
+            payload = JSONObject()
+        )
+    }
+
+    /**
+     * Report command window end
+     */
+    fun reportCommandWindowEnded(meetingId: String, commandCaptured: Boolean = false) {
+        reportEvent(
+            meetingId = meetingId,
+            eventType = "wakeword.command_window.ended",
+            payload = JSONObject().apply {
+                put("command_captured", commandCaptured)
+            }
+        )
+    }
+
+    /**
+     * Report cooldown start
+     */
+    fun reportCooldownStarted(meetingId: String) {
+        reportEvent(
+            meetingId = meetingId,
+            eventType = "wakeword.cooldown.started",
+            payload = JSONObject()
+        )
+    }
+
+    /**
+     * Report cooldown end
+     */
+    fun reportCooldownEnded(meetingId: String) {
+        reportEvent(
+            meetingId = meetingId,
+            eventType = "wakeword.cooldown.ended",
+            payload = JSONObject()
+        )
+    }
+
+    private fun reportEvent(
+        meetingId: String,
+        eventType: String,
+        payload: JSONObject
+    ) {
+        Thread {
+            try {
+                val eventObj = JSONObject().apply {
+                    put("event_type", eventType)
+                    put("source", "android")
+                    put("ts_client", System.currentTimeMillis())
+                    put("payload", payload)
+                }
+                
+                val body = JSONObject().apply {
+                    put("events", org.json.JSONArray().put(eventObj))
+                }
+                
+                val request = Request.Builder()
+                    .url("$baseUrl/v2/meetings/$meetingId/events:batch")
+                    .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
+                    .build()
+                
+                httpClient.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        Log.d(TAG, "Event reported: $eventType")
+                    } else {
+                        Log.w(TAG, "Failed to report event: $eventType, code=${response.code}")
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error reporting event: $eventType", e)
+            }
+        }.start()
+    }
 }

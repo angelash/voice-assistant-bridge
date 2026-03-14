@@ -7,11 +7,15 @@ Provides:
 - GET /v2/events/stream - WebSocket event stream
 - GET /v2/meetings - List meetings
 - GET /v2/meetings/{meeting_id} - Get meeting details
+- POST /v2/meetings/{meeting_id}/audio:upload - Upload audio segment (M2)
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
+from pathlib import Path
 from typing import Any, Optional
 
 from aiohttp import web
@@ -20,6 +24,8 @@ from meeting import (
     MeetingStore,
     EVT_MEETING_MODE_ON,
     EVT_MEETING_MODE_OFF,
+    EVT_AUDIO_SEGMENT_UPLOADED,
+    EVT_AUDIO_SEGMENT_UPLOAD_FAILED,
     MEETING_STATUS_IDLE,
     MEETING_STATUS_PREP,
     MEETING_STATUS_ACTIVE,
@@ -284,6 +290,255 @@ class V2MeetingAPI:
             "events": created_events,
         })
 
+    async def handle_audio_upload(self, request: web.Request) -> web.Response:
+        """POST /v2/meetings/{meeting_id}/audio:upload - Upload audio segment.
+        
+        M2: Audio upload with checksum verification and state management.
+        
+        Request body (multipart/form-data):
+        - segment_id: Segment identifier
+        - seq: Segment sequence number
+        - checksum: SHA256 checksum of the audio data
+        - audio: Audio file content
+        
+        Returns:
+        - ok: True/False
+        - segment_id: The uploaded segment ID
+        - upload_status: pending/uploaded/failed
+        - checksum_verified: Boolean
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        # Check meeting exists
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        try:
+            reader = await request.multipart()
+            
+            segment_id = None
+            seq = None
+            checksum_expected = None
+            audio_data = None
+            
+            async for field in reader:
+                if field.name == "segment_id":
+                    segment_id = (await field.read()).decode("utf-8").strip()
+                elif field.name == "seq":
+                    seq = int((await field.read()).decode("utf-8"))
+                elif field.name == "checksum":
+                    checksum_expected = (await field.read()).decode("utf-8").strip().lower()
+                elif field.name == "audio":
+                    audio_data = await field.read()
+            
+            # Validate required fields
+            if not segment_id:
+                return web.json_response({"ok": False, "error": "segment_id required"}, status=400)
+            if audio_data is None:
+                return web.json_response({"ok": False, "error": "audio data required"}, status=400)
+            if seq is None:
+                return web.json_response({"ok": False, "error": "seq required"}, status=400)
+            
+            # Ensure segment record exists (create if not)
+            existing_segment = self.store.get_audio_segment(segment_id)
+            if not existing_segment:
+                self.store.create_audio_segment(
+                    meeting_id=meeting_id,
+                    seq=seq,
+                    segment_id=segment_id,
+                )
+            
+            # Compute checksum
+            checksum_actual = hashlib.sha256(audio_data).hexdigest()
+            checksum_verified = checksum_expected is None or checksum_actual == checksum_expected
+            
+            if not checksum_verified:
+                logger.warning(f"Checksum mismatch for segment {segment_id}: expected {checksum_expected}, got {checksum_actual}")
+                
+                # Update segment state to failed
+                self.store.update_audio_segment(
+                    segment_id,
+                    upload_status="failed",
+                    upload_error="checksum_mismatch",
+                )
+                
+                # Emit upload failed event
+                event = self.store.append_event(
+                    meeting_id=meeting_id,
+                    source="server",
+                    event_type=EVT_AUDIO_SEGMENT_UPLOAD_FAILED,
+                    payload={
+                        "segment_id": segment_id,
+                        "seq": seq,
+                        "error": "checksum_mismatch",
+                        "expected": checksum_expected,
+                        "actual": checksum_actual,
+                    },
+                )
+                await self.event_hub.publish(build_event_envelope(event))
+                
+                return web.json_response({
+                    "ok": False,
+                    "error": "checksum_mismatch",
+                    "segment_id": segment_id,
+                    "checksum_verified": False,
+                }, status=400)
+            
+            # Save audio file
+            artifacts_dir = Path("artifacts/meetings") / meeting_id / "audio" / "raw"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            
+            audio_filename = f"{segment_id}.wav"
+            audio_path = artifacts_dir / audio_filename
+            
+            with open(audio_path, "wb") as f:
+                f.write(audio_data)
+            
+            # Update segment state to uploaded
+            self.store.update_audio_segment(
+                segment_id,
+                local_path=str(audio_path),
+                checksum=checksum_actual,
+                size_bytes=len(audio_data),
+                upload_status="uploaded",
+                uploaded_at=now_iso(),
+            )
+            
+            # Emit upload success event
+            event = self.store.append_event(
+                meeting_id=meeting_id,
+                source="server",
+                event_type=EVT_AUDIO_SEGMENT_UPLOADED,
+                payload={
+                    "segment_id": segment_id,
+                    "seq": seq,
+                    "size_bytes": len(audio_data),
+                    "checksum": checksum_actual,
+                    "path": str(audio_path),
+                },
+            )
+            await self.event_hub.publish(build_event_envelope(event))
+            
+            logger.info(f"Audio segment uploaded: {segment_id}, size={len(audio_data)}, checksum={checksum_actual[:16]}...")
+            
+            return web.json_response({
+                "ok": True,
+                "segment_id": segment_id,
+                "upload_status": "uploaded",
+                "checksum_verified": True,
+                "size_bytes": len(audio_data),
+                "path": str(audio_path),
+            })
+            
+        except Exception as e:
+            logger.error(f"Audio upload failed: {e}")
+            return web.json_response({
+                "ok": False,
+                "error": str(e),
+            }, status=500)
+
+    async def handle_get_upload_manifest(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/audio/manifest - Get upload manifest.
+        
+        M2: Returns the upload status of all audio segments for a meeting.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        segments = self.store.get_audio_segments(meeting_id)
+        
+        # Build upload manifest
+        manifest = {
+            "meeting_id": meeting_id,
+            "total_segments": len(segments),
+            "uploaded_count": sum(1 for s in segments if s.get("upload_status") == "uploaded"),
+            "pending_count": sum(1 for s in segments if s.get("upload_status") == "pending"),
+            "failed_count": sum(1 for s in segments if s.get("upload_status") == "failed"),
+            "segments": [
+                {
+                    "segment_id": s["segment_id"],
+                    "seq": s["seq"],
+                    "upload_status": s.get("upload_status", "pending"),
+                    "size_bytes": s.get("size_bytes"),
+                    "checksum": s.get("checksum"),
+                    "uploaded_at": s.get("uploaded_at"),
+                    "upload_error": s.get("upload_error"),
+                }
+                for s in segments
+            ],
+        }
+        
+        return web.json_response({
+            "ok": True,
+            "manifest": manifest,
+        })
+
+    async def handle_get_pending_uploads(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/audio/pending - Get pending uploads.
+        
+        M2: Returns segments that need to be uploaded (for retry queue).
+        Includes both pending and failed segments.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        pending = self.store.get_pending_audio_segments(meeting_id)
+        failed = self.store.get_failed_audio_segments(meeting_id)
+        
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "pending_segments": pending,
+            "failed_segments": failed,
+            "pending_count": len(pending),
+            "failed_count": len(failed),
+            "total_needs_upload": len(pending) + len(failed),
+        })
+
+    async def handle_reset_failed_upload(self, request: web.Request) -> web.Response:
+        """POST /v2/meetings/{meeting_id}/audio:reset-failed - Reset failed uploads for retry.
+        
+        M2: Resets failed segments back to pending status so they can be retried.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        failed = self.store.get_failed_audio_segments(meeting_id)
+        reset_count = 0
+        
+        for segment in failed:
+            self.store.update_audio_segment(
+                segment["segment_id"],
+                upload_status="pending",
+                upload_error=None,
+            )
+            reset_count += 1
+        
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "reset_count": reset_count,
+            "message": f"Reset {reset_count} failed segments to pending status",
+        })
+
     def register_routes(self, app: web.Application) -> None:
         """Register V2 API routes."""
         app.router.add_post("/v2/meetings", self.handle_create_meeting)
@@ -292,3 +547,8 @@ class V2MeetingAPI:
         app.router.add_get("/v2/meetings/{meeting_id}", self.handle_get_meeting)
         app.router.add_get("/v2/meetings/{meeting_id}/timeline", self.handle_get_timeline)
         app.router.add_post("/v2/meetings/{meeting_id}/events:batch", self.handle_events_batch)
+        # M2 routes - Audio upload and manifest
+        app.router.add_post("/v2/meetings/{meeting_id}/audio:upload", self.handle_audio_upload)
+        app.router.add_get("/v2/meetings/{meeting_id}/audio/manifest", self.handle_get_upload_manifest)
+        app.router.add_get("/v2/meetings/{meeting_id}/audio/pending", self.handle_get_pending_uploads)
+        app.router.add_post("/v2/meetings/{meeting_id}/audio:reset-failed", self.handle_reset_failed_upload)
