@@ -714,36 +714,102 @@ class MainWindow(QMainWindow):
             self._save_settings()
             self._log("设置已保存。")
 
-    def on_meeting_toggle(self):
-        """Toggle meeting mode on/off."""
-        if self._meeting_active:
-            self._end_meeting()
-        else:
-            self._start_meeting()
+    def _v2_base_url(self) -> str:
+        conn = self._active_connection()
+        return (conn.get("gateway") or DEFAULT_GATEWAY_URL).rstrip("/")
 
-    def _start_meeting(self):
-        """Start a new meeting session."""
-        import uuid
-        self._meeting_id = f"mtg-{uuid.uuid4().hex[:24]}"
+    def _v2_headers(self) -> dict[str, str]:
+        conn = self._active_connection()
+        token = (conn.get("token") or "").strip()
+        if not token:
+            return {}
+        return {"Authorization": f"Bearer {token}"}
+
+    async def _post_v2_json(self, path: str, payload: dict) -> dict:
+        url = f"{self._v2_base_url()}{path}"
+        headers = self._v2_headers()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    try:
+                        data = await resp.json(content_type=None)
+                    except Exception:
+                        data = {"ok": False, "error": (await resp.text()).strip() or f"http_{resp.status}"}
+                    if resp.status >= 400 and data.get("ok") is True:
+                        data["ok"] = False
+                    return data
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @asyncSlot()
+    async def on_meeting_toggle(self):
+        """Toggle meeting mode on/off."""
+        if self._busy or self._recorder.is_recording:
+            return
+        self._set_busy(True)
+        try:
+            if self._meeting_active:
+                await self._end_meeting()
+            else:
+                await self._start_meeting()
+        finally:
+            self._set_busy(False)
+
+    async def _start_meeting(self):
+        """Start a new meeting session on server and switch mode on."""
+        create_result = await self._post_v2_json(
+            "/v2/meetings",
+            {"client_id": "windows-gui", "meta": {"source": "windows_gui"}},
+        )
+        if not create_result.get("ok"):
+            self._log(f"[会议] 创建失败: {create_result.get('error')}")
+            return
+
+        meeting_id = (create_result.get("meeting_id") or "").strip()
+        if not meeting_id:
+            self._log("[会议] 创建失败: meeting_id 为空")
+            return
+
+        mode_result = await self._post_v2_json(
+            f"/v2/meetings/{meeting_id}/mode",
+            {"mode": "on"},
+        )
+        if not mode_result.get("ok"):
+            self._log(f"[会议] 开启失败: {mode_result.get('error')}")
+            return
+
+        self._meeting_id = meeting_id
         self._meeting_active = True
         self.meeting_mode_btn.setText("结束会议")
         self.meeting_status_label.setText("会议中")
-        self.meeting_info_label.setText(f"ID: {self._meeting_id[:16]}...")
-        self._log(f"[会议] 会议开始: {self._meeting_id}")
-        # TODO: Call /v2/meetings API to register meeting on server
+        self.meeting_info_label.setText(f"ID: {meeting_id[:16]}...")
+        self._log(f"[会议] 会议开始: {meeting_id}")
 
-    def _end_meeting(self):
-        """End the current meeting session."""
-        if not self._meeting_active:
+    async def _end_meeting(self):
+        """End the current meeting session on server."""
+        if not self._meeting_active or not self._meeting_id:
             return
+
         meeting_id = self._meeting_id
+        mode_result = await self._post_v2_json(
+            f"/v2/meetings/{meeting_id}/mode",
+            {"mode": "off"},
+        )
+        if not mode_result.get("ok"):
+            self._log(f"[会议] 结束失败: {mode_result.get('error')}")
+            return
+
         self._meeting_active = False
         self._meeting_id = None
         self.meeting_mode_btn.setText("开始会议")
         self.meeting_status_label.setText("空闲")
         self.meeting_info_label.setText("")
         self._log(f"[会议] 会议结束: {meeting_id}")
-        # TODO: Call /v2/meetings/{id}/mode API to end meeting on server
 
     def closeEvent(self, event):
         try:
@@ -771,4 +837,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
