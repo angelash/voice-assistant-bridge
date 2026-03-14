@@ -50,6 +50,18 @@ UPLOAD_STATUS_UPLOADED = "uploaded"
 UPLOAD_STATUS_FAILED = "failed"
 UPLOAD_STATUS_UPLOADING = "uploading"
 
+# Transcription job status constants
+JOB_STATUS_QUEUED = "queued"
+JOB_STATUS_RUNNING = "running"
+JOB_STATUS_SUCCESS = "success"
+JOB_STATUS_FAILED = "failed"
+JOB_STATUS_CANCELLED = "cancelled"
+
+# Transcription event types
+EVT_TRANSCRIPTION_STARTED = "transcription.started"
+EVT_TRANSCRIPTION_COMPLETED = "transcription.completed"
+EVT_TRANSCRIPTION_FAILED = "transcription.failed"
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -116,12 +128,31 @@ class MeetingStore:
                     created_at TEXT NOT NULL
                 )
             """)
+            # Transcription jobs (M3)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS transcription_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    meeting_id TEXT NOT NULL,
+                    engine TEXT NOT NULL DEFAULT 'faster-whisper',
+                    model TEXT DEFAULT 'small',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    progress_percent INTEGER DEFAULT 0,
+                    output_path TEXT,
+                    revision INTEGER DEFAULT 1,
+                    error_message TEXT,
+                    started_at TEXT,
+                    completed_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
             # Indexes
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_events_meeting ON meeting_events(meeting_id, ts_server)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_events_type ON meeting_events(event_type)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_sessions_status ON meeting_sessions(status)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audio_segments_meeting ON audio_segments(meeting_id, seq)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_audio_segments_upload ON audio_segments(upload_status)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_transcription_jobs_meeting ON transcription_jobs(meeting_id)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_transcription_jobs_status ON transcription_jobs(status)")
             self.conn.commit()
 
     @staticmethod
@@ -349,6 +380,86 @@ class MeetingStore:
                 (meeting_id,),
             ).fetchall()
         return [self._dict(r) for r in rows]
+
+    # --- Transcription Jobs (M3) ---
+
+    def create_transcription_job(
+        self,
+        *,
+        meeting_id: str,
+        engine: str = "faster-whisper",
+        model: str = "small",
+    ) -> dict[str, Any]:
+        """Create a transcription job for a meeting."""
+        job_id = f"job-{uuid.uuid4().hex}"
+        ts = now_iso()
+        row = {
+            "job_id": job_id,
+            "meeting_id": meeting_id,
+            "engine": engine,
+            "model": model,
+            "status": JOB_STATUS_QUEUED,
+            "progress_percent": 0,
+            "output_path": None,
+            "revision": 1,
+            "error_message": None,
+            "started_at": None,
+            "completed_at": None,
+            "created_at": ts,
+        }
+        with self.lock:
+            cols = ", ".join(row.keys())
+            vals = ", ".join("?" for _ in row)
+            self.conn.execute(f"INSERT INTO transcription_jobs ({cols}) VALUES ({vals})", list(row.values()))
+            self.conn.commit()
+        return row
+
+    def get_transcription_job(self, job_id: str) -> Optional[dict[str, Any]]:
+        """Get a transcription job by ID."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM transcription_jobs WHERE job_id=?",
+                (job_id,),
+            ).fetchone()
+        return self._dict(row) if row else None
+
+    def get_transcription_jobs_for_meeting(self, meeting_id: str) -> list[dict[str, Any]]:
+        """Get all transcription jobs for a meeting."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM transcription_jobs WHERE meeting_id=? ORDER BY created_at DESC",
+                (meeting_id,),
+            ).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def get_latest_transcription_job(self, meeting_id: str) -> Optional[dict[str, Any]]:
+        """Get the latest transcription job for a meeting."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM transcription_jobs WHERE meeting_id=? ORDER BY created_at DESC LIMIT 1",
+                (meeting_id,),
+            ).fetchone()
+        return self._dict(row) if row else None
+
+    def get_queued_transcription_jobs(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Get queued transcription jobs for processing."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM transcription_jobs WHERE status=? ORDER BY created_at ASC LIMIT ?",
+                (JOB_STATUS_QUEUED, limit),
+            ).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def update_transcription_job(self, job_id: str, **fields: Any) -> None:
+        """Update transcription job fields."""
+        if not fields:
+            return
+        keys = list(fields.keys())
+        sets = ", ".join(f"{k}=?" for k in keys)
+        args = [fields[k] for k in keys] + [job_id]
+        with self.lock:
+            self.conn.execute(f"UPDATE transcription_jobs SET {sets} WHERE job_id=?", args)
+            self.conn.commit()
 
     def close(self) -> None:
         with self.lock:

@@ -26,10 +26,18 @@ from meeting import (
     EVT_MEETING_MODE_OFF,
     EVT_AUDIO_SEGMENT_UPLOADED,
     EVT_AUDIO_SEGMENT_UPLOAD_FAILED,
+    EVT_TRANSCRIPTION_STARTED,
+    EVT_TRANSCRIPTION_COMPLETED,
+    EVT_TRANSCRIPTION_FAILED,
     MEETING_STATUS_IDLE,
     MEETING_STATUS_PREP,
     MEETING_STATUS_ACTIVE,
     MEETING_STATUS_ENDING,
+    MEETING_STATUS_ARCHIVED,
+    JOB_STATUS_QUEUED,
+    JOB_STATUS_RUNNING,
+    JOB_STATUS_SUCCESS,
+    JOB_STATUS_FAILED,
     build_event_envelope,
     now_iso,
 )
@@ -539,6 +547,203 @@ class V2MeetingAPI:
             "message": f"Reset {reset_count} failed segments to pending status",
         })
 
+    async def handle_get_pending_uploads(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/audio/pending - Get pending uploads.
+        
+        M2: Returns segments that need to be uploaded (for retry queue).
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        pending = self.store.get_pending_audio_segments(meeting_id)
+        failed = self.store.get_failed_audio_segments(meeting_id) if hasattr(self.store, 'get_failed_audio_segments') else []
+        
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "pending_segments": pending,
+            "failed_segments": failed,
+            "pending_count": len(pending),
+            "failed_count": len(failed),
+            "total_needs_upload": len(pending) + len(failed),
+        })
+
+    async def handle_reset_failed_upload(self, request: web.Request) -> web.Response:
+        """POST /v2/meetings/{meeting_id}/audio:reset-failed - Reset failed uploads for retry.
+        
+        M2: Resets failed segments back to pending status so they can be retried.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        failed = self.store.get_failed_audio_segments(meeting_id) if hasattr(self.store, 'get_failed_audio_segments') else []
+        reset_count = 0
+        
+        for segment in failed:
+            self.store.update_audio_segment(
+                segment["segment_id"],
+                upload_status="pending",
+                upload_error=None,
+            )
+            reset_count += 1
+        
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "reset_count": reset_count,
+            "message": f"Reset {reset_count} failed segments to pending status",
+        })
+
+    # --- M3: Transcription Jobs ---
+
+    async def handle_create_transcription_job(self, request: web.Request) -> web.Response:
+        """POST /v2/meetings/{meeting_id}/transcription:run - Create a transcription job.
+        
+        M3: Creates a new transcription job for the meeting audio.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        # Check if meeting has ended
+        if meeting.get("status") not in (MEETING_STATUS_ENDING, MEETING_STATUS_ARCHIVED):
+            return web.json_response({
+                "ok": False,
+                "error": "meeting_not_ended",
+                "message": "Can only run transcription on ended meetings",
+            }, status=400)
+
+        # Check for existing job
+        existing = self.store.get_latest_transcription_job(meeting_id)
+        if existing and existing.get("status") in (JOB_STATUS_QUEUED, JOB_STATUS_RUNNING):
+            return web.json_response({
+                "ok": False,
+                "error": "job_in_progress",
+                "existing_job_id": existing["job_id"],
+                "existing_status": existing["status"],
+            }, status=409)
+
+        # Create new job
+        engine = data.get("engine", "faster-whisper")
+        model = data.get("model", "small")
+        
+        job = self.store.create_transcription_job(
+            meeting_id=meeting_id,
+            engine=engine,
+            model=model,
+        )
+
+        logger.info(f"Created transcription job {job['job_id']} for meeting {meeting_id}")
+
+        return web.json_response({
+            "ok": True,
+            "job_id": job["job_id"],
+            "meeting_id": meeting_id,
+            "status": job["status"],
+            "engine": engine,
+            "model": model,
+        })
+
+    async def handle_get_transcription_jobs(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/transcription - Get transcription jobs for a meeting.
+        
+        M3: Returns all transcription jobs for a meeting.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        jobs = self.store.get_transcription_jobs_for_meeting(meeting_id)
+
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "jobs": jobs,
+            "count": len(jobs),
+        })
+
+    async def handle_get_transcription_job(self, request: web.Request) -> web.Response:
+        """GET /v2/transcription/{job_id} - Get transcription job status.
+        
+        M3: Returns the status of a specific transcription job.
+        """
+        job_id = request.match_info.get("job_id", "").strip()
+        if not job_id:
+            return web.json_response({"ok": False, "error": "job_id required"}, status=400)
+
+        job = self.store.get_transcription_job(job_id)
+        if not job:
+            return web.json_response({"ok": False, "error": "job_not_found"}, status=404)
+
+        return web.json_response({
+            "ok": True,
+            "job": job,
+        })
+
+    async def handle_cancel_transcription_job(self, request: web.Request) -> web.Response:
+        """POST /v2/transcription/{job_id}:cancel - Cancel a queued transcription job.
+        
+        M3: Cancels a queued (not yet running) transcription job.
+        """
+        job_id = request.match_info.get("job_id", "").strip()
+        if not job_id:
+            return web.json_response({"ok": False, "error": "job_id required"}, status=400)
+
+        job = self.store.get_transcription_job(job_id)
+        if not job:
+            return web.json_response({"ok": False, "error": "job_not_found"}, status=404)
+
+        if job["status"] != JOB_STATUS_QUEUED:
+            return web.json_response({
+                "ok": False,
+                "error": "cannot_cancel",
+                "message": f"Cannot cancel job with status {job['status']}",
+            }, status=400)
+
+        self.store.update_transcription_job(job_id, status="cancelled")
+
+        return web.json_response({
+            "ok": True,
+            "job_id": job_id,
+            "status": "cancelled",
+        })
+
+    async def handle_list_transcription_queue(self, request: web.Request) -> web.Response:
+        """GET /v2/transcription/queue - List transcription job queue.
+        
+        M3: Returns all queued and running transcription jobs.
+        """
+        queued = self.store.get_queued_transcription_jobs(limit=50)
+        
+        return web.json_response({
+            "ok": True,
+            "queued_jobs": queued,
+            "count": len(queued),
+        })
+
     def register_routes(self, app: web.Application) -> None:
         """Register V2 API routes."""
         app.router.add_post("/v2/meetings", self.handle_create_meeting)
@@ -552,3 +757,9 @@ class V2MeetingAPI:
         app.router.add_get("/v2/meetings/{meeting_id}/audio/manifest", self.handle_get_upload_manifest)
         app.router.add_get("/v2/meetings/{meeting_id}/audio/pending", self.handle_get_pending_uploads)
         app.router.add_post("/v2/meetings/{meeting_id}/audio:reset-failed", self.handle_reset_failed_upload)
+        # M3 routes - Transcription jobs
+        app.router.add_post("/v2/meetings/{meeting_id}/transcription:run", self.handle_create_transcription_job)
+        app.router.add_get("/v2/meetings/{meeting_id}/transcription", self.handle_get_transcription_jobs)
+        app.router.add_get("/v2/transcription/{job_id}", self.handle_get_transcription_job)
+        app.router.add_post("/v2/transcription/{job_id}:cancel", self.handle_cancel_transcription_job)
+        app.router.add_get("/v2/transcription/queue", self.handle_list_transcription_queue)
