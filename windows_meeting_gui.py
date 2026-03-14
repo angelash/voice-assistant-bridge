@@ -145,6 +145,40 @@ class MeetingClient:
         ) as resp:
             return await resp.json()
 
+    # M5: Image API methods
+    
+    async def get_images(self, meeting_id: str) -> dict:
+        """Get all images for a meeting."""
+        session = await self._get_session()
+        async with session.get(
+            f"{self.base_url}/v2/meetings/{meeting_id}/images",
+        ) as resp:
+            return await resp.json()
+    
+    async def get_image(self, meeting_id: str, image_id: str) -> dict:
+        """Get a specific image."""
+        session = await self._get_session()
+        async with session.get(
+            f"{self.base_url}/v2/meetings/{meeting_id}/images/{image_id}",
+        ) as resp:
+            return await resp.json()
+    
+    async def get_image_file(self, meeting_id: str, image_id: str) -> bytes:
+        """Get image file content."""
+        session = await self._get_session()
+        async with session.get(
+            f"{self.base_url}/v2/meetings/{meeting_id}/images/{image_id}/file",
+        ) as resp:
+            return await resp.read()
+    
+    async def trigger_image_analysis(self, meeting_id: str, image_id: str) -> dict:
+        """Trigger image analysis for a specific image."""
+        session = await self._get_session()
+        async with session.post(
+            f"{self.base_url}/v2/meetings/{meeting_id}/images/{image_id}:analyze",
+        ) as resp:
+            return await resp.json()
+
 
 class MeetingConsoleWidget(QWidget):
     """Meeting mode control panel"""
@@ -698,6 +732,269 @@ class SpeakerPanelWidget(QWidget):
             self.status_label.setText(f"重命名失败: {e}")
 
 
+class ImagePanelWidget(QWidget):
+    """M5: Image panel for viewing uploaded images and analysis results"""
+    
+    def __init__(self, client: MeetingClient, parent=None):
+        super().__init__(parent)
+        self.client = client
+        self._current_meeting_id: Optional[str] = None
+        self._build_ui()
+        
+        # Auto-refresh timer
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._on_refresh_timer)
+        self._refresh_timer.start(15000)  # Refresh every 15 seconds
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Title
+        title = QLabel("📷 会议图片")
+        title.setFont(QFont("Microsoft YaHei", 11, QFont.Bold))
+        layout.addWidget(title)
+        
+        # Image list
+        self.image_list = QListWidget()
+        self.image_list.setMaximumHeight(150)
+        self.image_list.itemDoubleClicked.connect(self._on_image_double_clicked)
+        layout.addWidget(self.image_list)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        self.refresh_btn = QPushButton("刷新")
+        self.refresh_btn.clicked.connect(self._on_refresh_clicked)
+        self.upload_btn = QPushButton("上传")
+        self.upload_btn.clicked.connect(self._on_upload_clicked)
+        btn_layout.addWidget(self.refresh_btn)
+        btn_layout.addWidget(self.upload_btn)
+        layout.addLayout(btn_layout)
+        
+        # Status label
+        self.status_label = QLabel("无图片")
+        self.status_label.setStyleSheet("color: #666; font-size: 11px;")
+        layout.addWidget(self.status_label)
+    
+    def set_meeting(self, meeting_id: Optional[str]):
+        """Set the current meeting ID for image operations."""
+        self._current_meeting_id = meeting_id
+        if meeting_id:
+            asyncio.create_task(self._refresh())
+    
+    def _on_refresh_timer(self):
+        if self._current_meeting_id:
+            asyncio.create_task(self._refresh())
+    
+    def _on_refresh_clicked(self):
+        if self._current_meeting_id:
+            asyncio.create_task(self._refresh())
+    
+    async def _refresh(self):
+        if not self._current_meeting_id:
+            return
+        
+        try:
+            result = await self._get_images(self._current_meeting_id)
+            if result.get("ok"):
+                images = result.get("images", [])
+                self._update_ui(images)
+        except Exception as e:
+            self.status_label.setText(f"刷新失败: {e}")
+    
+    async def _get_images(self, meeting_id: str) -> dict:
+        """Get images for a meeting."""
+        session = self.client._session
+        if session is None:
+            session = await self.client._get_session()
+        
+        async with session.get(
+            f"{self.client.base_url}/v2/meetings/{meeting_id}/images",
+        ) as resp:
+            return await resp.json()
+    
+    def _update_ui(self, images: list):
+        self.image_list.clear()
+        
+        if not images:
+            self.status_label.setText("无图片")
+            return
+        
+        for img in images:
+            image_id = img.get("image_id", "unknown")
+            seq = img.get("seq", 0)
+            filename = img.get("filename", "unknown")
+            size_kb = (img.get("size_bytes") or 0) // 1024
+            analysis_status = img.get("analysis_status", "pending")
+            width = img.get("width")
+            height = img.get("height")
+            
+            # Analysis status icon
+            analysis_icon = {
+                "pending": "⏳",
+                "analyzing": "🔄",
+                "analyzed": "✅",
+                "analysis_failed": "❌",
+            }.get(analysis_status, "❓")
+            
+            # Format display
+            dimensions = f"{width}x{height}" if width and height else ""
+            item_text = f"{analysis_icon} #{seq}: {filename[:20]} ({size_kb}KB)"
+            if dimensions:
+                item_text += f" [{dimensions}]"
+            
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, {
+                "image_id": image_id,
+                "filename": filename,
+                "seq": seq,
+                "analysis_status": analysis_status,
+            })
+            
+            self.image_list.addItem(item)
+        
+        self.status_label.setText(f"{len(images)} 张图片")
+    
+    def _on_image_double_clicked(self, item: QListWidgetItem):
+        data = item.data(Qt.UserRole)
+        image_id = data.get("image_id")
+        if image_id and self._current_meeting_id:
+            asyncio.create_task(self._view_image(image_id))
+    
+    async def _view_image(self, image_id: str):
+        """Open image in default viewer or show in dialog."""
+        if not self._current_meeting_id:
+            return
+        
+        try:
+            session = self.client._session
+            if session is None:
+                session = await self.client._get_session()
+            
+            # Get image details
+            async with session.get(
+                f"{self.client.base_url}/v2/meetings/{self._current_meeting_id}/images/{image_id}",
+            ) as resp:
+                result = await resp.json()
+            
+            if result.get("ok"):
+                img = result.get("image", {})
+                self._show_image_dialog(img)
+            else:
+                self.status_label.setText(f"获取图片失败: {result.get('error')}")
+        except Exception as e:
+            self.status_label.setText(f"查看失败: {e}")
+    
+    def _show_image_dialog(self, img: dict):
+        """Show image details in a dialog."""
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox, QVBoxLayout, QLabel as QLabel2
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"图片详情 - {img.get('filename', 'unknown')}")
+        dialog.setMinimumSize(400, 300)
+        
+        layout = QVBoxLayout(dialog)
+        
+        # Image info
+        info_parts = [
+            f"<b>文件名:</b> {img.get('filename', 'unknown')}",
+            f"<b>序列:</b> {img.get('seq', 0)}",
+            f"<b>大小:</b> {(img.get('size_bytes') or 0) // 1024} KB",
+            f"<b>尺寸:</b> {img.get('width', '?')} x {img.get('height', '?')}",
+            f"<b>格式:</b> {img.get('format', 'unknown')}",
+            f"<b>分析状态:</b> {img.get('analysis_status', 'pending')}",
+        ]
+        
+        if img.get('captured_at'):
+            info_parts.append(f"<b>拍摄时间:</b> {img.get('captured_at')}")
+        
+        if img.get('device_id'):
+            info_parts.append(f"<b>设备:</b> {img.get('device_id')}")
+        
+        # Analysis result
+        analysis_result = img.get('analysis_result')
+        if analysis_result:
+            info_parts.append("<hr>")
+            info_parts.append("<b>分析结果:</b>")
+            if isinstance(analysis_result, dict):
+                for key, value in analysis_result.items():
+                    if isinstance(value, (str, int, float, bool)):
+                        info_parts.append(f"  {key}: {value}")
+                    elif isinstance(value, list):
+                        info_parts.append(f"  {key}: {', '.join(str(v) for v in value[:5])}")
+            else:
+                info_parts.append(f"  {analysis_result}")
+        
+        info_label = QLabel2("<br>".join(info_parts))
+        info_label.setWordWrap(True)
+        layout.addWidget(info_label)
+        
+        # Buttons
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        
+        dialog.exec()
+    
+    def _on_upload_clicked(self):
+        """Upload image for current meeting."""
+        if not self._current_meeting_id:
+            self.status_label.setText("请先开始会议")
+            return
+        
+        from PySide6.QtWidgets import QFileDialog
+        
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择图片",
+            "",
+            "Images (*.png *.jpg *.jpeg *.webp);;All Files (*)",
+        )
+        
+        if file_path:
+            asyncio.create_task(self._upload_image(file_path))
+    
+    async def _upload_image(self, file_path: str):
+        """Upload an image file."""
+        if not self._current_meeting_id:
+            return
+        
+        try:
+            import os
+            from pathlib import Path
+            
+            # Read file
+            p = Path(file_path)
+            filename = p.name
+            
+            with open(file_path, "rb") as f:
+                data = f.read()
+            
+            # Build multipart form
+            import aiohttp
+            session = self.client._session
+            if session is None:
+                session = await self.client._get_session()
+            
+            # Create form data
+            form = aiohttp.FormData()
+            form.add_field("image", data, filename=filename, content_type="application/octet-stream")
+            form.add_field("filename", filename.encode())
+            
+            async with session.post(
+                f"{self.client.base_url}/v2/meetings/{self._current_meeting_id}/images:upload",
+                data=form,
+            ) as resp:
+                result = await resp.json()
+            
+            if result.get("ok"):
+                self.status_label.setText(f"已上传: {filename}")
+                await self._refresh()
+            else:
+                self.status_label.setText(f"上传失败: {result.get('error')}")
+        except Exception as e:
+            self.status_label.setText(f"上传失败: {e}")
+
+
 class RefinedTranscriptWidget(QWidget):
     """M4: Refined transcript view with speaker names"""
     
@@ -826,7 +1123,7 @@ class MeetingConsoleWindow(QMainWindow):
         self.refined_transcript = RefinedTranscriptWidget(self._get_client())
         middle_layout.addWidget(self.refined_transcript, stretch=1)
         
-        # Right panel: History, Backup status, and Transcription tasks
+        # Right panel: History, Backup status, Transcription tasks, and Images
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
         
@@ -841,6 +1138,10 @@ class MeetingConsoleWindow(QMainWindow):
         # M3: Transcription task panel
         self.transcription_tasks = TranscriptionTaskWidget(self._get_client())
         right_layout.addWidget(self.transcription_tasks)
+        
+        # M5: Image panel
+        self.image_panel = ImagePanelWidget(self._get_client())
+        right_layout.addWidget(self.image_panel)
         
         # Splitter
         splitter = QSplitter(Qt.Horizontal)
@@ -858,6 +1159,7 @@ class MeetingConsoleWindow(QMainWindow):
         await self.history._refresh()
         await self.backup_status._refresh()
         await self.transcription_tasks._refresh()
+        await self.image_panel._refresh()
 
     def _get_client(self) -> MeetingClient:
         if self._meeting_client is None:
@@ -870,6 +1172,8 @@ class MeetingConsoleWindow(QMainWindow):
         # Update speaker panel with current meeting
         self.speaker_panel.set_meeting(meeting_id)
         self.refined_transcript.set_meeting(meeting_id)
+        # M5: Update image panel
+        self.image_panel.set_meeting(meeting_id)
 
     def _on_meeting_ended(self, meeting_id: str):
         self.statusBar().showMessage(f"Meeting ended: {meeting_id}")
@@ -883,6 +1187,8 @@ class MeetingConsoleWindow(QMainWindow):
         if self.console.current_meeting_id:
             self.speaker_panel.set_meeting(self.console.current_meeting_id)
             self.refined_transcript.set_meeting(self.console.current_meeting_id)
+            # M5: Refresh image panel
+            self.image_panel.set_meeting(self.console.current_meeting_id)
 
     def closeEvent(self, event):
         if self._meeting_client:

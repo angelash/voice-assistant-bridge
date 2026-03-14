@@ -31,6 +31,11 @@ from meeting import (
     EVT_TRANSCRIPTION_FAILED,
     EVT_SPEAKER_IDENTIFIED,
     EVT_SPEAKER_RENAMED,
+    EVT_IMAGE_UPLOADED,
+    EVT_IMAGE_UPLOAD_FAILED,
+    EVT_IMAGE_ANALYSIS_STARTED,
+    EVT_IMAGE_ANALYSIS_COMPLETED,
+    EVT_IMAGE_ANALYSIS_FAILED,
     MEETING_STATUS_IDLE,
     MEETING_STATUS_PREP,
     MEETING_STATUS_ACTIVE,
@@ -41,6 +46,8 @@ from meeting import (
     JOB_STATUS_SUCCESS,
     JOB_STATUS_FAILED,
     SPEAKER_SOURCE_MANUAL,
+    IMAGE_STATUS_UPLOADED,
+    IMAGE_STATUS_FAILED,
     build_event_envelope,
     now_iso,
 )
@@ -875,6 +882,371 @@ class V2MeetingAPI:
             "count": len(history),
         })
 
+    # --- M5: Image Upload ---
+
+    async def handle_image_upload(self, request: web.Request) -> web.Response:
+        """POST /v2/meetings/{meeting_id}/images:upload - Upload an image.
+        
+        M5: Upload original image with metadata preservation.
+        
+        Request body (multipart/form-data):
+        - image: Image file content (required)
+        - filename: Original filename (optional)
+        - captured_at: Capture timestamp ISO string (optional)
+        - device_id: Device identifier (optional)
+        - width: Image width in pixels (optional)
+        - height: Image height in pixels (optional)
+        - format: Image format (jpeg/png/webp, optional)
+        
+        Returns:
+        - ok: True/False
+        - image_id: The uploaded image ID
+        - upload_status: uploaded/failed
+        - checksum_verified: Boolean
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        # Check meeting exists
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        try:
+            reader = await request.multipart()
+            
+            image_data = None
+            filename = None
+            captured_at = None
+            device_id = None
+            width = None
+            height = None
+            image_format = None
+            
+            async for field in reader:
+                if field.name == "image":
+                    image_data = await field.read()
+                    # Try to extract filename from content-disposition
+                    if field.filename:
+                        filename = field.filename
+                elif field.name == "filename":
+                    filename = (await field.read()).decode("utf-8").strip()
+                elif field.name == "captured_at":
+                    captured_at = (await field.read()).decode("utf-8").strip()
+                elif field.name == "device_id":
+                    device_id = (await field.read()).decode("utf-8").strip()
+                elif field.name == "width":
+                    width = int((await field.read()).decode("utf-8"))
+                elif field.name == "height":
+                    height = int((await field.read()).decode("utf-8"))
+                elif field.name == "format":
+                    image_format = (await field.read()).decode("utf-8").strip().lower()
+            
+            # Validate required fields
+            if image_data is None:
+                return web.json_response({"ok": False, "error": "image data required"}, status=400)
+            
+            # Compute checksum
+            checksum = hashlib.sha256(image_data).hexdigest()
+            
+            # Determine format from data if not provided
+            if not image_format:
+                # Simple format detection from magic bytes
+                if image_data[:8] == b'\x89PNG\r\n\x1a\n':
+                    image_format = "png"
+                elif image_data[:2] == b'\xff\xd8':
+                    image_format = "jpeg"
+                elif image_data[:4] == b'RIFF' and image_data[8:12] == b'WEBP':
+                    image_format = "webp"
+                else:
+                    image_format = "unknown"
+            
+            # Default filename if not provided
+            if not filename:
+                ext = image_format if image_format != "unknown" else "bin"
+                filename = f"image_{checksum[:8]}.{ext}"
+            
+            # Get next sequence number
+            seq = self.store.get_next_image_seq(meeting_id)
+            
+            # Save original image
+            artifacts_dir = Path("artifacts/meetings") / meeting_id / "images" / "original"
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Use checksum-based filename to avoid duplicates
+            ext = filename.rsplit(".", 1)[-1] if "." in filename else image_format
+            image_filename = f"{seq:04d}_{checksum[:16]}.{ext}"
+            image_path = artifacts_dir / image_filename
+            
+            with open(image_path, "wb") as f:
+                f.write(image_data)
+            
+            # Create image record
+            image = self.store.create_meeting_image(
+                meeting_id=meeting_id,
+                seq=seq,
+                original_path=str(image_path),
+                filename=filename,
+                size_bytes=len(image_data),
+                checksum=checksum,
+                width=width,
+                height=height,
+                format=image_format,
+                device_id=device_id,
+                captured_at=captured_at,
+            )
+            
+            # Emit upload success event
+            event = self.store.append_event(
+                meeting_id=meeting_id,
+                source="server",
+                event_type=EVT_IMAGE_UPLOADED,
+                payload={
+                    "image_id": image["image_id"],
+                    "seq": seq,
+                    "filename": filename,
+                    "size_bytes": len(image_data),
+                    "checksum": checksum,
+                    "format": image_format,
+                    "width": width,
+                    "height": height,
+                    "path": str(image_path),
+                },
+            )
+            await self.event_hub.publish(build_event_envelope(event))
+            
+            logger.info(f"Image uploaded: {image['image_id']}, size={len(image_data)}, checksum={checksum[:16]}...")
+            
+            return web.json_response({
+                "ok": True,
+                "image_id": image["image_id"],
+                "seq": seq,
+                "upload_status": IMAGE_STATUS_UPLOADED,
+                "size_bytes": len(image_data),
+                "checksum": checksum,
+                "path": str(image_path),
+            })
+            
+        except Exception as e:
+            logger.error(f"Image upload failed: {e}")
+            return web.json_response({
+                "ok": False,
+                "error": str(e),
+            }, status=500)
+
+    async def handle_get_images(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/images - Get all images for a meeting.
+        
+        M5: Returns all uploaded images with metadata.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        images = self.store.get_meeting_images(meeting_id)
+        
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "images": images,
+            "count": len(images),
+        })
+
+    async def handle_get_image(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/images/{image_id} - Get image details.
+        
+        M5: Returns details of a specific image including analysis results.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        image_id = request.match_info.get("image_id", "").strip()
+        
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+        if not image_id:
+            return web.json_response({"ok": False, "error": "image_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        image = self.store.get_meeting_image(image_id)
+        if not image or image["meeting_id"] != meeting_id:
+            return web.json_response({"ok": False, "error": "image_not_found"}, status=404)
+        
+        return web.json_response({
+            "ok": True,
+            "image": image,
+        })
+
+    async def handle_serve_image(self, request: web.Request) -> web.Response:
+        """GET /v2/meetings/{meeting_id}/images/{image_id}/file - Serve image file.
+        
+        M5: Returns the actual image file content.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        image_id = request.match_info.get("image_id", "").strip()
+        
+        if not meeting_id or not image_id:
+            return web.json_response({"ok": False, "error": "meeting_id and image_id required"}, status=400)
+
+        image = self.store.get_meeting_image(image_id)
+        if not image or image["meeting_id"] != meeting_id:
+            return web.json_response({"ok": False, "error": "image_not_found"}, status=404)
+
+        image_path = Path(image["original_path"])
+        if not image_path.exists():
+            return web.json_response({"ok": False, "error": "file_not_found"}, status=404)
+        
+        # Determine content type
+        fmt = image.get("format") or "jpeg"
+        content_type = {
+            "jpeg": "image/jpeg",
+            "jpg": "image/jpeg",
+            "png": "image/png",
+            "webp": "image/webp",
+        }.get(fmt, "application/octet-stream")
+        
+        with open(image_path, "rb") as f:
+            data = f.read()
+        
+        return web.Response(
+            body=data,
+            content_type=content_type,
+            headers={
+                "Cache-Control": "public, max-age=86400",
+                "Content-Disposition": f'inline; filename="{image["filename"]}"',
+            },
+        )
+
+    async def handle_image_analysis(self, request: web.Request) -> web.Response:
+        """POST /v2/meetings/{meeting_id}/images/{image_id}:analyze - Trigger image analysis.
+        
+        M5: Triggers OpenClaw image analysis for a specific image.
+        This is a stub implementation that marks analysis as pending.
+        Actual OpenClaw integration would be done via background worker.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        image_id = request.match_info.get("image_id", "").strip()
+        
+        if not meeting_id or not image_id:
+            return web.json_response({"ok": False, "error": "meeting_id and image_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        image = self.store.get_meeting_image(image_id)
+        if not image or image["meeting_id"] != meeting_id:
+            return web.json_response({"ok": False, "error": "image_not_found"}, status=404)
+
+        # Emit analysis started event
+        event = self.store.append_event(
+            meeting_id=meeting_id,
+            source="server",
+            event_type=EVT_IMAGE_ANALYSIS_STARTED,
+            payload={
+                "image_id": image_id,
+                "seq": image["seq"],
+                "original_path": image["original_path"],
+            },
+        )
+        await self.event_hub.publish(build_event_envelope(event))
+        
+        # Update status to analyzing
+        self.store.update_meeting_image(image_id, analysis_status="analyzing")
+        
+        # TODO: Integrate with OpenClaw image-analysis
+        # For now, create a stub result that indicates the integration point
+        stub_result = {
+            "status": "pending",
+            "message": "Image analysis queued. OpenClaw integration pending.",
+            "image_id": image_id,
+            "queued_at": now_iso(),
+        }
+        
+        # Store the stub result
+        self.store.update_meeting_image(
+            image_id,
+            analysis_status="analyzing",
+            analysis_result=stub_result,
+        )
+        
+        logger.info(f"Image analysis queued: {image_id}")
+        
+        return web.json_response({
+            "ok": True,
+            "image_id": image_id,
+            "analysis_status": "analyzing",
+            "message": "Analysis queued. OpenClaw integration pending.",
+        })
+
+    async def handle_image_analysis_result(self, request: web.Request) -> web.Response:
+        """PATCH /v2/meetings/{meeting_id}/images/{image_id}/analysis - Update analysis result.
+        
+        M5: Updates the analysis result for an image (called by OpenClaw worker).
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        image_id = request.match_info.get("image_id", "").strip()
+        
+        if not meeting_id or not image_id:
+            return web.json_response({"ok": False, "error": "meeting_id and image_id required"}, status=400)
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        image = self.store.get_meeting_image(image_id)
+        if not image or image["meeting_id"] != meeting_id:
+            return web.json_response({"ok": False, "error": "image_not_found"}, status=404)
+
+        status = data.get("status", "completed")
+        result = data.get("result", {})
+        error = data.get("error")
+        
+        update_fields = {
+            "analysis_status": status,
+            "analysis_result": result,
+            "analysis_at": now_iso(),
+        }
+        
+        if error:
+            update_fields["analysis_error"] = error
+        
+        self.store.update_meeting_image(image_id, **update_fields)
+        
+        # Emit appropriate event
+        event_type = EVT_IMAGE_ANALYSIS_COMPLETED if status == "completed" else EVT_IMAGE_ANALYSIS_FAILED
+        event = self.store.append_event(
+            meeting_id=meeting_id,
+            source="openclaw",
+            event_type=event_type,
+            payload={
+                "image_id": image_id,
+                "status": status,
+                "result": result,
+                "error": error,
+            },
+        )
+        await self.event_hub.publish(build_event_envelope(event))
+        
+        logger.info(f"Image analysis updated: {image_id}, status={status}")
+        
+        return web.json_response({
+            "ok": True,
+            "image_id": image_id,
+            "analysis_status": status,
+        })
+
     def register_routes(self, app: web.Application) -> None:
         """Register V2 API routes."""
         app.router.add_post("/v2/meetings", self.handle_create_meeting)
@@ -899,3 +1271,10 @@ class V2MeetingAPI:
         app.router.add_get("/v2/meetings/{meeting_id}/speakers", self.handle_get_speakers)
         app.router.add_patch("/v2/meetings/{meeting_id}/speakers/{speaker_cluster_id}", self.handle_rename_speaker)
         app.router.add_get("/v2/meetings/{meeting_id}/speakers/history", self.handle_get_speaker_history)
+        # M5 routes - Image upload and analysis
+        app.router.add_post("/v2/meetings/{meeting_id}/images:upload", self.handle_image_upload)
+        app.router.add_get("/v2/meetings/{meeting_id}/images", self.handle_get_images)
+        app.router.add_get("/v2/meetings/{meeting_id}/images/{image_id}", self.handle_get_image)
+        app.router.add_get("/v2/meetings/{meeting_id}/images/{image_id}/file", self.handle_serve_image)
+        app.router.add_post("/v2/meetings/{meeting_id}/images/{image_id}:analyze", self.handle_image_analysis)
+        app.router.add_patch("/v2/meetings/{meeting_id}/images/{image_id}/analysis", self.handle_image_analysis_result)

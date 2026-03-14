@@ -71,6 +71,21 @@ SPEAKER_SOURCE_DIARIZATION = "diarization"  # Auto-detected by diarization
 SPEAKER_SOURCE_MANUAL = "manual"  # Manually assigned
 SPEAKER_SOURCE_HISTORY = "history"  # Reused from historical mapping
 
+# M5: Image upload event types
+EVT_IMAGE_UPLOADED = "image.uploaded"
+EVT_IMAGE_UPLOAD_FAILED = "image.upload_failed"
+EVT_IMAGE_ANALYSIS_STARTED = "image.analysis.started"
+EVT_IMAGE_ANALYSIS_COMPLETED = "image.analysis.completed"
+EVT_IMAGE_ANALYSIS_FAILED = "image.analysis.failed"
+
+# M5: Image upload status constants
+IMAGE_STATUS_UPLOADING = "uploading"
+IMAGE_STATUS_UPLOADED = "uploaded"
+IMAGE_STATUS_FAILED = "failed"
+IMAGE_STATUS_ANALYZING = "analyzing"
+IMAGE_STATUS_ANALYZED = "analyzed"
+IMAGE_STATUS_ANALYSIS_FAILED = "analysis_failed"
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
@@ -187,6 +202,31 @@ class MeetingStore:
                     notes TEXT
                 )
             """)
+            # M5: Meeting images (original image uploads with analysis)
+            self.conn.execute("""
+                CREATE TABLE IF NOT EXISTS meeting_images (
+                    image_id TEXT PRIMARY KEY,
+                    meeting_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    original_path TEXT NOT NULL,
+                    thumbnail_path TEXT,
+                    filename TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    checksum TEXT NOT NULL,
+                    width INTEGER,
+                    height INTEGER,
+                    format TEXT,
+                    device_id TEXT,
+                    captured_at TEXT,
+                    uploaded_at TEXT NOT NULL,
+                    upload_status TEXT DEFAULT 'uploaded',
+                    analysis_status TEXT DEFAULT 'pending',
+                    analysis_result TEXT,
+                    analysis_error TEXT,
+                    analysis_at TEXT,
+                    created_at TEXT NOT NULL
+                )
+            """)
             # Indexes
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_events_meeting ON meeting_events(meeting_id, ts_server)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_events_type ON meeting_events(event_type)")
@@ -200,6 +240,9 @@ class MeetingStore:
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_refined_segments_speaker ON meeting_segments_refined(meeting_id, speaker_cluster_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_speaker_mappings_meeting ON speaker_name_mappings(meeting_id)")
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_speaker_mappings_cluster ON speaker_name_mappings(speaker_cluster_id)")
+            # M5 indexes
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_images_meeting ON meeting_images(meeting_id, seq)")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_meeting_images_status ON meeting_images(upload_status, analysis_status)")
             self.conn.commit()
 
     @staticmethod
@@ -690,6 +733,123 @@ class MeetingStore:
                 (meeting_id, speaker_cluster_id),
             ).fetchone()
         return row["new_name"] if row else None
+
+    # --- M5: Meeting Images ---
+
+    def create_meeting_image(
+        self,
+        *,
+        meeting_id: str,
+        seq: int,
+        original_path: str,
+        filename: str,
+        size_bytes: int,
+        checksum: str,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+        format: Optional[str] = None,
+        device_id: Optional[str] = None,
+        captured_at: Optional[str] = None,
+        thumbnail_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Create a meeting image record."""
+        image_id = f"img-{uuid.uuid4().hex}"
+        ts = now_iso()
+        row = {
+            "image_id": image_id,
+            "meeting_id": meeting_id,
+            "seq": seq,
+            "original_path": original_path,
+            "thumbnail_path": thumbnail_path,
+            "filename": filename,
+            "size_bytes": size_bytes,
+            "checksum": checksum,
+            "width": width,
+            "height": height,
+            "format": format,
+            "device_id": device_id,
+            "captured_at": captured_at,
+            "uploaded_at": ts,
+            "upload_status": IMAGE_STATUS_UPLOADED,
+            "analysis_status": "pending",
+            "analysis_result": None,
+            "analysis_error": None,
+            "analysis_at": None,
+            "created_at": ts,
+        }
+        with self.lock:
+            cols = ", ".join(row.keys())
+            vals = ", ".join("?" for _ in row)
+            self.conn.execute(f"INSERT INTO meeting_images ({cols}) VALUES ({vals})", list(row.values()))
+            self.conn.commit()
+        return row
+
+    def get_meeting_image(self, image_id: str) -> Optional[dict[str, Any]]:
+        """Get a single meeting image by ID."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM meeting_images WHERE image_id=?",
+                (image_id,),
+            ).fetchone()
+        result = self._dict(row) if row else None
+        # Deserialize analysis_result JSON
+        if result and result.get("analysis_result"):
+            try:
+                result["analysis_result"] = json.loads(result["analysis_result"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return result
+
+    def get_meeting_images(self, meeting_id: str) -> list[dict[str, Any]]:
+        """Get all images for a meeting."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM meeting_images WHERE meeting_id=? ORDER BY seq ASC",
+                (meeting_id,),
+            ).fetchall()
+        results = [self._dict(r) for r in rows]
+        # Deserialize analysis_result JSON for each image
+        for r in results:
+            if r.get("analysis_result"):
+                try:
+                    r["analysis_result"] = json.loads(r["analysis_result"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        return results
+
+    def update_meeting_image(self, image_id: str, **fields: Any) -> None:
+        """Update meeting image fields."""
+        if not fields:
+            return
+        
+        # Convert analysis_result to JSON if it's a dict
+        if "analysis_result" in fields and isinstance(fields["analysis_result"], dict):
+            fields["analysis_result"] = json.dumps(fields["analysis_result"], ensure_ascii=False)
+        
+        keys = list(fields.keys())
+        sets = ", ".join(f"{k}=?" for k in keys)
+        args = [fields[k] for k in keys] + [image_id]
+        with self.lock:
+            self.conn.execute(f"UPDATE meeting_images SET {sets} WHERE image_id=?", args)
+            self.conn.commit()
+
+    def get_next_image_seq(self, meeting_id: str) -> int:
+        """Get the next sequence number for an image in a meeting."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT MAX(seq) as max_seq FROM meeting_images WHERE meeting_id=?",
+                (meeting_id,),
+            ).fetchone()
+        return (row["max_seq"] or 0) + 1
+
+    def get_pending_analysis_images(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Get images pending analysis (for background processing)."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM meeting_images WHERE analysis_status='pending' ORDER BY created_at ASC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [self._dict(r) for r in rows]
 
     def close(self) -> None:
         with self.lock:

@@ -28,6 +28,9 @@ from meeting import (
     EVT_MEETING_MODE_OFF,
     EVT_AUDIO_SEGMENT_UPLOADED,
     EVT_AUDIO_SEGMENT_UPLOAD_FAILED,
+    EVT_IMAGE_UPLOADED,
+    EVT_IMAGE_ANALYSIS_STARTED,
+    EVT_IMAGE_ANALYSIS_COMPLETED,
     MEETING_STATUS_IDLE,
     MEETING_STATUS_ACTIVE,
     MEETING_STATUS_ENDING,
@@ -35,6 +38,8 @@ from meeting import (
     UPLOAD_STATUS_PENDING,
     UPLOAD_STATUS_UPLOADED,
     UPLOAD_STATUS_FAILED,
+    IMAGE_STATUS_UPLOADED,
+    IMAGE_STATUS_FAILED,
 )
 from v2_api import V2MeetingAPI
 
@@ -1074,6 +1079,385 @@ class TestM4SpeakerDiarization(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(len(body["history"]), 1)
         self.assertEqual(body["history"][0]["new_name"], "Alice")
+
+
+class TestM5ImageUpload(unittest.TestCase):
+    """Test M5: Image upload and management"""
+    
+    def setUp(self):
+        # Use a temporary database and directory
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_meetings.db"
+        self.store = MeetingStore(self.db_path)
+        self.event_hub = MockEventHub()
+        self.api = V2MeetingAPI(self.store, self.event_hub)
+        
+    def tearDown(self):
+        self.store.close()
+        # Cleanup temp directory
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+    
+    def test_create_meeting_image(self):
+        """Test creating a meeting image record"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        image = self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            original_path="/test/path/image.jpg",
+            filename="image.jpg",
+            size_bytes=1024,
+            checksum="abc123",
+            width=800,
+            height=600,
+            format="jpeg",
+        )
+        
+        self.assertIsNotNone(image)
+        self.assertTrue(image["image_id"].startswith("img-"))
+        self.assertEqual(image["meeting_id"], meeting["meeting_id"])
+        self.assertEqual(image["seq"], 1)
+        self.assertEqual(image["filename"], "image.jpg")
+        self.assertEqual(image["size_bytes"], 1024)
+        self.assertEqual(image["checksum"], "abc123")
+        self.assertEqual(image["width"], 800)
+        self.assertEqual(image["height"], 600)
+        self.assertEqual(image["format"], "jpeg")
+        self.assertEqual(image["upload_status"], "uploaded")
+        self.assertEqual(image["analysis_status"], "pending")
+    
+    def test_get_meeting_images(self):
+        """Test getting all images for a meeting"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create multiple images
+        self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            original_path="/test/path/image1.jpg",
+            filename="image1.jpg",
+            size_bytes=1024,
+            checksum="abc123",
+        )
+        self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=2,
+            original_path="/test/path/image2.jpg",
+            filename="image2.jpg",
+            size_bytes=2048,
+            checksum="def456",
+        )
+        
+        images = self.store.get_meeting_images(meeting["meeting_id"])
+        
+        self.assertEqual(len(images), 2)
+        self.assertEqual(images[0]["seq"], 1)
+        self.assertEqual(images[1]["seq"], 2)
+    
+    def test_get_next_image_seq(self):
+        """Test getting the next sequence number"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # First image
+        seq1 = self.store.get_next_image_seq(meeting["meeting_id"])
+        self.assertEqual(seq1, 1)
+        
+        self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=seq1,
+            original_path="/test/path/image1.jpg",
+            filename="image1.jpg",
+            size_bytes=1024,
+            checksum="abc123",
+        )
+        
+        # Second image
+        seq2 = self.store.get_next_image_seq(meeting["meeting_id"])
+        self.assertEqual(seq2, 2)
+    
+    def test_update_meeting_image(self):
+        """Test updating image fields"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        image = self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            original_path="/test/path/image.jpg",
+            filename="image.jpg",
+            size_bytes=1024,
+            checksum="abc123",
+        )
+        
+        # Update analysis status
+        self.store.update_meeting_image(
+            image["image_id"],
+            analysis_status="analyzed",
+            analysis_result={"description": "A test image"},
+        )
+        
+        updated = self.store.get_meeting_image(image["image_id"])
+        self.assertEqual(updated["analysis_status"], "analyzed")
+        self.assertIsNotNone(updated["analysis_result"])
+    
+    def test_api_handle_get_images(self):
+        """Test GET /v2/meetings/{meeting_id}/images endpoint"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create images
+        self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            original_path="/test/path/image.jpg",
+            filename="image.jpg",
+            size_bytes=1024,
+            checksum="abc123",
+        )
+        
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        
+        response = asyncio.run(self.api.handle_get_images(request))
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertEqual(len(body["images"]), 1)
+        self.assertEqual(body["images"][0]["filename"], "image.jpg")
+    
+    def test_api_handle_get_image(self):
+        """Test GET /v2/meetings/{meeting_id}/images/{image_id} endpoint"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        image = self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            original_path="/test/path/image.jpg",
+            filename="image.jpg",
+            size_bytes=1024,
+            checksum="abc123",
+        )
+        
+        request = MagicMock()
+        request.match_info = {
+            "meeting_id": meeting["meeting_id"],
+            "image_id": image["image_id"],
+        }
+        
+        response = asyncio.run(self.api.handle_get_image(request))
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["image"]["image_id"], image["image_id"])
+        self.assertEqual(body["image"]["filename"], "image.jpg")
+    
+    def test_api_handle_image_analysis(self):
+        """Test POST /v2/meetings/{meeting_id}/images/{image_id}:analyze endpoint"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        image = self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            original_path="/test/path/image.jpg",
+            filename="image.jpg",
+            size_bytes=1024,
+            checksum="abc123",
+        )
+        
+        request = MagicMock()
+        request.match_info = {
+            "meeting_id": meeting["meeting_id"],
+            "image_id": image["image_id"],
+        }
+        
+        response = asyncio.run(self.api.handle_image_analysis(request))
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["analysis_status"], "analyzing")
+        
+        # Verify image was updated
+        updated = self.store.get_meeting_image(image["image_id"])
+        self.assertEqual(updated["analysis_status"], "analyzing")
+    
+    def test_api_handle_image_analysis_result(self):
+        """Test PATCH /v2/meetings/{meeting_id}/images/{image_id}/analysis endpoint"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        image = self.store.create_meeting_image(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            original_path="/test/path/image.jpg",
+            filename="image.jpg",
+            size_bytes=1024,
+            checksum="abc123",
+        )
+        
+        request = MagicMock()
+        request.match_info = {
+            "meeting_id": meeting["meeting_id"],
+            "image_id": image["image_id"],
+        }
+        request.json = AsyncMock(return_value={
+            "status": "completed",
+            "result": {
+                "description": "A test image",
+                "labels": ["test", "image"],
+            },
+        })
+        
+        response = asyncio.run(self.api.handle_image_analysis_result(request))
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["analysis_status"], "completed")
+        
+        # Verify image was updated
+        updated = self.store.get_meeting_image(image["image_id"])
+        self.assertEqual(updated["analysis_status"], "completed")
+        self.assertIsNotNone(updated["analysis_result"])
+        # analysis_result is stored as JSON string in SQLite
+        result = json.loads(updated["analysis_result"]) if isinstance(updated["analysis_result"], str) else updated["analysis_result"]
+        self.assertEqual(result["description"], "A test image")
+    
+    def test_api_handle_image_upload(self):
+        """Test POST /v2/meetings/{meeting_id}/images:upload endpoint"""
+        # Create a test meeting
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create a simple test image (PNG magic bytes + minimal data)
+        # PNG signature + IHDR chunk (minimal valid PNG structure)
+        test_image_data = (
+            b'\x89PNG\r\n\x1a\n'  # PNG signature
+            b'\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'  # IHDR chunk (1x1 pixel)
+            b'\x08\x02\x00\x00\x00\x90wS\xde'  # IHDR data
+            b'\x00\x00\x00\x0cIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01'  # IDAT chunk
+            b'\x0d\n-\xb4'  # IDAT CRC
+            b'\x00\x00\x00\x00IEND\xaeB`\x82'  # IEND chunk
+        )
+        
+        # Create mock multipart request
+        class MockField:
+            def __init__(self, name, data, filename=None):
+                self.name = name
+                self._data = data if isinstance(data, bytes) else data.encode()
+                self.filename = filename
+            
+            async def read(self):
+                return self._data
+        
+        class MockMultipartReader:
+            def __init__(self, fields):
+                self._fields = fields
+                self._index = 0
+            
+            def __aiter__(self):
+                return self
+            
+            async def __anext__(self):
+                if self._index >= len(self._fields):
+                    raise StopAsyncIteration
+                field = self._fields[self._index]
+                self._index += 1
+                return field
+        
+        fields = [
+            MockField("image", test_image_data, filename="test.png"),
+            MockField("filename", "test.png"),
+            MockField("width", "1"),
+            MockField("height", "1"),
+        ]
+        
+        # Mock request.multipart() to return the reader
+        async def get_reader():
+            return MockMultipartReader(fields)
+        
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        request.multipart = get_reader
+        
+        # Call upload handler
+        response = asyncio.run(self.api.handle_image_upload(request))
+        
+        self.assertEqual(response.status, 200)
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["image_id"].startswith("img-"))
+        self.assertEqual(body["upload_status"], IMAGE_STATUS_UPLOADED)
+        self.assertEqual(body["size_bytes"], len(test_image_data))
+        
+        # Verify image was created in database
+        images = self.store.get_meeting_images(meeting["meeting_id"])
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["filename"], "test.png")
+        self.assertEqual(images[0]["format"], "png")
+        
+    def test_api_handle_image_upload_with_metadata(self):
+        """Test image upload with device and timestamp metadata"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create minimal JPEG (SOI + APP0 + EOI)
+        test_image_data = (
+            b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00'  # JPEG header
+            b'\xff\xd9'  # EOI
+        )
+        
+        class MockField:
+            def __init__(self, name, data):
+                self.name = name
+                self._data = data if isinstance(data, bytes) else data.encode()
+                self.filename = None
+            
+            async def read(self):
+                return self._data
+        
+        class MockMultipartReader:
+            def __init__(self, fields):
+                self._fields = fields
+                self._index = 0
+            
+            def __aiter__(self):
+                return self
+            
+            async def __anext__(self):
+                if self._index >= len(self._fields):
+                    raise StopAsyncIteration
+                field = self._fields[self._index]
+                self._index += 1
+                return field
+        
+        fields = [
+            MockField("image", test_image_data),
+            MockField("filename", "meeting_photo.jpg"),
+            MockField("captured_at", "2026-03-14T15:30:00Z"),
+            MockField("device_id", "android-12345"),
+            MockField("width", "1920"),
+            MockField("height", "1080"),
+        ]
+        
+        async def get_reader():
+            return MockMultipartReader(fields)
+        
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        request.multipart = get_reader
+        
+        response = asyncio.run(self.api.handle_image_upload(request))
+        
+        self.assertEqual(response.status, 200)
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["upload_status"], IMAGE_STATUS_UPLOADED)
+        
+        # Verify metadata was stored
+        images = self.store.get_meeting_images(meeting["meeting_id"])
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["device_id"], "android-12345")
+        self.assertEqual(images[0]["captured_at"], "2026-03-14T15:30:00Z")
+        self.assertEqual(images[0]["width"], 1920)
+        self.assertEqual(images[0]["height"], 1080)
+        self.assertEqual(images[0]["format"], "jpeg")
 
 
 if __name__ == "__main__":
