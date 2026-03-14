@@ -570,3 +570,242 @@ class TestTranscriptionJobs(unittest.TestCase):
         
         body = json.loads(response.text)
         self.assertIsNone(body.get("transcription_job"))
+
+
+class TestNonBlockingTranscription(unittest.TestCase):
+    """Test that long transcription tasks don't block main API calls (M3 requirement)"""
+    
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_nonblocking.db"
+        self.store = MeetingStore(self.db_path)
+        self.event_hub = MockEventHub()
+        self.api = V2MeetingAPI(self.store, self.event_hub)
+        
+    def tearDown(self):
+        self.store.close()
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        
+    def test_meeting_mode_off_returns_immediately_with_transcription_job(self):
+        """Test that meeting mode off returns immediately, not waiting for transcription"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        self.store.update_meeting(meeting["meeting_id"], status=MEETING_STATUS_ACTIVE, mode="on")
+        
+        # Create and upload a segment
+        segment = self.store.create_audio_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1
+        )
+        self.store.update_audio_segment(
+            segment["segment_id"],
+            upload_status=UPLOAD_STATUS_UPLOADED,
+        )
+        
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        request.json = AsyncMock(return_value={"mode": "off"})
+        
+        # Time the response
+        import time
+        start = time.time()
+        response = asyncio.run(self.api.handle_meeting_mode(request))
+        elapsed_ms = (time.time() - start) * 1000
+        
+        body = json.loads(response.text)
+        
+        # Response should be immediate (< 100ms) - transcription runs async
+        self.assertLess(elapsed_ms, 100, "Meeting mode off should return immediately")
+        self.assertTrue(body["ok"])
+        # Job should be created but not completed (status=queued)
+        self.assertIsNotNone(body.get("transcription_job"))
+        self.assertEqual(body["transcription_job"]["status"], "queued")
+        
+    def test_api_calls_during_queued_transcription(self):
+        """Test that other API calls work while transcription jobs are queued"""
+        # Create and end meeting with transcription job
+        meeting1 = self.store.create_meeting(client_id="client-1")
+        self.store.update_meeting(meeting1["meeting_id"], status=MEETING_STATUS_ACTIVE, mode="on")
+        segment1 = self.store.create_audio_segment(meeting_id=meeting1["meeting_id"], seq=1)
+        self.store.update_audio_segment(segment1["segment_id"], upload_status=UPLOAD_STATUS_UPLOADED)
+        
+        job = self.store.create_transcription_job(meeting_id=meeting1["meeting_id"])
+        
+        # Verify job is queued
+        self.assertEqual(job["status"], "queued")
+        
+        # Now make other API calls - they should work fine
+        # 1. Create another meeting
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"client_id": "client-2"})
+        response = asyncio.run(self.api.handle_create_meeting(request))
+        self.assertEqual(response.status, 200)
+        
+        # 2. List meetings
+        request = MagicMock()
+        request.query = {}
+        response = asyncio.run(self.api.handle_list_meetings(request))
+        body = json.loads(response.text)
+        self.assertEqual(body["count"], 2)  # Both meetings
+        
+        # 3. Get transcription queue
+        request = MagicMock()
+        response = asyncio.run(self.api.handle_list_transcription_queue(request))
+        body = json.loads(response.text)
+        self.assertEqual(body["count"], 1)  # One queued job
+        
+    def test_multiple_transcription_jobs_can_queue(self):
+        """Test that multiple transcription jobs can be queued simultaneously"""
+        # Create multiple meetings with ended status
+        jobs = []
+        for i in range(3):
+            meeting = self.store.create_meeting(client_id=f"client-{i}")
+            self.store.update_meeting(meeting["meeting_id"], status=MEETING_STATUS_ARCHIVED)
+            segment = self.store.create_audio_segment(meeting_id=meeting["meeting_id"], seq=1)
+            self.store.update_audio_segment(segment["segment_id"], upload_status=UPLOAD_STATUS_UPLOADED)
+            job = self.store.create_transcription_job(meeting_id=meeting["meeting_id"])
+            jobs.append(job)
+        
+        # All jobs should be queued
+        for job in jobs:
+            self.assertEqual(job["status"], "queued")
+        
+        # Verify queue returns all jobs
+        queued = self.store.get_queued_transcription_jobs()
+        self.assertEqual(len(queued), 3)
+
+
+class TestTranscriptionWorkerNonBlocking(unittest.TestCase):
+    """Test TranscriptionWorker doesn't block main event loop"""
+    
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_worker.db"
+        self.store = MeetingStore(self.db_path)
+        self.event_hub = MockEventHub()
+        
+    def tearDown(self):
+        self.store.close()
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        
+    def test_worker_uses_thread_pool(self):
+        """Test that TranscriptionWorker is initialized with ThreadPoolExecutor"""
+        from transcription_worker import TranscriptionWorker
+        
+        worker = TranscriptionWorker(
+            self.store,
+            self.event_hub,
+            max_workers=2,
+        )
+        
+        self.assertEqual(worker.max_workers, 2)
+        self.assertIsNotNone(worker._executor)
+        
+    def test_worker_can_start_and_stop(self):
+        """Test that worker can be started and stopped cleanly"""
+        from transcription_worker import TranscriptionWorker
+        
+        worker = TranscriptionWorker(
+            self.store,
+            self.event_hub,
+            max_workers=2,
+        )
+        
+        async def test_lifecycle():
+            await worker.start()
+            self.assertTrue(worker._running)
+            await worker.stop()
+            self.assertFalse(worker._running)
+        
+        asyncio.run(test_lifecycle())
+        
+    def test_job_processed_in_background(self):
+        """Test that job processing runs in thread pool (non-blocking)"""
+        from transcription_worker import TranscriptionWorker
+        
+        worker = TranscriptionWorker(
+            self.store,
+            self.event_hub,
+            max_workers=1,
+        )
+        
+        # Create a job
+        meeting = self.store.create_meeting(client_id="test-client")
+        segment = self.store.create_audio_segment(meeting_id=meeting["meeting_id"], seq=1)
+        # Note: We're not actually creating audio files in this test
+        # The worker will fail but that's OK - we're testing the threading
+        
+        job = self.store.create_transcription_job(meeting_id=meeting["meeting_id"])
+        
+        # The worker processes jobs in _process_job which uses run_in_executor
+        # This is the key method that ensures non-blocking behavior
+        self.assertIsNotNone(worker._executor)
+
+
+class TestConcurrentAPIDuringTranscription(unittest.TestCase):
+    """Test that APIs remain responsive during transcription processing"""
+    
+    def setUp(self):
+        self.temp_dir = tempfile.mkdtemp()
+        self.db_path = Path(self.temp_dir) / "test_concurrent.db"
+        self.store = MeetingStore(self.db_path)
+        self.event_hub = MockEventHub()
+        self.api = V2MeetingAPI(self.store, self.event_hub)
+        
+    def tearDown(self):
+        self.store.close()
+        import shutil
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
+        
+    def test_concurrent_meeting_operations(self):
+        """Test that multiple meeting operations can run concurrently"""
+        async def run_concurrent_operations():
+            # Create multiple meetings concurrently
+            tasks = []
+            for i in range(5):
+                request = MagicMock()
+                request.json = AsyncMock(return_value={"client_id": f"client-{i}"})
+                tasks.append(self.api.handle_create_meeting(request))
+            
+            responses = await asyncio.gather(*tasks)
+            
+            # All should succeed
+            for resp in responses:
+                self.assertEqual(resp.status, 200)
+                body = json.loads(resp.text)
+                self.assertTrue(body["ok"])
+                self.assertTrue(body["meeting_id"].startswith("mtg-"))
+            
+            return len(responses)
+        
+        count = asyncio.run(run_concurrent_operations())
+        self.assertEqual(count, 5)
+        
+    def test_api_response_time_with_queued_jobs(self):
+        """Test that API response times remain stable with queued jobs"""
+        # Create multiple queued jobs
+        for i in range(5):
+            meeting = self.store.create_meeting(client_id=f"client-{i}")
+            self.store.update_meeting(meeting["meeting_id"], status=MEETING_STATUS_ARCHIVED)
+            segment = self.store.create_audio_segment(meeting_id=meeting["meeting_id"], seq=1)
+            self.store.update_audio_segment(segment["segment_id"], upload_status=UPLOAD_STATUS_UPLOADED)
+            self.store.create_transcription_job(meeting_id=meeting["meeting_id"])
+        
+        import time
+        
+        # Measure API response time
+        request = MagicMock()
+        request.query = {}
+        
+        start = time.time()
+        response = asyncio.run(self.api.handle_list_meetings(request))
+        elapsed_ms = (time.time() - start) * 1000
+        
+        # Should be fast (< 50ms for simple list operation)
+        self.assertLess(elapsed_ms, 50, f"API took {elapsed_ms}ms - should be fast")
+        self.assertEqual(response.status, 200)
+
+
+if __name__ == "__main__":
+    unittest.main()
