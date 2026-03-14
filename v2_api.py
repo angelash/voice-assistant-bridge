@@ -13,12 +13,14 @@ Provides:
 from __future__ import annotations
 
 import hashlib
+import io
 import logging
 import os
 from pathlib import Path
 from typing import Any, Optional
 
 from aiohttp import web
+from PIL import Image
 
 from meeting import (
     MeetingStore,
@@ -53,6 +55,42 @@ from meeting import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# M5: Thumbnail generation configuration
+THUMBNAIL_MAX_SIZE = 256  # Max width/height for thumbnails
+
+
+def generate_thumbnail(image_data: bytes, max_size: int = THUMBNAIL_MAX_SIZE) -> tuple[bytes, int, int] | None:
+    """
+    Generate a thumbnail from image data.
+    
+    Args:
+        image_data: Raw image bytes
+        max_size: Maximum width or height for thumbnail
+        
+    Returns:
+        Tuple of (thumbnail_bytes, width, height) or None on failure
+    """
+    try:
+        img = Image.open(io.BytesIO(image_data))
+        
+        # Convert to RGB if necessary (for PNG with transparency, etc.)
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        
+        # Calculate thumbnail size maintaining aspect ratio
+        img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        
+        # Save to bytes
+        thumb_io = io.BytesIO()
+        img.save(thumb_io, format="JPEG", quality=85)
+        thumb_io.seek(0)
+        
+        return thumb_io.read(), img.width, img.height
+    except Exception as e:
+        logger.warning(f"Failed to generate thumbnail: {e}")
+        return None
 
 
 class V2MeetingAPI:
@@ -982,11 +1020,37 @@ class V2MeetingAPI:
             with open(image_path, "wb") as f:
                 f.write(image_data)
             
+            # M5: Generate thumbnail
+            thumbnail_path = None
+            thumbnail_result = generate_thumbnail(image_data)
+            if thumbnail_result:
+                thumb_data, thumb_width, thumb_height = thumbnail_result
+                thumb_dir = Path("artifacts/meetings") / meeting_id / "images" / "thumbnail"
+                thumb_dir.mkdir(parents=True, exist_ok=True)
+                thumb_filename = f"{seq:04d}_{checksum[:16]}.jpg"
+                thumb_path = thumb_dir / thumb_filename
+                with open(thumb_path, "wb") as f:
+                    f.write(thumb_data)
+                thumbnail_path = str(thumb_path)
+                logger.info(f"Thumbnail generated: {thumb_width}x{thumb_height}")
+            
+            # If width/height not provided, extract from image
+            if width is None or height is None:
+                try:
+                    img = Image.open(io.BytesIO(image_data))
+                    if width is None:
+                        width = img.width
+                    if height is None:
+                        height = img.height
+                except Exception as e:
+                    logger.warning(f"Could not extract image dimensions: {e}")
+            
             # Create image record
             image = self.store.create_meeting_image(
                 meeting_id=meeting_id,
                 seq=seq,
                 original_path=str(image_path),
+                thumbnail_path=thumbnail_path,
                 filename=filename,
                 size_bytes=len(image_data),
                 checksum=checksum,

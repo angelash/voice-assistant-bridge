@@ -2,18 +2,25 @@
 
 import android.Manifest
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.Switch
 import android.widget.TextView
 import android.widget.Toast
@@ -27,6 +34,7 @@ import com.audiobridge.client.audio.KwsDetectorConsumer
 import com.audiobridge.client.audio.PcmDistributionBus
 import com.audiobridge.client.audio.SttForwarderConsumer
 import com.audiobridge.client.meeting.MeetingManager
+import com.audiobridge.client.upload.ImageUploadManager
 import com.audiobridge.client.upload.UploadQueueManager
 import com.audiobridge.client.upload.UploadStatus
 import com.audiobridge.client.wakeword.WakeWordController
@@ -58,6 +66,9 @@ class MainActivity : AppCompatActivity() {
         private const val PREFS_NAME = "audiobridge"
         private const val REQ_RECORD_AUDIO = 1001
         private const val REQ_LOCATION = 1002
+        private const val REQ_CAMERA = 1003
+        private const val REQ_GALLERY = 1004
+        private const val REQ_CAMERA_PERMISSION = 1005
 
         // iFlytek SparkChain credentials (as requested to hardcode)
         private const val XFYUN_APP_ID = "5dd63117"
@@ -109,6 +120,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var meetingModeSwitch: Switch
     private lateinit var meetingStatusText: TextView
     private lateinit var meetingInfoText: TextView
+    private lateinit var imageSectionTitle: TextView
+    private lateinit var imageButtonContainer: LinearLayout
+    private lateinit var captureImageButton: Button
+    private lateinit var selectImageButton: Button
+    private lateinit var imageUploadStatusText: TextView
 
     private var tts: TextToSpeech? = null
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -120,6 +136,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var wakeWordController: WakeWordController
     private lateinit var wakewordEventReporter: WakewordEventReporter
     private lateinit var uploadQueueManager: UploadQueueManager
+    private lateinit var imageUploadManager: ImageUploadManager
     private lateinit var diskWriterConsumer: DiskWriterConsumer
     private lateinit var kwsConsumer: KwsDetectorConsumer
     private var sttForwarderConsumer: SttForwarderConsumer? = null
@@ -144,6 +161,9 @@ class MainActivity : AppCompatActivity() {
     private var pendingLongReply: PendingLongReply? = null
     private var pendingLongReplyTimeoutTask: Runnable? = null
     private var pendingLongReplyListenTask: Runnable? = null
+    
+    // M5: Image capture
+    private var pendingCameraImageUri: Uri? = null
 
     private val httpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
@@ -228,6 +248,13 @@ class MainActivity : AppCompatActivity() {
         meetingModeSwitch = findViewById(R.id.meetingModeSwitch)
         meetingStatusText = findViewById(R.id.meetingStatusText)
         meetingInfoText = findViewById(R.id.meetingInfoText)
+        
+        // M5: Image capture UI elements
+        imageSectionTitle = findViewById(R.id.imageSectionTitle)
+        imageButtonContainer = findViewById(R.id.imageButtonContainer)
+        captureImageButton = findViewById(R.id.captureImageButton)
+        selectImageButton = findViewById(R.id.selectImageButton)
+        imageUploadStatusText = findViewById(R.id.imageUploadStatusText)
 
         // Initialize meeting mode components
         initMeetingMode()
@@ -993,6 +1020,49 @@ class MainActivity : AppCompatActivity() {
         // Initialize upload queue manager (M2)
         uploadQueueManager = UploadQueueManager(PUBLIC_BASE_URL, httpClient)
         
+        // Initialize image upload manager (M5)
+        val deviceId = try {
+            android.provider.Settings.Secure.getString(contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "unknown"
+        } catch (e: Exception) {
+            "unknown"
+        }
+        imageUploadManager = ImageUploadManager(PUBLIC_BASE_URL, deviceId, httpClient)
+        
+        // Setup image upload callbacks
+        imageUploadManager.onTaskStatusChanged = { task ->
+            runOnUiThread {
+                when (task.status) {
+                    ImageUploadManager.ImageTask.Status.UPLOADED -> {
+                        appendResult("[image] Photo ${task.seq} uploaded")
+                    }
+                    ImageUploadManager.ImageTask.Status.FAILED -> {
+                        appendResult("[image] Photo ${task.seq} failed: ${task.lastError}")
+                    }
+                    else -> {}
+                }
+                updateImageUploadStatus()
+            }
+        }
+        
+        imageUploadManager.onQueueProgress = { pending, uploaded, failed ->
+            runOnUiThread {
+                imageUploadStatusText.text = "Images: $uploaded uploaded, $pending pending"
+            }
+        }
+        
+        // Setup image capture buttons
+        captureImageButton.setOnClickListener {
+            if (!hasCameraPermission()) {
+                requestCameraPermission()
+            } else {
+                dispatchTakePictureIntent()
+            }
+        }
+        
+        selectImageButton.setOnClickListener {
+            dispatchSelectImageIntent()
+        }
+        
         // Setup upload queue callbacks
         uploadQueueManager.onTaskStatusChanged = { task ->
             runOnUiThread {
@@ -1093,6 +1163,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 appendResult("[meeting] Started: $meetingId")
                 updateMeetingStatusUI()
+                showImageUploadUI()
             }
         }
 
@@ -1101,6 +1172,7 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 appendResult("[meeting] Ended: $meetingId")
                 updateMeetingStatusUI()
+                hideImageUploadUI()
             }
             
             // M2: Trigger upload of all segments after meeting ends
@@ -1356,5 +1428,119 @@ class MainActivity : AppCompatActivity() {
                 scheduleLongReplyDecisionListening(delayMs = 400)
             }
         }
+        if (requestCode == REQ_CAMERA_PERMISSION && grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            dispatchTakePictureIntent()
+        }
+    }
+    
+    // ========== M5: Image Capture and Upload ==========
+    
+    private fun hasCameraPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    }
+    
+    private fun requestCameraPermission() {
+        ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), REQ_CAMERA_PERMISSION)
+    }
+    
+    private fun dispatchTakePictureIntent() {
+        val takePictureIntent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+        if (takePictureIntent.resolveActivity(packageManager) != null) {
+            // Create a file for the photo
+            val photoFile = File(
+                getExternalFilesDir(android.os.Environment.DIRECTORY_PICTURES),
+                "meeting_photo_${System.currentTimeMillis()}.jpg"
+            )
+            pendingCameraImageUri = Uri.fromFile(photoFile)
+            
+            takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, pendingCameraImageUri)
+            startActivityForResult(takePictureIntent, REQ_CAMERA)
+        } else {
+            Toast.makeText(this, "No camera app available", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    private fun dispatchSelectImageIntent() {
+        val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+        intent.type = "image/*"
+        startActivityForResult(intent, REQ_GALLERY)
+    }
+    
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        
+        when (requestCode) {
+            REQ_CAMERA -> {
+                if (resultCode == RESULT_OK && pendingCameraImageUri != null) {
+                    handleCapturedImage(pendingCameraImageUri!!)
+                    pendingCameraImageUri = null
+                } else {
+                    Toast.makeText(this, "Photo capture cancelled", Toast.LENGTH_SHORT).show()
+                }
+            }
+            REQ_GALLERY -> {
+                if (resultCode == RESULT_OK && data != null && data.data != null) {
+                    handleCapturedImage(data.data!!)
+                }
+            }
+        }
+    }
+    
+    private fun handleCapturedImage(uri: Uri) {
+        val meetingId = meetingManager.meetingId
+        if (meetingId == null) {
+            Toast.makeText(this, "No active meeting", Toast.LENGTH_SHORT).show()
+            return
+        }
+        
+        try {
+            // Copy image to app storage
+            val inputStream = contentResolver.openInputStream(uri)
+            if (inputStream == null) {
+                Toast.makeText(this, "Could not read image", Toast.LENGTH_SHORT).show()
+                return
+            }
+            
+            val imageFile = File(
+                filesDir,
+                "meeting_images/${meetingId}/image_${System.currentTimeMillis()}.jpg"
+            )
+            imageFile.parentFile?.mkdirs()
+            
+            inputStream.use { input ->
+                imageFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            
+            // Add to upload queue
+            val task = imageUploadManager.addImage(imageFile, meetingId, imageFile.name)
+            imageUploadManager.processQueue()
+            
+            Toast.makeText(this, "Photo added to upload queue", Toast.LENGTH_SHORT).show()
+            appendResult("[image] Photo queued for upload: ${task.imageId}")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to handle captured image", e)
+            Toast.makeText(this, "Failed to process image: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    private fun updateImageUploadStatus() {
+        val stats = imageUploadManager.getStats()
+        imageUploadStatusText.text = "Images: ${stats.uploaded} uploaded, ${stats.pending} pending, ${stats.failed} failed"
+    }
+    
+    private fun showImageUploadUI() {
+        imageSectionTitle.visibility = View.VISIBLE
+        imageButtonContainer.visibility = View.VISIBLE
+        imageUploadStatusText.visibility = View.VISIBLE
+        updateImageUploadStatus()
+    }
+    
+    private fun hideImageUploadUI() {
+        imageSectionTitle.visibility = View.GONE
+        imageButtonContainer.visibility = View.GONE
+        imageUploadStatusText.visibility = View.GONE
     }
 }

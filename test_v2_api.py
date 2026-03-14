@@ -1459,6 +1459,78 @@ class TestM5ImageUpload(unittest.TestCase):
         self.assertEqual(images[0]["height"], 1080)
         self.assertEqual(images[0]["format"], "jpeg")
 
+    def test_api_handle_image_upload_with_thumbnail(self):
+        """Test image upload generates a thumbnail"""
+        from PIL import Image
+        import io
+        
+        meeting = self.store.create_meeting(client_id="test-client")
+        
+        # Create a real test image (100x100 red square)
+        img = Image.new('RGB', (100, 100), color='red')
+        img_io = io.BytesIO()
+        img.save(img_io, format='PNG')
+        test_image_data = img_io.getvalue()
+        
+        class MockField:
+            def __init__(self, name, data, filename=None):
+                self.name = name
+                self.data = data if isinstance(data, bytes) else str(data).encode()
+                self.filename = filename
+            
+            async def read(self):
+                return self.data if isinstance(self.data, bytes) else self.data.encode()
+        
+        class MockMultipartReader:
+            def __init__(self, fields):
+                self._fields = fields
+                self._index = 0
+            
+            def __aiter__(self):
+                return self
+            
+            async def __anext__(self):
+                if self._index >= len(self._fields):
+                    raise StopAsyncIteration
+                field = self._fields[self._index]
+                self._index += 1
+                return field
+        
+        fields = [
+            MockField("image", test_image_data, filename="test.png"),
+            MockField("filename", "test.png"),
+        ]
+        
+        async def get_reader():
+            return MockMultipartReader(fields)
+        
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        request.multipart = get_reader
+        
+        response = asyncio.run(self.api.handle_image_upload(request))
+        
+        self.assertEqual(response.status, 200)
+        body = json.loads(response.text)
+        
+        self.assertTrue(body["ok"])
+        
+        # Verify thumbnail was generated
+        images = self.store.get_meeting_images(meeting["meeting_id"])
+        self.assertEqual(len(images), 1)
+        self.assertIsNotNone(images[0]["thumbnail_path"])
+        self.assertEqual(images[0]["width"], 100)
+        self.assertEqual(images[0]["height"], 100)
+        
+        # Verify thumbnail file exists
+        thumbnail_path = Path(images[0]["thumbnail_path"])
+        self.assertTrue(thumbnail_path.exists())
+        
+        # Verify thumbnail dimensions (should be <= 256x256)
+        thumb_img = Image.open(thumbnail_path)
+        self.assertLessEqual(thumb_img.width, 256)
+        self.assertLessEqual(thumb_img.height, 256)
+
 
 if __name__ == "__main__":
     unittest.main()

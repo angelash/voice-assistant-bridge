@@ -11,8 +11,10 @@ M5 (Image Original Upload Pipeline) is now complete. The implementation includes
 - Full backend API for image upload with metadata persistence
 - Database schema for image storage and analysis tracking
 - OpenClaw integration via background worker
+- **Thumbnail generation on upload** (NEW)
+- **Android image capture and upload integration** (NEW)
 - Windows UI for image viewing and upload
-- Comprehensive test coverage (10 tests)
+- Comprehensive test coverage (11 tests)
 
 ## Completed Tasks
 
@@ -51,12 +53,39 @@ M5 (Image Original Upload Pipeline) is now complete. The implementation includes
    - `POST /v2/meetings/{meeting_id}/images/{image_id}:analyze` - Trigger analysis
    - `PATCH /v2/meetings/{meeting_id}/images/{image_id}/analysis` - Update analysis result
 
-5. **Image Analysis Worker** (`image_analysis_worker.py`)
+5. **Thumbnail Generation** (`v2_api.py`) - NEW
+   - Automatic thumbnail generation on upload (256px max dimension)
+   - JPEG format with 85% quality
+   - Graceful fallback if generation fails
+   - Thumbnail path stored in database
+
+6. **Image Analysis Worker** (`image_analysis_worker.py`)
    - Background worker using ThreadPoolExecutor
    - OpenClaw API integration for image analysis
    - Fallback basic analysis when OpenClaw unavailable
    - Async helper for synchronous analysis requests
    - Event publishing on analysis start/complete/fail
+
+### Android (Complete ✅) - NEW
+
+1. **ImageUploadManager** (`upload/ImageUploadManager.kt`)
+   - Upload queue with retry logic
+   - Automatic thumbnail generation
+   - Metadata extraction (dimensions, format, timestamp)
+   - Status callbacks for UI updates
+   - Integration with meeting lifecycle
+
+2. **Camera/Gallery Integration** (`MainActivity.kt`)
+   - Camera capture button with permission handling
+   - Gallery image selection
+   - Automatic upload on capture
+   - Upload status display
+   - Show/hide based on meeting mode
+
+3. **UI Elements** (`activity_main.xml`)
+   - Image section title (hidden until meeting starts)
+   - Camera and gallery buttons
+   - Upload status text
 
 ### Windows UI (Complete ✅)
 
@@ -75,7 +104,7 @@ M5 (Image Original Upload Pipeline) is now complete. The implementation includes
 
 ### Tests (Complete ✅)
 
-- `TestM5ImageUpload` test class with 10 tests:
+- `TestM5ImageUpload` test class with 11 tests:
   - `test_create_meeting_image`
   - `test_get_meeting_images`
   - `test_get_next_image_seq`
@@ -86,39 +115,50 @@ M5 (Image Original Upload Pipeline) is now complete. The implementation includes
   - `test_api_handle_image_analysis_result`
   - `test_api_handle_image_upload`
   - `test_api_handle_image_upload_with_metadata`
+  - `test_api_handle_image_upload_with_thumbnail` (NEW)
 
 ## Verification
 
 ```bash
 # Run M5 tests
 python3 -m unittest test_v2_api.TestM5ImageUpload -v
-# Result: 10 tests pass
+# Result: 11 tests pass
 
 # Run all tests
 python3 -m unittest test_v2_api -v
-# Result: 50 tests pass
+# Result: 51 tests pass
 ```
 
 ## Files Changed
 
+### Backend
 - `meeting.py` - Added M5 constants, table schema, and store methods
-- `v2_api.py` - Added M5 API endpoints
+- `v2_api.py` - Added M5 API endpoints with thumbnail generation
 - `windows_meeting_gui.py` - Added ImagePanelWidget
-- `test_v2_api.py` - Added M5 tests
+- `test_v2_api.py` - Added M5 tests including thumbnail test
 - `migrations/m5_images.sql` - Database migration file (NEW)
 - `image_analysis_worker.py` - Background image analysis worker (NEW)
+- `requirements.txt` - Added Pillow for thumbnail processing
+
+### Android
+- `upload/ImageUploadManager.kt` - Image upload manager (NEW)
+- `MainActivity.kt` - Camera/gallery integration, upload UI
+- `res/layout/activity_main.xml` - Image capture UI elements
 
 ## M5 Acceptance Criteria (from DEVELOPMENT_PLAN_V2.md)
 
 1. ✅ 原图不降分辨率入库 - Original images are stored without downsampling
 2. ✅ OpenClaw 分析结果可回看并关联会议片段 - Analysis results are stored and can be retrieved
+3. ✅ Android拍照入口、原图上传、上传状态展示 - Android camera entry, original upload, status display
+4. ✅ 缩略图生成 - Thumbnails generated on upload (256px max)
 
-## Remaining Work (Future Milestones)
+## Remaining Work (Future Enhancements)
 
-- Android capture/upload UI (separate Android app work)
-- Thumbnail generation on upload
-- Image viewing in timeline context
+- Image viewing in timeline context (M6 integration)
+- Multiple image batch upload
+- Image deletion API
 
-## Commit Hash
+## Commit Hashes
 
-- Commit: [to be filled after commit]
+- Main commit: `54358c3` - feat(M5): Add image original upload pipeline
+- Android commit: [pending] - feat(M5): Add Android image capture and upload
