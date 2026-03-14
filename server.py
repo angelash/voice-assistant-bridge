@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Voice Assistant Bridge Server (V1)
+Voice Assistant Bridge Server (V1 + V2 Meeting Mode)
 """
 
 from __future__ import annotations
@@ -20,6 +20,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from aiohttp import web
+
+# V2 Meeting Mode support
+from meeting import MeetingStore
+from v2_api import V2MeetingAPI
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -448,6 +452,10 @@ class VoiceAssistantServer:
         db_path = Path(cfg.get("bridge_db_path", str(Path(__file__).with_name("bridge_state.db"))))
         self.store = Store(db_path)
         self.events = EventHub()
+
+        # V2 Meeting Mode
+        self.meeting_store = MeetingStore(db_path)
+        self.v2_api = V2MeetingAPI(self.meeting_store, self.events)
 
         self.tts_voice = os.getenv("VOICE_TTS_VOICE", cfg.get("tts_edge_voice", "zh-CN-XiaoxiaoNeural"))
         self.stt = None
@@ -946,13 +954,17 @@ class VoiceAssistantServer:
         return web.json_response(
             {
                 "status": "ok",
-                "role": "voice-bridge-v1",
+                "role": "voice-bridge-v1+v2",
                 "routes": {
                     "submit": "/v1/messages",
                     "status": "/v1/messages/{message_id}",
                     "events": "/v1/events",
                     "operator_summarize": "/v1/operator/summarize",
                     "legacy_chat": "/chat",
+                    "v2_meetings": "/v2/meetings",
+                    "v2_meeting_mode": "/v2/meetings/{meeting_id}/mode",
+                    "v2_meeting_timeline": "/v2/meetings/{meeting_id}/timeline",
+                    "v2_events_batch": "/v2/meetings/{meeting_id}/events:batch",
                 },
                 "local_operator_endpoint": self.local_operator.endpoint,
                 "local_operator_model": self.local_operator.model,
@@ -979,9 +991,11 @@ class VoiceAssistantServer:
             await asyncio.gather(*self.forward_tasks.values(), return_exceptions=True)
         await self.events.close()
         self.store.close()
+        self.meeting_store.close()
 
     def create_app(self) -> web.Application:
         app = web.Application()
+        # V1 routes
         app.router.add_post("/v1/messages", self.handle_v1_submit)
         app.router.add_get("/v1/messages/{message_id}", self.handle_v1_status)
         app.router.add_get("/v1/events", self.handle_v1_events)
@@ -990,6 +1004,8 @@ class VoiceAssistantServer:
         app.router.add_get("/health", self.handle_health)
         app.router.add_post("/audio", self.handle_audio)
         app.router.add_post("/tts", self.handle_tts)
+        # V2 routes (meeting mode)
+        self.v2_api.register_routes(app)
         app.on_startup.append(self.on_startup)
         app.on_shutdown.append(self.on_shutdown)
         return app
@@ -999,13 +1015,18 @@ class VoiceAssistantServer:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Voice Assistant Bridge V1 server")
+    parser = argparse.ArgumentParser(description="Voice Assistant Bridge V1+V2 server")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     srv = VoiceAssistantServer(args.port)
     print(f"Bridge server listening on :{args.port}")
-    print("POST /v1/messages")
-    print("GET  /v1/messages/{message_id}")
-    print("GET  /v1/events (websocket)")
-    print("POST /chat (legacy)")
+    print("V1 API:")
+    print("  POST /v1/messages")
+    print("  GET  /v1/messages/{message_id}")
+    print("  GET  /v1/events (websocket)")
+    print("  POST /chat (legacy)")
+    print("V2 Meeting API:")
+    print("  POST /v2/meetings")
+    print("  POST /v2/meetings/{meeting_id}/mode")
+    print("  GET  /v2/meetings/{meeting_id}/timeline")
     srv.run()
