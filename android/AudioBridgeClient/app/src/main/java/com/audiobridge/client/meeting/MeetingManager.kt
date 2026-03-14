@@ -28,6 +28,9 @@ class MeetingManager(private val context: Context) {
         private const val CHANNELS = 1
         private const val BITS_PER_SAMPLE = 16
         private const val BYTES_PER_FRAME = SAMPLE_RATE * CHANNELS * BITS_PER_SAMPLE / 8000  // 9600 bytes per 100ms at 48kHz
+        private const val DEFAULT_RETENTION_DAYS = 7
+        private const val MS_PER_DAY = 24L * 60L * 60L * 1000L
+        private const val UPLOAD_MARKER_PATH = "meta/upload_status.json"
     }
 
     // Meeting state
@@ -250,8 +253,8 @@ class MeetingManager(private val context: Context) {
     /**
      * Get the upload manifest for all segments
      */
-    fun getUploadManifest(): JSONObject? {
-        val meetingDir = currentMeetingDir ?: return null
+    fun getUploadManifest(targetMeetingId: String? = currentMeetingId.get()): JSONObject? {
+        val meetingDir = resolveMeetingDir(targetMeetingId) ?: return null
         val audioDir = File(meetingDir, "audio/raw")
         
         val segments = JSONArray()
@@ -267,7 +270,7 @@ class MeetingManager(private val context: Context) {
             }
         
         return JSONObject().apply {
-            put("meeting_id", currentMeetingId.get())
+            put("meeting_id", targetMeetingId)
             put("total_segments", segments.length())
             put("segments", segments)
         }
@@ -284,13 +287,104 @@ class MeetingManager(private val context: Context) {
                 val manifestFile = File(meetingDir, "meta/meeting.json")
                 if (manifestFile.exists()) {
                     try {
-                        meetings.put(JSONObject(manifestFile.readText()))
+                        meetings.add(JSONObject(manifestFile.readText()))
                     } catch (e: Exception) {
                         Log.w(TAG, "Failed to read manifest for ${meetingDir.name}")
                     }
                 }
             }
         return meetings.sortedByDescending { it.optString("created_at") }
+    }
+
+    /**
+     * Resolve an audio file for a meeting by filename.
+     */
+    fun getMeetingAudioFile(targetMeetingId: String, fileName: String): File {
+        val root = meetingsDir ?: File(context.filesDir, "meetings")
+        return File(root, "$targetMeetingId/audio/raw/$fileName")
+    }
+
+    /**
+     * Mark a meeting as safely uploaded to Windows side.
+     */
+    fun markMeetingUploaded(targetMeetingId: String, uploadedAtMs: Long = System.currentTimeMillis()): Boolean {
+        val meetingDir = resolveMeetingDir(targetMeetingId) ?: return false
+        return try {
+            val markerFile = File(meetingDir, UPLOAD_MARKER_PATH)
+            markerFile.parentFile?.mkdirs()
+            val marker = JSONObject().apply {
+                put("meeting_id", targetMeetingId)
+                put("upload_complete", true)
+                put("uploaded_at_ms", uploadedAtMs)
+                put("uploaded_at", isoUtc(uploadedAtMs))
+            }
+            markerFile.writeText(marker.toString(2))
+            Log.i(TAG, "Meeting marked uploaded: $targetMeetingId")
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to mark uploaded for $targetMeetingId: ${e.message}")
+            false
+        }
+    }
+
+    /**
+     * Cleanup uploaded meetings older than retention window.
+     * Only meetings with upload marker are eligible.
+     */
+    fun cleanupUploadedMeetings(retentionDays: Int = DEFAULT_RETENTION_DAYS): Int {
+        val root = meetingsDir ?: return 0
+        val now = System.currentTimeMillis()
+        val cutoffMs = now - (retentionDays.coerceAtLeast(1) * MS_PER_DAY)
+        var deleted = 0
+
+        root.listFiles()
+            ?.filter { it.isDirectory }
+            ?.forEach { meetingDir ->
+                val targetMeetingId = meetingDir.name
+                if (targetMeetingId == currentMeetingId.get()) {
+                    return@forEach
+                }
+                val markerFile = File(meetingDir, UPLOAD_MARKER_PATH)
+                if (!markerFile.exists()) {
+                    return@forEach
+                }
+                val marker = try {
+                    JSONObject(markerFile.readText())
+                } catch (e: Exception) {
+                    Log.w(TAG, "Invalid upload marker for $targetMeetingId")
+                    return@forEach
+                }
+                if (!marker.optBoolean("upload_complete", false)) {
+                    return@forEach
+                }
+                val uploadedAtMs = marker.optLong("uploaded_at_ms", 0L)
+                if (uploadedAtMs <= 0L || uploadedAtMs > cutoffMs) {
+                    return@forEach
+                }
+
+                if (meetingDir.deleteRecursively()) {
+                    deleted++
+                    Log.i(TAG, "Deleted uploaded meeting after retention: $targetMeetingId")
+                } else {
+                    Log.w(TAG, "Failed to delete retained meeting: $targetMeetingId")
+                }
+            }
+        return deleted
+    }
+
+    private fun resolveMeetingDir(targetMeetingId: String?): File? {
+        if (targetMeetingId.isNullOrBlank()) {
+            return currentMeetingDir
+        }
+        val root = meetingsDir ?: return null
+        val dir = File(root, targetMeetingId)
+        return if (dir.exists() && dir.isDirectory) dir else null
+    }
+
+    private fun isoUtc(tsMs: Long): String {
+        return SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }.format(Date(tsMs))
     }
 
     /**

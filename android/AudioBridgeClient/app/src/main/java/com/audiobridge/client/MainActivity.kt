@@ -141,6 +141,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var kwsConsumer: KwsDetectorConsumer
     private var sttForwarderConsumer: SttForwarderConsumer? = null
     private var audioCapture: AudioRecordCapture? = null
+    private var pendingUploadMeetingId: String? = null
 
     private var sparkInitialized = false
     private var asr: ASR? = null
@@ -1090,6 +1091,18 @@ class MainActivity : AppCompatActivity() {
                 appendResult("[upload] All segments uploaded")
                 meetingInfoText.text = "All uploads complete"
             }
+            pendingUploadMeetingId?.let { uploadedMeetingId ->
+                val marked = meetingManager.markMeetingUploaded(uploadedMeetingId)
+                val deleted = meetingManager.cleanupUploadedMeetings(7)
+                Log.i(TAG, "Upload complete for $uploadedMeetingId, marked=$marked, cleaned=$deleted")
+                if (deleted > 0) {
+                    runOnUiThread {
+                        appendResult("[cleanup] Deleted $deleted uploaded meetings (retention=7 days)")
+                        updateMeetingStatusUI()
+                    }
+                }
+            }
+            pendingUploadMeetingId = null
         }
 
         // Create consumers
@@ -1176,17 +1189,17 @@ class MainActivity : AppCompatActivity() {
             }
             
             // M2: Trigger upload of all segments after meeting ends
-            val manifest = meetingManager.getUploadManifest()
+            val manifest = meetingManager.getUploadManifest(meetingId)
             if (manifest != null) {
                 val segments = manifest.optJSONArray("segments")
+                var enqueuedCount = 0
                 if (segments != null && segments.length() > 0) {
                     for (i in 0 until segments.length()) {
                         val seg = segments.optJSONObject(i)
+                        if (seg == null) continue
                         val seq = seg.optInt("seq")
                         val fileName = seg.optString("file")
-                        val file = File(meetingManager.meetingId?.let { 
-                            File(filesDir, "meetings/$it/audio/raw/$fileName")
-                        } ?: continue)
+                        val file = meetingManager.getMeetingAudioFile(meetingId, fileName)
                         if (file.exists()) {
                             uploadQueueManager.enqueue(
                                 meetingId = meetingId,
@@ -1194,10 +1207,22 @@ class MainActivity : AppCompatActivity() {
                                 file = file,
                                 checksum = computeFileChecksum(file)
                             )
+                            enqueuedCount++
                         }
                     }
-                    Log.i(TAG, "Queued ${segments.length()} segments for upload")
+                    if (enqueuedCount > 0) {
+                        pendingUploadMeetingId = meetingId
+                    } else {
+                        meetingManager.markMeetingUploaded(meetingId)
+                        val deleted = meetingManager.cleanupUploadedMeetings(7)
+                        Log.i(TAG, "No segments enqueued; marked uploaded and cleaned $deleted meetings")
+                    }
+                    Log.i(TAG, "Queued $enqueuedCount/${segments.length()} segments for upload")
                 }
+            } else {
+                meetingManager.markMeetingUploaded(meetingId)
+                val deleted = meetingManager.cleanupUploadedMeetings(7)
+                Log.i(TAG, "No manifest found; marked uploaded and cleaned $deleted meetings")
             }
         }
 
@@ -1251,6 +1276,7 @@ class MainActivity : AppCompatActivity() {
 
                 // Enable disk writer consumer
                 diskWriterConsumer.enabled = true
+                kwsConsumer.enabled = true
 
                 // Start audio capture with distribution bus
                 startMeetingAudioCapture()
@@ -1263,6 +1289,8 @@ class MainActivity : AppCompatActivity() {
             meetingManager.endMeeting()
             wakeWordController.onMeetingModeChanged(false)
             diskWriterConsumer.enabled = false
+            kwsConsumer.enabled = false
+            kwsConsumer.flush()
             stopMeetingAudioCapture()
         }
 

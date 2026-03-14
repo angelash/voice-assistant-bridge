@@ -1,6 +1,7 @@
 package com.audiobridge.client.audio
 
 import android.util.Log
+import android.os.SystemClock
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -226,21 +227,97 @@ class SttForwarderConsumer(
  */
 class KwsDetectorConsumer : PcmDistributionBus.PcmConsumer {
 
+    companion object {
+        private const val TAG = "KwsDetectorConsumer"
+        private const val SAMPLE_RATE = AudioConfig.SAMPLE_RATE
+        private const val ENERGY_THRESHOLD = 1200.0
+        private const val BURST_END_FACTOR = 0.6
+        private const val MIN_BURST_MS = 120L
+        private const val MAX_BURST_MS = 900L
+        private const val MAX_GAP_BETWEEN_BURSTS_MS = 1200L
+        private const val DETECTION_COOLDOWN_MS = 4000L
+    }
+
     override val name: String = "kws-detector"
     override var enabled: Boolean = false
     
     // KWS callback when wake word is detected
     var onWakeWordDetected: (() -> Unit)? = null
 
+    // Simple 2-burst detector state (minimal viable local KWS chain)
+    private var inBurst = false
+    private var burstStartAtMs = 0L
+    private var burstCount = 0
+    private var lastBurstEndAtMs = 0L
+    private var lastDetectedAtMs = 0L
+
     override fun onPcmData(data: ByteArray) {
         if (!enabled) return
-        // TODO: Implement actual KWS detection
-        // For now, this is just a skeleton that passes data through
         detectWakeWord(data)
     }
 
     private fun detectWakeWord(data: ByteArray) {
-        // Placeholder for wake word detection
-        // Will be implemented with sherpa-onnx or similar
+        if (data.size < 2) return
+
+        val nowMs = SystemClock.elapsedRealtime()
+        if (nowMs - lastDetectedAtMs < DETECTION_COOLDOWN_MS) {
+            return
+        }
+
+        val rms = calculateRms(data)
+        val isVoiced = rms >= ENERGY_THRESHOLD
+        val isBurstEnd = rms < ENERGY_THRESHOLD * BURST_END_FACTOR
+
+        if (!inBurst && isVoiced) {
+            inBurst = true
+            burstStartAtMs = nowMs
+            return
+        }
+
+        if (inBurst && isBurstEnd) {
+            inBurst = false
+            val burstDuration = nowMs - burstStartAtMs
+            if (burstDuration in MIN_BURST_MS..MAX_BURST_MS) {
+                if (nowMs - lastBurstEndAtMs > MAX_GAP_BETWEEN_BURSTS_MS) {
+                    burstCount = 0
+                }
+                burstCount += 1
+                lastBurstEndAtMs = nowMs
+
+                // Two short bursts in a short window => wakeword-like trigger
+                if (burstCount >= 2) {
+                    burstCount = 0
+                    lastDetectedAtMs = nowMs
+                    Log.i(TAG, "Wake trigger detected by local 2-burst heuristic")
+                    onWakeWordDetected?.invoke()
+                }
+            } else if (burstDuration > MAX_BURST_MS) {
+                burstCount = 0
+                lastBurstEndAtMs = nowMs
+            }
+        }
+    }
+
+    private fun calculateRms(data: ByteArray): Double {
+        var sum = 0.0
+        var samples = 0
+        var i = 0
+        while (i + 1 < data.size) {
+            val low = data[i].toInt() and 0xFF
+            val high = data[i + 1].toInt()
+            val sample = (high shl 8) or low
+            sum += (sample * sample).toDouble()
+            samples++
+            i += 2
+        }
+        if (samples == 0) return 0.0
+        return kotlin.math.sqrt(sum / samples)
+    }
+
+    override fun flush() {
+        inBurst = false
+        burstStartAtMs = 0L
+        burstCount = 0
+        lastBurstEndAtMs = 0L
     }
 }
