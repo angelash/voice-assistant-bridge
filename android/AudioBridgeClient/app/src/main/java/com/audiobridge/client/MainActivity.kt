@@ -16,9 +16,18 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.Switch
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.audiobridge.client.audio.AudioRecordCapture
+import com.audiobridge.client.audio.DiskWriterConsumer
+import com.audiobridge.client.audio.KwsDetectorConsumer
+import com.audiobridge.client.audio.PcmDistributionBus
+import com.audiobridge.client.audio.SttForwarderConsumer
+import com.audiobridge.client.meeting.MeetingManager
+import com.audiobridge.client.wakeword.WakeWordController
+import com.audiobridge.client.wakeword.WakeWordStateMachine
 import com.iflytek.sparkchain.core.LogLvl
 import com.iflytek.sparkchain.core.SparkChain
 import com.iflytek.sparkchain.core.SparkChainConfig
@@ -93,9 +102,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sttButton: Button
     private lateinit var textResultView: TextView
     private lateinit var speakSwitch: Switch
+    private lateinit var meetingModeSwitch: Switch
+    private lateinit var meetingStatusText: TextView
+    private lateinit var meetingInfoText: TextView
 
     private var tts: TextToSpeech? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    // Meeting mode components
+    private lateinit var meetingManager: MeetingManager
+    private lateinit var pcmBus: PcmDistributionBus
+    private lateinit var wakeWordStateMachine: WakeWordStateMachine
+    private lateinit var wakeWordController: WakeWordController
+    private lateinit var diskWriterConsumer: DiskWriterConsumer
+    private lateinit var kwsConsumer: KwsDetectorConsumer
+    private var sttForwarderConsumer: SttForwarderConsumer? = null
+    private var audioCapture: AudioRecordCapture? = null
 
     private var sparkInitialized = false
     private var asr: ASR? = null
@@ -193,6 +215,12 @@ class MainActivity : AppCompatActivity() {
         sttButton = findViewById(R.id.sttButton)
         textResultView = findViewById(R.id.textResultView)
         speakSwitch = findViewById(R.id.speakSwitch)
+        meetingModeSwitch = findViewById(R.id.meetingModeSwitch)
+        meetingStatusText = findViewById(R.id.meetingStatusText)
+        meetingInfoText = findViewById(R.id.meetingInfoText)
+
+        // Initialize meeting mode components
+        initMeetingMode()
 
         initTts()
         loadPrefs()
@@ -240,6 +268,14 @@ class MainActivity : AppCompatActivity() {
         super.onDestroy()
         clearPendingLongReply()
         stopAudioCapture()
+
+        // Clean up meeting mode
+        if (meetingManager.isActive) {
+            meetingManager.endMeeting()
+        }
+        stopMeetingAudioCapture()
+        wakeWordStateMachine.destroy()
+
         try {
             asr?.stop(true)
         } catch (_: Exception) {
@@ -855,11 +891,201 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun initMeetingMode() {
+        // Initialize MeetingManager
+        meetingManager = MeetingManager(this)
+        if (!meetingManager.initialize()) {
+            Log.e(TAG, "Failed to initialize MeetingManager")
+            meetingModeSwitch.isEnabled = false
+            meetingStatusText.text = "Storage error"
+        }
+
+        // Initialize PCM Distribution Bus
+        pcmBus = PcmDistributionBus()
+
+        // Initialize wake word components
+        wakeWordStateMachine = WakeWordStateMachine()
+        wakeWordController = WakeWordController(wakeWordStateMachine)
+
+        // Create consumers
+        diskWriterConsumer = DiskWriterConsumer(meetingManager)
+        kwsConsumer = KwsDetectorConsumer()
+
+        // Register consumers with the bus
+        pcmBus.registerConsumer(diskWriterConsumer)
+        pcmBus.registerConsumer(kwsConsumer)
+
+        // Wire wake word detection
+        kwsConsumer.onWakeWordDetected = {
+            Log.i(TAG, "Wake word detected!")
+            runOnUiThread {
+                Toast.makeText(this, "Wake word detected!", Toast.LENGTH_SHORT).show()
+            }
+            wakeWordController.onWakeWordDetected()
+        }
+
+        // Wire wake word state changes
+        wakeWordStateMachine.onStateChanged = { oldState, newState ->
+            runOnUiThread {
+                updateMeetingStatusUI()
+            }
+        }
+
+        // Wire MeetingManager callbacks
+        meetingManager.onMeetingStarted = { meetingId ->
+            Log.i(TAG, "Meeting started: $meetingId")
+            runOnUiThread {
+                appendResult("[meeting] Started: $meetingId")
+                updateMeetingStatusUI()
+            }
+        }
+
+        meetingManager.onMeetingEnded = { meetingId ->
+            Log.i(TAG, "Meeting ended: $meetingId")
+            runOnUiThread {
+                appendResult("[meeting] Ended: $meetingId")
+                updateMeetingStatusUI()
+            }
+        }
+
+        meetingManager.onSegmentSealed = { segmentId, seq, file ->
+            Log.d(TAG, "Segment sealed: $segmentId, size=${file.length()}")
+            runOnUiThread {
+                meetingInfoText.text = "Segment $seq saved: ${file.length() / 1024}KB"
+            }
+        }
+
+        meetingManager.onError = { message ->
+            Log.e(TAG, "MeetingManager error: $message")
+            runOnUiThread {
+                Toast.makeText(this, "Meeting error: $message", Toast.LENGTH_SHORT).show()
+            }
+        }
+
+        // Wire meeting mode switch
+        meetingModeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            onMeetingModeToggled(isChecked)
+        }
+
+        updateMeetingStatusUI()
+    }
+
+    private fun onMeetingModeToggled(enabled: Boolean) {
+        if (enabled) {
+            if (!hasRecordAudioPermission()) {
+                requestRecordAudioPermission()
+                meetingModeSwitch.isChecked = false
+                return
+            }
+
+            // Start meeting
+            val meetingId = meetingManager.startMeeting()
+            if (meetingId != null) {
+                // Enable wake word detection
+                wakeWordController.onMeetingModeChanged(true)
+
+                // Enable disk writer consumer
+                diskWriterConsumer.enabled = true
+
+                // Start audio capture with distribution bus
+                startMeetingAudioCapture()
+            } else {
+                meetingModeSwitch.isChecked = false
+                meetingStatusText.text = "Failed to start"
+            }
+        } else {
+            // Stop meeting
+            meetingManager.endMeeting()
+            wakeWordController.onMeetingModeChanged(false)
+            diskWriterConsumer.enabled = false
+            stopMeetingAudioCapture()
+        }
+
+        updateMeetingStatusUI()
+    }
+
+    private fun startMeetingAudioCapture(): Boolean {
+        if (audioCapture?.isRunning == true) {
+            return true
+        }
+
+        audioCapture = AudioRecordCapture()
+        val capture = audioCapture!!
+
+        if (!capture.start()) {
+            Log.e(TAG, "Failed to start meeting audio capture")
+            return false
+        }
+
+        // Connect capture to distribution bus
+        pcmBus.startDistribution(capture)
+        return true
+    }
+
+    private fun stopMeetingAudioCapture() {
+        pcmBus.stopDistribution()
+        audioCapture?.stop()
+        audioCapture = null
+    }
+
+    private fun updateMeetingStatusUI() {
+        val sb = StringBuilder()
+
+        if (meetingManager.isActive) {
+            val meetingId = meetingManager.meetingId ?: "unknown"
+            sb.append("Meeting: $meetingId\n")
+            sb.append("Wake word: ${wakeWordStateMachine.getStateDescription()}\n")
+
+            val stats = meetingManager.getStorageStats()
+            sb.append("Storage: %.1f MB in %d meetings".format(stats.totalMb, stats.totalMeetings))
+        } else {
+            sb.append("Idle")
+        }
+
+        meetingStatusText.text = sb.toString()
+
+        // Update info text with storage stats
+        val stats = meetingManager.getStorageStats()
+        meetingInfoText.text = "Local: %.1f MB, %d meetings, oldest: %d min".format(
+            stats.totalMb,
+            stats.totalMeetings,
+            stats.oldestMeetingAgeMs / 60000
+        )
+    }
+
     private fun speak(text: String, force: Boolean = false) {
         if (!force && !speakSwitch.isChecked) return
         val speakText = normalizeForSpeech(text)
         if (speakText.isBlank()) return
-        tts?.speak(speakText, TextToSpeech.QUEUE_ADD, null, "msg-${System.currentTimeMillis()}")
+
+        // Suppress wake word during TTS playback
+        if (::wakeWordController.isInitialized && meetingManager.isActive) {
+            wakeWordController.onTtsStarted()
+        }
+
+        // Use UTTERANCE_COMPLETE listener to resume wake word
+        val utteranceId = "msg-${System.currentTimeMillis()}"
+        tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+            override fun onStart(utteranceId: String?) {
+                // Already suppressed above
+            }
+
+            override fun onDone(utteranceId: String?) {
+                // Resume wake word after TTS
+                if (::wakeWordController.isInitialized && meetingManager.isActive) {
+                    wakeWordController.onTtsEnded()
+                }
+            }
+
+            override fun onError(utteranceId: String?) {
+                // Resume wake word on error too
+                if (::wakeWordController.isInitialized && meetingManager.isActive) {
+                    wakeWordController.onTtsEnded()
+                }
+            }
+        })
+
+        tts?.speak(speakText, TextToSpeech.QUEUE_ADD, null, utteranceId)
     }
 
     private fun prefs() = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -869,6 +1095,7 @@ class MainActivity : AppCompatActivity() {
         sessionIdInput.setText(p.getString("sessionId", "voice-bridge-session"))
         clientIdInput.setText(p.getString("clientId", "android-client"))
         speakSwitch.isChecked = p.getBoolean("speakEnabled", true)
+        // Don't restore meeting mode on restart - user should explicitly enable
     }
 
     private fun savePrefs() {

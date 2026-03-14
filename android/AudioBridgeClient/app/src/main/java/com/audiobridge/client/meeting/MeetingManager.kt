@@ -24,10 +24,10 @@ class MeetingManager(private val context: Context) {
     companion object {
         private const val TAG = "MeetingManager"
         private const val SEGMENT_DURATION_MS = 30_000L  // 30 seconds per segment
-        private const val SAMPLE_RATE = 16000
+        private const val SAMPLE_RATE = 48000  // Match AudioConfig
         private const val CHANNELS = 1
         private const val BITS_PER_SAMPLE = 16
-        private const val BYTES_PER_FRAME = SAMPLE_RATE * CHANNELS * BITS_PER_SAMPLE / 8000  // 3200 bytes per 100ms
+        private const val BYTES_PER_FRAME = SAMPLE_RATE * CHANNELS * BITS_PER_SAMPLE / 8000  // 9600 bytes per 100ms at 48kHz
     }
 
     // Meeting state
