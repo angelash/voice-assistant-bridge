@@ -47,6 +47,7 @@ from meeting import (
     JOB_STATUS_RUNNING,
     JOB_STATUS_SUCCESS,
     JOB_STATUS_FAILED,
+    JOB_STATUS_CANCELLED,
     SPEAKER_SOURCE_MANUAL,
     IMAGE_STATUS_UPLOADED,
     IMAGE_STATUS_FAILED,
@@ -229,9 +230,12 @@ class V2MeetingAPI:
             # M3: Auto-create transcription job when meeting ends
             transcription_job = None
             segments = self.store.get_audio_segments(meeting_id)
-            uploaded_segments = [s for s in segments if s.get("upload_status") == "uploaded"]
-            
-            if uploaded_segments:
+            total_segments = len(segments)
+            all_uploaded = total_segments > 0 and all(
+                s.get("upload_status") == "uploaded" for s in segments
+            )
+
+            if all_uploaded:
                 # Check for existing job
                 existing = self.store.get_latest_transcription_job(meeting_id)
                 if not existing or existing.get("status") in (JOB_STATUS_FAILED, JOB_STATUS_CANCELLED):
@@ -247,6 +251,14 @@ class V2MeetingAPI:
                         "status": existing["status"],
                         "existing": True,
                     }
+            elif total_segments > 0:
+                uploaded_count = sum(1 for s in segments if s.get("upload_status") == "uploaded")
+                logger.info(
+                    "Skip auto transcription for %s: uploaded %s/%s segments",
+                    meeting_id,
+                    uploaded_count,
+                    total_segments,
+                )
 
             # Mark as archived
             self.store.update_meeting(meeting_id, status=MEETING_STATUS_ARCHIVED)

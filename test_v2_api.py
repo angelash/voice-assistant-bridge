@@ -576,6 +576,25 @@ class TestTranscriptionJobs(unittest.TestCase):
         body = json.loads(response.text)
         self.assertIsNone(body.get("transcription_job"))
 
+    def test_no_job_created_when_not_all_segments_uploaded(self):
+        """Test that no transcription job is created when some segments are still pending/failed"""
+        meeting = self.store.create_meeting(client_id="test-client")
+        self.store.update_meeting(meeting["meeting_id"], status=MEETING_STATUS_ACTIVE, mode="on")
+
+        seg1 = self.store.create_audio_segment(meeting_id=meeting["meeting_id"], seq=1)
+        self.store.create_audio_segment(meeting_id=meeting["meeting_id"], seq=2)
+        self.store.update_audio_segment(seg1["segment_id"], upload_status=UPLOAD_STATUS_UPLOADED)
+
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        request.json = AsyncMock(return_value={"mode": "off"})
+
+        response = asyncio.run(self.api.handle_meeting_mode(request))
+        self.assertEqual(response.status, 200)
+        body = json.loads(response.text)
+        self.assertTrue(body["ok"])
+        self.assertIsNone(body.get("transcription_job"))
+
 
 class TestNonBlockingTranscription(unittest.TestCase):
     """Test that long transcription tasks don't block main API calls (M3 requirement)"""
