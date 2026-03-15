@@ -76,13 +76,14 @@ class MeetingManager(private val context: Context) {
     /**
      * Start a new meeting session
      */
-    fun startMeeting(): String? {
+    fun startMeeting(remoteMeetingId: String? = null): String? {
         if (isMeetingActive.get()) {
             Log.w(TAG, "Meeting already active: ${currentMeetingId.get()}")
             return currentMeetingId.get()
         }
 
-        val meetingId = "mtg-${UUID.randomUUID().toString().replace("-", "").take(24)}"
+        val meetingId = remoteMeetingId?.takeIf { it.isNotBlank() }
+            ?: "mtg-${UUID.randomUUID().toString().replace("-", "").take(24)}"
         val meetingDir = File(meetingsDir, meetingId)
 
         try {

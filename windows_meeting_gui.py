@@ -373,8 +373,64 @@ class MeetingHistoryWidget(QWidget):
     @asyncSlot()
     async def _on_item_double_clicked(self, item: QListWidgetItem):
         meeting_id = item.data(Qt.UserRole)
-        print(f"Selected meeting: {meeting_id}")
-        # TODO: Open meeting detail view
+        if not meeting_id:
+            return
+
+        try:
+            meeting_resp = await self.client.get_meeting(meeting_id)
+            jobs_resp = await self.client.get_transcription_jobs(meeting_id)
+            images_resp = await self.client.get_images(meeting_id)
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to load meeting details: {e}")
+            return
+
+        if not meeting_resp.get("ok"):
+            QMessageBox.warning(self, "Error", f"Meeting detail error: {meeting_resp.get('error')}")
+            return
+
+        meeting = meeting_resp.get("meeting", {}) or {}
+        segments = meeting_resp.get("audio_segments", []) or []
+        jobs = jobs_resp.get("jobs", []) if jobs_resp.get("ok") else []
+        images = images_resp.get("images", []) if images_resp.get("ok") else []
+
+        uploaded = sum(1 for s in segments if s.get("upload_status") == "uploaded")
+        pending = sum(1 for s in segments if s.get("upload_status") == "pending")
+        failed = sum(1 for s in segments if s.get("upload_status") == "failed")
+
+        lines = [
+            f"meeting_id: {meeting.get('meeting_id', meeting_id)}",
+            f"status: {meeting.get('status', 'unknown')}",
+            f"client_id: {meeting.get('client_id', 'unknown')}",
+            f"created_at: {meeting.get('created_at', '')}",
+            f"started_at: {meeting.get('started_at', '')}",
+            f"ended_at: {meeting.get('ended_at', '')}",
+            "",
+            f"audio_segments: total={len(segments)}, uploaded={uploaded}, pending={pending}, failed={failed}",
+            f"transcription_jobs: {len(jobs)}",
+            f"images: {len(images)}",
+            "",
+            "raw_meeting_json:",
+            json.dumps(meeting, ensure_ascii=False, indent=2),
+        ]
+
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Meeting Detail - {meeting_id[:16]}...")
+        dialog.resize(760, 560)
+
+        layout = QVBoxLayout(dialog)
+        detail_view = QTextEdit()
+        detail_view.setReadOnly(True)
+        detail_view.setFont(QFont("Consolas", 10))
+        detail_view.setPlainText("\n".join(lines))
+        layout.addWidget(detail_view)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
 
 
 class BackupStatusWidget(QWidget):

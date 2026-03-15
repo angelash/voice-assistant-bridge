@@ -348,18 +348,25 @@ class MeetingStore:
         event_id = f"evt-{uuid.uuid4().hex}"
         ts_server = now_iso()
         ts = now_iso()
-        row = {
-            "event_id": event_id,
-            "meeting_id": meeting_id,
-            "source": source,
-            "event_type": event_type,
-            "seq": seq,
-            "ts_client": ts_client,
-            "ts_server": ts_server,
-            "payload": json.dumps(payload, ensure_ascii=False) if payload else None,
-            "created_at": ts,
-        }
         with self.lock:
+            if seq is None:
+                seq_row = self.conn.execute(
+                    "SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq FROM meeting_events WHERE meeting_id=?",
+                    (meeting_id,),
+                ).fetchone()
+                seq = int((seq_row["next_seq"] if seq_row else 1) or 1)
+
+            row = {
+                "event_id": event_id,
+                "meeting_id": meeting_id,
+                "source": source,
+                "event_type": event_type,
+                "seq": seq,
+                "ts_client": ts_client,
+                "ts_server": ts_server,
+                "payload": json.dumps(payload, ensure_ascii=False) if payload else None,
+                "created_at": ts,
+            }
             cols = ", ".join(row.keys())
             vals = ", ".join("?" for _ in row)
             self.conn.execute(f"INSERT INTO meeting_events ({cols}) VALUES ({vals})", list(row.values()))
@@ -384,7 +391,7 @@ class MeetingStore:
             if after_seq is not None:
                 query += " AND seq > ?"
                 args.append(after_seq)
-            query += " ORDER BY seq ASC LIMIT ?"
+            query += " ORDER BY seq ASC, ts_server ASC LIMIT ?"
             args.append(limit)
             rows = self.conn.execute(query, args).fetchall()
         return [self._dict(r) for r in rows]

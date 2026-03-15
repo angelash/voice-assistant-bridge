@@ -142,6 +142,10 @@ class MainActivity : AppCompatActivity() {
     private var sttForwarderConsumer: SttForwarderConsumer? = null
     private var audioCapture: AudioRecordCapture? = null
     private var pendingUploadMeetingId: String? = null
+    private var pendingFinalizeMeetingId: String? = null
+    private var activeMeetingBaseUrl: String? = null
+    private var suppressMeetingSwitchCallback = false
+    private val meetingToggleInFlight = AtomicBoolean(false)
 
     private var sparkInitialized = false
     private var asr: ASR? = null
@@ -1014,12 +1018,14 @@ class MainActivity : AppCompatActivity() {
         // Initialize wake word components
         wakeWordStateMachine = WakeWordStateMachine()
         wakeWordController = WakeWordController(wakeWordStateMachine)
+
+        val initialMeetingBaseUrl = resolveBridgeEndpoint().baseUrl
         
         // Initialize wakeword event reporter (M2)
-        wakewordEventReporter = WakewordEventReporter(PUBLIC_BASE_URL, httpClient)
+        wakewordEventReporter = WakewordEventReporter(initialMeetingBaseUrl, httpClient)
         
         // Initialize upload queue manager (M2)
-        uploadQueueManager = UploadQueueManager(PUBLIC_BASE_URL, httpClient)
+        uploadQueueManager = UploadQueueManager(initialMeetingBaseUrl, httpClient)
         
         // Initialize image upload manager (M5)
         val deviceId = try {
@@ -1027,7 +1033,7 @@ class MainActivity : AppCompatActivity() {
         } catch (e: Exception) {
             "unknown"
         }
-        imageUploadManager = ImageUploadManager(PUBLIC_BASE_URL, deviceId, httpClient)
+        imageUploadManager = ImageUploadManager(initialMeetingBaseUrl, deviceId, httpClient)
         
         // Setup image upload callbacks
         imageUploadManager.onTaskStatusChanged = { task ->
@@ -1087,22 +1093,45 @@ class MainActivity : AppCompatActivity() {
         }
         
         uploadQueueManager.onAllTasksComplete = {
+            val uploadedMeetingId = pendingUploadMeetingId
+            if (uploadedMeetingId == null) {
+                return@onAllTasksComplete
+            }
+
+            val failed = uploadQueueManager.failedCount
+            if (failed > 0) {
+                runOnUiThread {
+                    appendResult("[upload] Completed with $failed failed segments, keep local data for retry")
+                    meetingInfoText.text = "Upload failed: $failed segments"
+                    updateMeetingStatusUI()
+                }
+                pendingUploadMeetingId = null
+                if (pendingFinalizeMeetingId == uploadedMeetingId) {
+                    pendingFinalizeMeetingId = null
+                    finalizeRemoteMeetingAsync(uploadedMeetingId, triggerTranscription = false)
+                }
+                return@onAllTasksComplete
+            }
+
             runOnUiThread {
                 appendResult("[upload] All segments uploaded")
                 meetingInfoText.text = "All uploads complete"
             }
-            pendingUploadMeetingId?.let { uploadedMeetingId ->
-                val marked = meetingManager.markMeetingUploaded(uploadedMeetingId)
-                val deleted = meetingManager.cleanupUploadedMeetings(7)
-                Log.i(TAG, "Upload complete for $uploadedMeetingId, marked=$marked, cleaned=$deleted")
-                if (deleted > 0) {
-                    runOnUiThread {
-                        appendResult("[cleanup] Deleted $deleted uploaded meetings (retention=7 days)")
-                        updateMeetingStatusUI()
-                    }
+            val marked = meetingManager.markMeetingUploaded(uploadedMeetingId)
+            val deleted = meetingManager.cleanupUploadedMeetings(7)
+            Log.i(TAG, "Upload complete for $uploadedMeetingId, marked=$marked, cleaned=$deleted")
+            if (deleted > 0) {
+                runOnUiThread {
+                    appendResult("[cleanup] Deleted $deleted uploaded meetings (retention=7 days)")
+                    updateMeetingStatusUI()
                 }
             }
             pendingUploadMeetingId = null
+
+            if (pendingFinalizeMeetingId == uploadedMeetingId) {
+                pendingFinalizeMeetingId = null
+                finalizeRemoteMeetingAsync(uploadedMeetingId)
+            }
         }
 
         // Create consumers
@@ -1187,6 +1216,9 @@ class MainActivity : AppCompatActivity() {
                 updateMeetingStatusUI()
                 hideImageUploadUI()
             }
+
+            pendingFinalizeMeetingId = meetingId
+            activeMeetingBaseUrl?.let { uploadQueueManager.setBaseUrl(it) }
             
             // M2: Trigger upload of all segments after meeting ends
             val manifest = meetingManager.getUploadManifest(meetingId)
@@ -1213,16 +1245,31 @@ class MainActivity : AppCompatActivity() {
                     if (enqueuedCount > 0) {
                         pendingUploadMeetingId = meetingId
                     } else {
-                        meetingManager.markMeetingUploaded(meetingId)
-                        val deleted = meetingManager.cleanupUploadedMeetings(7)
-                        Log.i(TAG, "No segments enqueued; marked uploaded and cleaned $deleted meetings")
+                        runOnUiThread {
+                            appendResult("[upload] No valid segment files found, keep local data for investigation")
+                        }
+                        Log.w(TAG, "No valid segment files to enqueue for meeting $meetingId")
+                        pendingUploadMeetingId = null
+                        pendingFinalizeMeetingId = null
+                        finalizeRemoteMeetingAsync(meetingId, triggerTranscription = false)
                     }
                     Log.i(TAG, "Queued $enqueuedCount/${segments.length()} segments for upload")
+                } else {
+                    meetingManager.markMeetingUploaded(meetingId)
+                    val deleted = meetingManager.cleanupUploadedMeetings(7)
+                    Log.i(TAG, "No segments in manifest; marked uploaded and cleaned $deleted meetings")
+                    pendingUploadMeetingId = null
+                    pendingFinalizeMeetingId = null
+                    finalizeRemoteMeetingAsync(meetingId, triggerTranscription = false)
                 }
             } else {
-                meetingManager.markMeetingUploaded(meetingId)
-                val deleted = meetingManager.cleanupUploadedMeetings(7)
-                Log.i(TAG, "No manifest found; marked uploaded and cleaned $deleted meetings")
+                runOnUiThread {
+                    appendResult("[upload] No manifest found, skip upload and keep local data")
+                }
+                Log.w(TAG, "No upload manifest found for meeting $meetingId")
+                pendingUploadMeetingId = null
+                pendingFinalizeMeetingId = null
+                finalizeRemoteMeetingAsync(meetingId, triggerTranscription = false)
             }
         }
 
@@ -1242,12 +1289,150 @@ class MainActivity : AppCompatActivity() {
 
         // Wire meeting mode switch
         meetingModeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressMeetingSwitchCallback) {
+                return@setOnCheckedChangeListener
+            }
             onMeetingModeToggled(isChecked)
         }
 
         updateMeetingStatusUI()
     }
     
+    private fun setMeetingSwitchChecked(checked: Boolean) {
+        suppressMeetingSwitchCallback = true
+        meetingModeSwitch.isChecked = checked
+        suppressMeetingSwitchCallback = false
+    }
+
+    private fun updateMeetingNetworkTargets(baseUrl: String) {
+        wakewordEventReporter.setBaseUrl(baseUrl)
+        uploadQueueManager.setBaseUrl(baseUrl)
+        imageUploadManager.setBaseUrl(baseUrl)
+    }
+
+    private fun createRemoteMeetingOnServer(baseUrl: String, clientId: String): String? {
+        val normalizedBase = baseUrl.trimEnd('/')
+        val jsonType = "application/json; charset=utf-8".toMediaType()
+        val createBody = JSONObject().put("client_id", clientId)
+        val createRequest = Request.Builder()
+            .url("$normalizedBase/v2/meetings")
+            .post(createBody.toString().toRequestBody(jsonType))
+            .build()
+
+        try {
+            httpClient.newCall(createRequest).execute().use { response ->
+                val payload = response.body?.string().orEmpty()
+                val json = try {
+                    JSONObject(payload.ifBlank { "{}" })
+                } catch (_: Exception) {
+                    JSONObject()
+                }
+
+                val meetingId = when {
+                    response.isSuccessful && json.optBoolean("ok", false) -> json.optString("meeting_id", "")
+                    response.code == 409 && json.optString("error") == "active_meeting_exists" ->
+                        json.optString("active_meeting_id", "")
+                    else -> ""
+                }.trim()
+
+                if (meetingId.isBlank()) {
+                    Log.e(TAG, "Create remote meeting failed: code=${response.code}, payload=$payload")
+                    return null
+                }
+
+                val modeOnOk = setRemoteMeetingMode(normalizedBase, meetingId, enabled = true)
+                if (!modeOnOk) {
+                    Log.e(TAG, "Failed to enable remote meeting mode for $meetingId")
+                    return null
+                }
+
+                return meetingId
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Create remote meeting exception: ${e.message}", e)
+            return null
+        }
+    }
+
+    private fun setRemoteMeetingMode(baseUrl: String, meetingId: String, enabled: Boolean): Boolean {
+        val normalizedBase = baseUrl.trimEnd('/')
+        val jsonType = "application/json; charset=utf-8".toMediaType()
+        val modeBody = JSONObject().put("mode", if (enabled) "on" else "off")
+        val modeRequest = Request.Builder()
+            .url("$normalizedBase/v2/meetings/$meetingId/mode")
+            .post(modeBody.toString().toRequestBody(jsonType))
+            .build()
+
+        return try {
+            httpClient.newCall(modeRequest).execute().use { response ->
+                val payload = response.body?.string().orEmpty()
+                val json = try {
+                    JSONObject(payload.ifBlank { "{}" })
+                } catch (_: Exception) {
+                    JSONObject()
+                }
+                val ok = response.isSuccessful && json.optBoolean("ok", false)
+                if (!ok) {
+                    Log.e(TAG, "Set remote mode failed: code=${response.code}, payload=$payload")
+                }
+                ok
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Set remote mode exception: ${e.message}", e)
+            false
+        }
+    }
+
+    private fun triggerRemoteTranscription(baseUrl: String, meetingId: String) {
+        val normalizedBase = baseUrl.trimEnd('/')
+        val jsonType = "application/json; charset=utf-8".toMediaType()
+        val request = Request.Builder()
+            .url("$normalizedBase/v2/meetings/$meetingId/transcription:run")
+            .post("{}".toRequestBody(jsonType))
+            .build()
+
+        try {
+            httpClient.newCall(request).execute().use { response ->
+                val payload = response.body?.string().orEmpty()
+                if (response.isSuccessful) {
+                    runOnUiThread { appendResult("[transcription] queued for meeting $meetingId") }
+                } else {
+                    val json = try {
+                        JSONObject(payload.ifBlank { "{}" })
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+                    val err = json.optString("error", "unknown")
+                    if (response.code == 409 && err == "job_in_progress") {
+                        runOnUiThread { appendResult("[transcription] already in progress for $meetingId") }
+                    } else {
+                        Log.w(TAG, "Transcription trigger failed: code=${response.code}, payload=$payload")
+                        runOnUiThread { appendResult("[transcription] trigger failed: $err") }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Transcription trigger exception: ${e.message}")
+            runOnUiThread { appendResult("[transcription] trigger exception: ${e.message}") }
+        }
+    }
+
+    private fun finalizeRemoteMeetingAsync(meetingId: String, triggerTranscription: Boolean = true) {
+        val baseUrl = activeMeetingBaseUrl ?: resolveBridgeEndpoint().baseUrl
+        Thread {
+            val modeOffOk = setRemoteMeetingMode(baseUrl, meetingId, enabled = false)
+            if (!modeOffOk) {
+                runOnUiThread { appendResult("[meeting] remote mode off failed: $meetingId") }
+                return@Thread
+            }
+            runOnUiThread { appendResult("[meeting] remote ended: $meetingId") }
+            if (triggerTranscription) {
+                triggerRemoteTranscription(baseUrl, meetingId)
+            }
+            activeMeetingBaseUrl = null
+        }.start()
+    }
+
     private fun computeFileChecksum(file: File): String {
         val digest = java.security.MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
@@ -1261,39 +1446,89 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onMeetingModeToggled(enabled: Boolean) {
+        if (meetingToggleInFlight.getAndSet(true)) {
+            return
+        }
+
         if (enabled) {
             if (!hasRecordAudioPermission()) {
                 requestRecordAudioPermission()
-                meetingModeSwitch.isChecked = false
+                setMeetingSwitchChecked(false)
+                meetingToggleInFlight.set(false)
                 return
             }
 
-            // Start meeting
-            val meetingId = meetingManager.startMeeting()
-            if (meetingId != null) {
-                // Enable wake word detection
-                wakeWordController.onMeetingModeChanged(true)
+            val endpoint = resolveBridgeEndpoint()
+            val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
+            val baseUrl = endpoint.baseUrl
+            activeMeetingBaseUrl = baseUrl
+            updateMeetingNetworkTargets(baseUrl)
+            meetingModeSwitch.isEnabled = false
+            meetingStatusText.text = "Starting meeting..."
 
-                // Enable disk writer consumer
-                diskWriterConsumer.enabled = true
-                kwsConsumer.enabled = true
+            Thread {
+                val remoteMeetingId = createRemoteMeetingOnServer(baseUrl, clientId)
 
-                // Start audio capture with distribution bus
-                startMeetingAudioCapture()
-            } else {
-                meetingModeSwitch.isChecked = false
-                meetingStatusText.text = "Failed to start"
-            }
-        } else {
-            // Stop meeting
-            meetingManager.endMeeting()
-            wakeWordController.onMeetingModeChanged(false)
-            diskWriterConsumer.enabled = false
-            kwsConsumer.enabled = false
-            kwsConsumer.flush()
-            stopMeetingAudioCapture()
+                runOnUiThread {
+                    if (remoteMeetingId == null) {
+                        appendResult("[meeting] Failed to create remote meeting")
+                        activeMeetingBaseUrl = null
+                        setMeetingSwitchChecked(false)
+                        meetingStatusText.text = "Failed to start"
+                        meetingModeSwitch.isEnabled = true
+                        meetingToggleInFlight.set(false)
+                        updateMeetingStatusUI()
+                        return@runOnUiThread
+                    }
+
+                    val meetingId = meetingManager.startMeeting(remoteMeetingId)
+                    if (meetingId != null) {
+                        wakeWordController.onMeetingModeChanged(true)
+                        diskWriterConsumer.enabled = true
+                        kwsConsumer.enabled = true
+                        if (!startMeetingAudioCapture()) {
+                            appendResult("[meeting] Audio capture start failed")
+                            meetingManager.endMeeting()
+                            wakeWordController.onMeetingModeChanged(false)
+                            diskWriterConsumer.enabled = false
+                            kwsConsumer.enabled = false
+                            kwsConsumer.flush()
+                            stopMeetingAudioCapture()
+                            setMeetingSwitchChecked(false)
+                            meetingStatusText.text = "Failed to start audio"
+                            activeMeetingBaseUrl = null
+                            Thread {
+                                setRemoteMeetingMode(baseUrl, remoteMeetingId, enabled = false)
+                            }.start()
+                        } else {
+                            appendResult("[meeting] Remote meeting ready: $meetingId")
+                        }
+                    } else {
+                        appendResult("[meeting] Failed to start local meeting")
+                        setMeetingSwitchChecked(false)
+                        meetingStatusText.text = "Failed to start"
+                        activeMeetingBaseUrl = null
+                        Thread {
+                            setRemoteMeetingMode(baseUrl, remoteMeetingId, enabled = false)
+                        }.start()
+                    }
+
+                    meetingModeSwitch.isEnabled = true
+                    meetingToggleInFlight.set(false)
+                    updateMeetingStatusUI()
+                }
+            }.start()
+            return
         }
 
+        // Stop meeting locally first; remote finalization happens after upload completion.
+        meetingManager.endMeeting()
+        wakeWordController.onMeetingModeChanged(false)
+        diskWriterConsumer.enabled = false
+        kwsConsumer.enabled = false
+        kwsConsumer.flush()
+        stopMeetingAudioCapture()
+        meetingToggleInFlight.set(false)
         updateMeetingStatusUI()
     }
 
@@ -1542,6 +1777,7 @@ class MainActivity : AppCompatActivity() {
             }
             
             // Add to upload queue
+            activeMeetingBaseUrl?.let { imageUploadManager.setBaseUrl(it) }
             val task = imageUploadManager.addImage(imageFile, meetingId, imageFile.name)
             imageUploadManager.processQueue()
             

@@ -100,8 +100,9 @@ class ImageAnalysisWorker:
         while self._running:
             try:
                 images = self.store.get_pending_analysis_images(limit=self.max_workers)
-                for image in images:
-                    await self._process_image(image)
+                if images:
+                    tasks = [asyncio.create_task(self._process_image(image)) for image in images]
+                    await asyncio.gather(*tasks, return_exceptions=True)
             except Exception as e:
                 logger.error(f"Error polling image analysis jobs: {e}")
             

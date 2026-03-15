@@ -287,7 +287,7 @@ class WakeWordController(
  * M2: Reports wakeword events to the server for tracking and history.
  */
 class WakewordEventReporter(
-    private val baseUrl: String,
+    baseUrl: String,
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
@@ -296,6 +296,16 @@ class WakewordEventReporter(
     companion object {
         private const val TAG = "WakewordEventReporter"
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+    }
+
+    @Volatile
+    private var baseUrl: String = baseUrl.trimEnd('/')
+
+    fun setBaseUrl(url: String) {
+        val normalized = url.trim().trimEnd('/')
+        if (normalized.isBlank()) return
+        baseUrl = normalized
+        Log.i(TAG, "Wakeword reporter base URL updated: $baseUrl")
     }
 
     /**
@@ -381,7 +391,7 @@ class WakewordEventReporter(
                 }
                 
                 val request = Request.Builder()
-                    .url("$baseUrl/v2/meetings/$meetingId/events:batch")
+                    .url("${baseUrl.trimEnd('/')}/v2/meetings/$meetingId/events:batch")
                     .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
                     .build()
                 

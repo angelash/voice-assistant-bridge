@@ -100,8 +100,9 @@ class TranscriptionWorker:
         while self._running:
             try:
                 jobs = self.store.get_queued_transcription_jobs(limit=self.max_workers)
-                for job in jobs:
-                    await self._process_job(job)
+                if jobs:
+                    tasks = [asyncio.create_task(self._process_job(job)) for job in jobs]
+                    await asyncio.gather(*tasks, return_exceptions=True)
             except Exception as e:
                 logger.error(f"Error polling transcription jobs: {e}")
             
@@ -161,6 +162,16 @@ class TranscriptionWorker:
                 },
             )
             await self.event_hub.publish(build_event_envelope(event))
+
+            speaker_event_payload = result.get("speaker_identified_payload")
+            if speaker_event_payload:
+                speaker_event = self.store.append_event(
+                    meeting_id=meeting_id,
+                    source="transcription-worker",
+                    event_type=EVT_SPEAKER_IDENTIFIED,
+                    payload=speaker_event_payload,
+                )
+                await self.event_hub.publish(build_event_envelope(speaker_event))
             
             self.on_job_completed and self.on_job_completed(job_id, result["output_path"])
             logger.info(f"Transcription job {job_id} completed: {result['output_path']}")
@@ -299,37 +310,29 @@ class TranscriptionWorker:
             for item in all_results:
                 f.write(json.dumps(item, ensure_ascii=False) + "\n")
         
-        # M4: Emit speaker identified event if we have speakers
+        # M4: Build speaker identified payload for async publish in event loop
         speakers = self.store.get_speakers_for_meeting(meeting_id)
+        speaker_identified_payload = None
         if speakers:
-            event = self.store.append_event(
-                meeting_id=meeting_id,
-                source="transcription-worker",
-                event_type=EVT_SPEAKER_IDENTIFIED,
-                payload={
-                    "job_id": job_id,
-                    "speakers_count": len(speakers),
-                    "speakers": [
-                        {
-                            "speaker_cluster_id": s["speaker_cluster_id"],
-                            "segment_count": s["segment_count"],
-                            "avg_confidence": s.get("avg_confidence"),
-                        }
-                        for s in speakers
-                    ],
-                },
-            )
-            asyncio.create_task(self._publish_event(event))
+            speaker_identified_payload = {
+                "job_id": job_id,
+                "speakers_count": len(speakers),
+                "speakers": [
+                    {
+                        "speaker_cluster_id": s["speaker_cluster_id"],
+                        "segment_count": s["segment_count"],
+                        "avg_confidence": s.get("avg_confidence"),
+                    }
+                    for s in speakers
+                ],
+            }
         
         return {
             "output_path": str(output_path),
             "segments_count": len(all_results),
             "speakers_count": len(speakers),
+            "speaker_identified_payload": speaker_identified_payload,
         }
-
-    async def _publish_event(self, event: dict) -> None:
-        """Publish an event to the event hub."""
-        await self.event_hub.publish(build_event_envelope(event))
 
     def _run_diarization(
         self,

@@ -32,7 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * - Status callbacks for UI updates
  */
 class ImageUploadManager(
-    private val baseUrl: String,
+    baseUrl: String,
     private val deviceId: String,
     private val httpClient: OkHttpClient = defaultHttpClient()
 ) {
@@ -89,6 +89,8 @@ class ImageUploadManager(
 
     // Queue state
     private val queue = CopyOnWriteArrayList<ImageTask>()
+    @Volatile
+    private var baseUrl: String = baseUrl.trimEnd('/')
     private val isProcessing = AtomicBoolean(false)
     private val totalUploaded = AtomicInteger(0)
     private val totalFailed = AtomicInteger(0)
@@ -103,6 +105,16 @@ class ImageUploadManager(
     val uploadedCount: Int get() = totalUploaded.get()
     val failedCount: Int get() = totalFailed.get()
     val isQueueActive: Boolean get() = isProcessing.get() || pendingCount > 0
+
+    /**
+     * Update upload target base URL (e.g., LAN/Tunnel route switch).
+     */
+    fun setBaseUrl(url: String) {
+        val normalized = url.trim().trimEnd('/')
+        if (normalized.isBlank()) return
+        baseUrl = normalized
+        Log.i(TAG, "Image upload base URL updated: $baseUrl")
+    }
 
     /**
      * Add an image to the upload queue
@@ -190,7 +202,7 @@ class ImageUploadManager(
         task.status = ImageTask.Status.UPLOADING
         onTaskStatusChanged?.invoke(task)
         
-        val url = "$baseUrl/v2/meetings/${task.meetingId}/images:upload"
+        val url = "${baseUrl.trimEnd('/')}/v2/meetings/${task.meetingId}/images:upload"
         
         // Read image bytes
         val imageBytes = task.originalFile.readBytes()

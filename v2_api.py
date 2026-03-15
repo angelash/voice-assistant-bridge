@@ -104,6 +104,18 @@ class V2MeetingAPI:
         self.event_hub = event_hub
         self.transcription_worker = transcription_worker
 
+    @staticmethod
+    def _parse_non_negative_int(raw: Optional[str], *, default: int, field: str) -> int:
+        if raw is None or str(raw).strip() == "":
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            raise ValueError(f"{field} must be an integer")
+        if value < 0:
+            raise ValueError(f"{field} must be >= 0")
+        return value
+
     async def handle_create_meeting(self, request: web.Request) -> web.Response:
         """POST /v2/meetings - Create a new meeting session."""
         try:
@@ -278,8 +290,19 @@ class V2MeetingAPI:
         """GET /v2/meetings - List meetings."""
         status = request.query.get("status")
         client_id = request.query.get("client_id")
-        limit = int(request.query.get("limit", "50"))
-        offset = int(request.query.get("offset", "0"))
+        try:
+            limit = self._parse_non_negative_int(
+                request.query.get("limit"),
+                default=50,
+                field="limit",
+            )
+            offset = self._parse_non_negative_int(
+                request.query.get("offset"),
+                default=0,
+                field="offset",
+            )
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
         meetings = self.store.list_meetings(
             status=status,
@@ -319,13 +342,23 @@ class V2MeetingAPI:
         if not meeting_id:
             return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
 
-        after_seq = request.query.get("after_seq")
-        after_seq_int = int(after_seq) if after_seq else None
-        limit = int(request.query.get("limit", "100"))
+        try:
+            after_seq_int = self._parse_non_negative_int(
+                request.query.get("after_seq"),
+                default=0,
+                field="after_seq",
+            )
+            limit = self._parse_non_negative_int(
+                request.query.get("limit"),
+                default=100,
+                field="limit",
+            )
+        except ValueError as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
         events = self.store.get_events(
             meeting_id,
-            after_seq=after_seq_int,
+            after_seq=after_seq_int if after_seq_int > 0 else None,
             limit=min(limit, 500),
         )
 
@@ -438,6 +471,14 @@ class V2MeetingAPI:
             
             # Ensure segment record exists (create if not)
             existing_segment = self.store.get_audio_segment(segment_id)
+            if existing_segment and existing_segment.get("meeting_id") != meeting_id:
+                return web.json_response({
+                    "ok": False,
+                    "error": "segment_meeting_mismatch",
+                    "segment_id": segment_id,
+                    "segment_meeting_id": existing_segment.get("meeting_id"),
+                    "request_meeting_id": meeting_id,
+                }, status=409)
             if not existing_segment:
                 self.store.create_audio_segment(
                     meeting_id=meeting_id,

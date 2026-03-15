@@ -4,7 +4,6 @@ import android.util.Log
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.asRequestBody
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
@@ -12,7 +11,6 @@ import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Upload Queue Manager
@@ -27,7 +25,7 @@ import java.util.concurrent.atomic.AtomicLong
  * - Status callbacks for UI updates
  */
 class UploadQueueManager(
-    private val baseUrl: String,
+    baseUrl: String,
     private val httpClient: OkHttpClient = defaultHttpClient()
 ) {
     companion object {
@@ -45,7 +43,6 @@ class UploadQueueManager(
         const val MAX_CONCURRENT_UPLOADS = 3
         
         // Content types
-        private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
         private val AUDIO_MEDIA_TYPE = "application/octet-stream".toMediaType()
         
         private fun defaultHttpClient(): OkHttpClient {
@@ -82,10 +79,13 @@ class UploadQueueManager(
 
     // Queue state
     private val queue = CopyOnWriteArrayList<UploadTask>()
+    @Volatile
+    private var baseUrl: String = baseUrl.trimEnd('/')
     private val isProcessing = AtomicBoolean(false)
     private val activeUploads = AtomicInteger(0)
     private val totalUploaded = AtomicInteger(0)
     private val totalFailed = AtomicInteger(0)
+    private val retryWakeScheduled = AtomicBoolean(false)
 
     // Callbacks
     var onTaskStatusChanged: ((task: UploadTask) -> Unit)? = null
@@ -96,6 +96,16 @@ class UploadQueueManager(
     val uploadedCount: Int get() = totalUploaded.get()
     val failedCount: Int get() = totalFailed.get()
     val isQueueActive: Boolean get() = isProcessing.get() || pendingCount > 0
+
+    /**
+     * Update upload target base URL (e.g., LAN/Tunnel route switch).
+     */
+    fun setBaseUrl(url: String) {
+        val normalized = url.trim().trimEnd('/')
+        if (normalized.isBlank()) return
+        baseUrl = normalized
+        Log.i(TAG, "Upload base URL updated: $baseUrl")
+    }
 
     /**
      * Add a segment to the upload queue
@@ -159,6 +169,7 @@ class UploadQueueManager(
      */
     fun stopProcessing() {
         isProcessing.set(false)
+        retryWakeScheduled.set(false)
         Log.i(TAG, "Stopping upload queue processing")
     }
 
@@ -201,6 +212,7 @@ class UploadQueueManager(
      */
     fun getTask(segmentId: String): UploadTask? = queue.find { it.segmentId == segmentId }
 
+    @Synchronized
     private fun processQueue() {
         while (isProcessing.get() && activeUploads.get() < MAX_CONCURRENT_UPLOADS) {
             val now = System.currentTimeMillis()
@@ -214,11 +226,20 @@ class UploadQueueManager(
             
             if (task == null) {
                 // No more tasks ready
-                if (activeUploads.get() == 0 && pendingCount == 0) {
-                    // All done
-                    isProcessing.set(false)
-                    onAllTasksComplete?.invoke()
-                    Log.i(TAG, "Upload queue complete")
+                if (activeUploads.get() == 0) {
+                    val nextRetryAt = queue
+                        .filter { it.status == UploadTask.Status.RETRYING && it.attempts < MAX_RETRIES }
+                        .minOfOrNull { it.nextAttemptAt }
+
+                    if (nextRetryAt != null && pendingCount > 0) {
+                        val delayMs = maxOf(50L, nextRetryAt - now)
+                        scheduleRetryWake(delayMs)
+                    } else if (pendingCount == 0) {
+                        // All done (uploaded or failed)
+                        isProcessing.set(false)
+                        onAllTasksComplete?.invoke()
+                        Log.i(TAG, "Upload queue complete")
+                    }
                 }
                 break
             }
@@ -234,6 +255,24 @@ class UploadQueueManager(
         
         // Report progress
         onQueueProgress?.invoke(pendingCount, uploadedCount, failedCount)
+    }
+
+    private fun scheduleRetryWake(delayMs: Long) {
+        if (!isProcessing.get()) return
+        if (!retryWakeScheduled.compareAndSet(false, true)) return
+
+        Thread {
+            try {
+                Thread.sleep(delayMs)
+            } catch (_: InterruptedException) {
+                // ignore
+            } finally {
+                retryWakeScheduled.set(false)
+            }
+            if (isProcessing.get()) {
+                processQueue()
+            }
+        }.start()
     }
 
     private fun uploadAsync(task: UploadTask) {
@@ -284,7 +323,7 @@ class UploadQueueManager(
     }
 
     private fun uploadSegment(task: UploadTask): Boolean {
-        val url = "$baseUrl/v2/meetings/${task.meetingId}/audio:upload"
+        val url = "${baseUrl.trimEnd('/')}/v2/meetings/${task.meetingId}/audio:upload"
         
         val multipartBody = MultipartBody.Builder()
             .setType(MultipartBody.FORM)

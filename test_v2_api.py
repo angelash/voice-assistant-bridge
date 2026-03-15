@@ -116,6 +116,22 @@ class TestMeetingStore(unittest.TestCase):
         self.assertIsNotNone(event)
         self.assertTrue(event["event_id"].startswith("evt-"))
         self.assertEqual(event["event_type"], EVT_MEETING_MODE_ON)
+
+    def test_append_event_auto_seq_increments(self):
+        """Events without seq should receive monotonically increasing seq values."""
+        meeting = self.store.create_meeting(client_id="test-client")
+        evt1 = self.store.append_event(meeting_id=meeting["meeting_id"], source="client", event_type="evt.1")
+        evt2 = self.store.append_event(meeting_id=meeting["meeting_id"], source="client", event_type="evt.2")
+        evt3 = self.store.append_event(meeting_id=meeting["meeting_id"], source="client", event_type="evt.3")
+
+        self.assertEqual(evt1["seq"], 1)
+        self.assertEqual(evt2["seq"], 2)
+        self.assertEqual(evt3["seq"], 3)
+
+        after_1 = self.store.get_events(meeting["meeting_id"], after_seq=1)
+        self.assertEqual(len(after_1), 2)
+        self.assertEqual(after_1[0]["seq"], 2)
+        self.assertEqual(after_1[1]["seq"], 3)
         
     def test_create_audio_segment(self):
         """Test creating audio segment records"""
@@ -252,6 +268,30 @@ class TestV2MeetingAPI(unittest.TestCase):
         # Meeting transitions directly to ARCHIVED after ending
         self.assertEqual(body["status"], MEETING_STATUS_ARCHIVED)
 
+    def test_handle_list_meetings_invalid_limit(self):
+        """Invalid numeric query should return 400 instead of 500."""
+        request = MagicMock()
+        request.query = {"limit": "abc", "offset": "0"}
+
+        response = asyncio.run(self.api.handle_list_meetings(request))
+        self.assertEqual(response.status, 400)
+        body = json.loads(response.text)
+        self.assertFalse(body["ok"])
+        self.assertIn("limit", body["error"])
+
+    def test_handle_get_timeline_invalid_after_seq(self):
+        """Invalid after_seq should return 400."""
+        meeting = self.store.create_meeting(client_id="test-client")
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        request.query = {"after_seq": "bad", "limit": "100"}
+
+        response = asyncio.run(self.api.handle_get_timeline(request))
+        self.assertEqual(response.status, 400)
+        body = json.loads(response.text)
+        self.assertFalse(body["ok"])
+        self.assertIn("after_seq", body["error"])
+
 
 class TestAudioUpload(unittest.TestCase):
     """Test audio upload with checksum verification"""
@@ -375,6 +415,32 @@ class TestAudioUpload(unittest.TestCase):
         updated = self.store.get_audio_segment(segment["segment_id"])
         self.assertEqual(updated["upload_status"], UPLOAD_STATUS_FAILED)
         self.assertEqual(updated["upload_error"], "checksum_mismatch")
+
+    def test_upload_segment_meeting_mismatch(self):
+        """Uploading an existing segment under another meeting should be rejected."""
+        meeting_a = self.store.create_meeting(client_id="client-a")
+        meeting_b = self.store.create_meeting(client_id="client-b")
+        self.store.update_meeting(meeting_a["meeting_id"], status=MEETING_STATUS_ACTIVE, mode="on")
+        self.store.update_meeting(meeting_b["meeting_id"], status=MEETING_STATUS_ACTIVE, mode="on")
+
+        seg = self.store.create_audio_segment(
+            meeting_id=meeting_a["meeting_id"],
+            seq=1,
+            segment_id="seg-shared-id",
+        )
+        checksum = hashlib.sha256(self.test_audio_data).hexdigest()
+
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting_b["meeting_id"]}
+        request.multipart = self._create_mock_multipart(
+            seg["segment_id"], 1, checksum, self.test_audio_data
+        )
+
+        response = asyncio.run(self.api.handle_audio_upload(request))
+        self.assertEqual(response.status, 409)
+        body = json.loads(response.text)
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["error"], "segment_meeting_mismatch")
 
 
 class TestUploadManifest(unittest.TestCase):
