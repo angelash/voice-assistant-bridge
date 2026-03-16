@@ -188,6 +188,13 @@
                 android:text="Speak To Text" />
         </LinearLayout>
 
+        <Button
+            android:id="@+id/visualModeButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Enter Visual Stage" />
+
         <TextView
             android:id="@+id/textResultView"
             android:layout_width="match_parent"

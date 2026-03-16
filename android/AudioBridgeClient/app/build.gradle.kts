@@ -48,5 +48,8 @@ dependencies {
     implementation("com.google.code.gson:gson:2.8.8")
     implementation(files("libs/SparkChain.aar"))
     implementation(files("libs/Codec.aar"))
+
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20231013")
 }
 

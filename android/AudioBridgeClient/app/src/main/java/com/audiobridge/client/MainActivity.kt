@@ -37,6 +37,13 @@ import com.audiobridge.client.audio.DiskWriterConsumer
 import com.audiobridge.client.audio.KwsDetectorConsumer
 import com.audiobridge.client.audio.PcmDistributionBus
 import com.audiobridge.client.audio.SttForwarderConsumer
+import com.audiobridge.client.conversation.BridgeConversationEngine
+import com.audiobridge.client.conversation.BridgeEndpointInfo
+import com.audiobridge.client.conversation.ConversationState
+import com.audiobridge.client.conversation.ConversationSubmitRequest
+import com.audiobridge.client.conversation.LongReplyDecisionRequired
+import com.audiobridge.client.conversation.RoleSource
+import com.audiobridge.client.conversation.SharedConversationEngine
 import com.audiobridge.client.meeting.MeetingManager
 import com.audiobridge.client.upload.ImageUploadManager
 import com.audiobridge.client.upload.UploadQueueManager
@@ -57,7 +64,6 @@ import org.json.JSONObject
 import java.io.File
 import java.net.Inet4Address
 import java.util.Locale
-import java.util.UUID
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -84,8 +90,6 @@ class MainActivity : AppCompatActivity() {
         private const val STT_CHANNEL = AudioFormat.CHANNEL_IN_MONO
         private const val STT_ENCODING = AudioFormat.ENCODING_PCM_16BIT
 
-        private const val LONG_REPLY_LIMIT = 30
-        private const val LONG_REPLY_TIMEOUT_MS = 30_000L
         private const val LONG_REPLY_MAX_LISTEN_ATTEMPTS = 5
         private const val LONG_REPLY_SUMMARY_MAX_CHARS = 90
         private const val LAN_ROUTE_IPV4_PREFIX_BYTES = 3
@@ -113,13 +117,7 @@ class MainActivity : AppCompatActivity() {
     )
 
     private data class PendingLongReply(
-        val id: String,
-        val endpoint: BridgeEndpoint,
-        val sessionId: String,
-        val clientId: String,
-        val originalRaw: String,
-        val originalDisplay: String,
-        val deadlineAtMs: Long,
+        val request: LongReplyDecisionRequired,
         var decisionListenAttempts: Int = 0,
     )
 
@@ -130,6 +128,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textInput: EditText
     private lateinit var sendTextButton: Button
     private lateinit var sttButton: Button
+    private lateinit var visualModeButton: Button
     private lateinit var textResultView: TextView
     private lateinit var speakSwitch: Switch
     private lateinit var meetingModeSwitch: Switch
@@ -189,6 +188,40 @@ class MainActivity : AppCompatActivity() {
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .build()
+    private val conversationEngine = SharedConversationEngine.engine
+
+    private val conversationListener = object : BridgeConversationEngine.Listener {
+        override fun onStateChanged(state: ConversationState) {
+            runOnUiThread {
+                statusText.text = when (state) {
+                    ConversationState.IDLE -> "Idle"
+                    ConversationState.SENDING -> "Sending..."
+                    ConversationState.WAITING_OPENCLAW -> "Waiting OpenClaw..."
+                    ConversationState.RETRYING -> "Retrying..."
+                    ConversationState.DELIVERED -> "Send complete"
+                    ConversationState.FAILED -> "Send failed"
+                }
+            }
+        }
+
+        override fun onRoleMessage(message: com.audiobridge.client.conversation.RoleMessage) {
+            appendResult("[${message.sourceLabel}] ${message.textDisplay}")
+            if (message.source == RoleSource.OPENCLAW && !message.requiresLongDecision) {
+                speak(message.textRaw)
+            }
+        }
+
+        override fun onSystemNotice(notice: com.audiobridge.client.conversation.SystemNotice) {
+            appendResult("[system] ${notice.text}")
+            if (notice.isError) {
+                runOnUiThread { statusText.text = "Send failed" }
+            }
+        }
+
+        override fun onLongReplyDecisionRequired(request: LongReplyDecisionRequired) {
+            runOnUiThread { beginLongReplyDecision(request) }
+        }
+    }
 
     private val asrCallbacks = object : AsrCallbacks {
         override fun onResult(asrResult: ASR.ASRResult, userTag: Any?) {
@@ -263,6 +296,7 @@ class MainActivity : AppCompatActivity() {
         textInput = findViewById(R.id.textInput)
         sendTextButton = findViewById(R.id.sendTextButton)
         sttButton = findViewById(R.id.sttButton)
+        visualModeButton = findViewById(R.id.visualModeButton)
         textResultView = findViewById(R.id.textResultView)
         speakSwitch = findViewById(R.id.speakSwitch)
         meetingModeSwitch = findViewById(R.id.meetingModeSwitch)
@@ -278,6 +312,7 @@ class MainActivity : AppCompatActivity() {
 
         // Initialize meeting mode components
         initMeetingMode()
+        conversationEngine.addListener(conversationListener)
 
         initTts()
         loadPrefs()
@@ -303,6 +338,14 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        visualModeButton.setOnClickListener {
+            savePrefs()
+            val intent = Intent(this, VisualStageActivity::class.java)
+                .putExtra("sessionId", sessionIdInput.text?.toString()?.trim().orEmpty())
+                .putExtra("clientId", clientIdInput.text?.toString()?.trim().orEmpty())
+            startActivity(intent)
+        }
+
         if (!hasLocationPermission()) {
             requestLocationPermission()
         }
@@ -323,6 +366,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        conversationEngine.removeListener(conversationListener)
         clearPendingLongReply()
         stopUnifiedAudioCapture()
         stopAudioCapture()  // Legacy cleanup
@@ -528,10 +572,6 @@ class MainActivity : AppCompatActivity() {
         return normalizeForDisplay(text).replace(Regex("""\s+"""), "").length
     }
 
-    private fun isLongOpenClawReply(textRaw: String): Boolean {
-        return normalizedLength(textRaw) > LONG_REPLY_LIMIT
-    }
-
     private fun classifyLongReplyChoice(spoken: String): LongReplyChoice {
         val normalized = normalizeForDisplay(spoken)
             .lowercase(Locale.getDefault())
@@ -545,7 +585,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun isPendingLongReplyActive(): Boolean {
         val pending = pendingLongReply ?: return false
-        return System.currentTimeMillis() < pending.deadlineAtMs
+        return System.currentTimeMillis() < pending.request.deadlineAtMs
     }
 
     private fun clearPendingLongReply() {
@@ -556,25 +596,12 @@ class MainActivity : AppCompatActivity() {
         pendingLongReplyListenTask = null
     }
 
-    private fun beginLongReplyDecision(
-        endpoint: BridgeEndpoint,
-        sessionId: String,
-        clientId: String,
-        originalRaw: String,
-    ) {
-        val display = normalizeForDisplay(originalRaw)
+    private fun beginLongReplyDecision(request: LongReplyDecisionRequired) {
+        val display = normalizeForDisplay(request.originalRaw)
         if (display.isBlank()) return
 
         clearPendingLongReply()
-        val pending = PendingLongReply(
-            id = UUID.randomUUID().toString(),
-            endpoint = endpoint,
-            sessionId = sessionId,
-            clientId = clientId,
-            originalRaw = originalRaw,
-            originalDisplay = display,
-            deadlineAtMs = System.currentTimeMillis() + LONG_REPLY_TIMEOUT_MS,
-        )
+        val pending = PendingLongReply(request = request)
         pendingLongReply = pending
 
         appendResult("[system] 内容较长，请在30秒内说“简报”或“原文”")
@@ -583,25 +610,26 @@ class MainActivity : AppCompatActivity() {
 
         val timeoutTask = Runnable {
             val active = pendingLongReply
-            if (active == null || active.id != pending.id) return@Runnable
+            if (active == null || active.request.id != pending.request.id) return@Runnable
             clearPendingLongReply()
             appendResult("[system] 30秒未选择，已略过该条语音播报")
             runOnUiThread { statusText.text = "Long reply skipped" }
         }
         pendingLongReplyTimeoutTask = timeoutTask
-        mainHandler.postDelayed(timeoutTask, LONG_REPLY_TIMEOUT_MS)
+        val delay = (request.deadlineAtMs - System.currentTimeMillis()).coerceAtLeast(1000L)
+        mainHandler.postDelayed(timeoutTask, delay)
 
         scheduleLongReplyDecisionListening(delayMs = 900)
     }
 
     private fun scheduleLongReplyDecisionListening(delayMs: Long) {
         val pending = pendingLongReply ?: return
-        if (System.currentTimeMillis() >= pending.deadlineAtMs) return
+        if (System.currentTimeMillis() >= pending.request.deadlineAtMs) return
         pendingLongReplyListenTask?.let { mainHandler.removeCallbacks(it) }
         val task = Runnable {
             val active = pendingLongReply ?: return@Runnable
-            if (active.id != pending.id) return@Runnable
-            if (System.currentTimeMillis() >= active.deadlineAtMs) return@Runnable
+            if (active.request.id != pending.request.id) return@Runnable
+            if (System.currentTimeMillis() >= active.request.deadlineAtMs) return@Runnable
             if (sttListening) return@Runnable
             if (active.decisionListenAttempts >= LONG_REPLY_MAX_LISTEN_ATTEMPTS) return@Runnable
             active.decisionListenAttempts += 1
@@ -617,149 +645,25 @@ class MainActivity : AppCompatActivity() {
         textInput.setText("")
         savePrefs()
         appendResult("[user] $input")
-
-        Thread {
-            try {
-                val endpoint = resolveBridgeEndpoint(allowNetworkProbe = true)
-                val sessionId = sessionIdInput.text?.toString()?.trim().orEmpty().ifBlank { "voice-bridge-session" }
-                val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
-
-                runOnUiThread {
-                    statusText.text = "Sending (${endpoint.mode}, wifi=${endpoint.wifiSsid ?: "N/A"})"
-                    refreshRouteInfo()
-                }
-
-                val submitBody = JSONObject()
-                    .put("text", input)
-                    .put("session_id", sessionId)
-                    .put("client_id", clientId)
-                    .put("source", "android")
-
-                val submitResp = postJson(endpoint, "/v1/messages", submitBody)
-
-                val shown = linkedSetOf<String>()
-                val localReplyRaw = submitResp.optString("local_reply").trim()
-                val localReply = normalizeForDisplay(localReplyRaw)
-                if (localReply.isNotBlank()) {
-                    val label = submitResp.optString("local_source_label").ifBlank { "Local Operator" }
-                    appendResult("[$label] $localReply")
-                    shown.add("$label::$localReply")
-                }
-
-                val messageId = submitResp.optString("message_id").trim()
-                val state = submitResp.optString("status").uppercase(Locale.getDefault())
-                if (messageId.isNotBlank() && state !in setOf("DELIVERED", "FAILED")) {
-                    val terminal = pollTerminal(endpoint, messageId, timeoutSec = 180, intervalMs = 1000)
-                    if (terminal != null) {
-                        renderStatusMessages(terminal, shown, endpoint, sessionId, clientId)
-                    } else {
-                        appendResult("[system] timeout waiting final reply")
-                    }
-                } else {
-                    renderStatusMessages(submitResp, shown, endpoint, sessionId, clientId)
-                }
-
-                runOnUiThread { statusText.text = "Send complete" }
-            } catch (e: Exception) {
-                appendResult("[system] send failed: ${e.message ?: "unknown"}")
-                runOnUiThread { statusText.text = "Send failed" }
-            }
-        }.start()
-    }
-
-    private fun renderStatusMessages(
-        payload: JSONObject,
-        shown: MutableSet<String>,
-        endpoint: BridgeEndpoint,
-        sessionId: String,
-        clientId: String,
-    ) {
-        val messages = payload.optJSONArray("messages")
-        if (messages != null) {
-            for (i in 0 until messages.length()) {
-                val item = messages.optJSONObject(i) ?: continue
-                val textRaw = item.optString("text").trim()
-                val text = normalizeForDisplay(textRaw)
-                if (text.isBlank()) continue
-                val label = item.optString("source_label").ifBlank { "Assistant" }
-                val source = item.optString("source").trim()
-                val key = "$label::$text"
-                if (shown.contains(key)) continue
-                shown.add(key)
-                appendResult("[$label] $text")
-                if (item.optString("kind") == "error") continue
-                if (source == "local-operator") continue
-
-                if (source == "openclaw" && isLongOpenClawReply(textRaw)) {
-                    beginLongReplyDecision(endpoint, sessionId, clientId, textRaw)
-                } else {
-                    speak(textRaw)
-                }
-            }
+        val endpoint = resolveBridgeEndpoint(allowNetworkProbe = true)
+        val sessionId = sessionIdInput.text?.toString()?.trim().orEmpty().ifBlank { "voice-bridge-session" }
+        val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
+        runOnUiThread {
+            statusText.text = "Sending (${endpoint.mode}, wifi=${endpoint.wifiSsid ?: "N/A"})"
+            refreshRouteInfo()
         }
-
-        val state = payload.optString("status").uppercase(Locale.getDefault())
-        if (state == "FAILED") {
-            val err = payload.optString("last_error").ifBlank { "openclaw_failed" }
-            appendResult("[system] openclaw failed: $err")
-        }
-    }
-
-    private fun pollTerminal(
-        endpoint: BridgeEndpoint,
-        messageId: String,
-        timeoutSec: Int,
-        intervalMs: Long,
-    ): JSONObject? {
-        val started = System.currentTimeMillis()
-        while (System.currentTimeMillis() - started < timeoutSec * 1000L) {
-            val status = getJson(endpoint, "/v1/messages/$messageId")
-            val state = status.optString("status").uppercase(Locale.getDefault())
-            if (state == "DELIVERED" || state == "FAILED") {
-                return status
-            }
-            Thread.sleep(intervalMs)
-        }
-        return null
-    }
-
-    private fun postJson(endpoint: BridgeEndpoint, path: String, body: JSONObject): JSONObject {
-        val reqBody = body.toString().toRequestBody("application/json; charset=utf-8".toMediaType())
-        val req = Request.Builder()
-            .url(endpoint.baseUrl.trimEnd('/') + path)
-            .post(reqBody)
-            .build()
-        httpClient.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: $text")
-            return JSONObject(text)
-        }
-    }
-
-    private fun getJson(endpoint: BridgeEndpoint, path: String): JSONObject {
-        val req = Request.Builder()
-            .url(endpoint.baseUrl.trimEnd('/') + path)
-            .get()
-            .build()
-        httpClient.newCall(req).execute().use { resp ->
-            val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: $text")
-            return JSONObject(text)
-        }
-    }
-
-    private fun requestLocalSummary(pending: PendingLongReply): String {
-        val body = JSONObject()
-            .put("text", pending.originalRaw)
-            .put("session_id", pending.sessionId)
-            .put("client_id", pending.clientId)
-            .put("source", "android")
-            .put("max_chars", LONG_REPLY_SUMMARY_MAX_CHARS)
-        val resp = postJson(pending.endpoint, "/v1/operator/summarize", body)
-        if (!resp.optBoolean("ok", false)) {
-            throw IllegalStateException(resp.optString("error").ifBlank { "summary_failed" })
-        }
-        return resp.optString("summary").trim()
+        conversationEngine.submitText(
+            ConversationSubmitRequest(
+                text = input,
+                sessionId = sessionId,
+                clientId = clientId,
+                endpoint = BridgeEndpointInfo(
+                    mode = endpoint.mode.name,
+                    baseUrl = endpoint.baseUrl,
+                    wifiSsid = endpoint.wifiSsid,
+                ),
+            )
+        )
     }
 
     private fun ensureSparkInitialized(): Boolean {
@@ -904,7 +808,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun handleLongReplyDecisionSpeech(spoken: String) {
         val pending = pendingLongReply
-        if (pending == null || System.currentTimeMillis() >= pending.deadlineAtMs) {
+        if (pending == null || System.currentTimeMillis() >= pending.request.deadlineAtMs) {
             clearPendingLongReply()
             runOnUiThread { statusText.text = "Speech recognized" }
             sendTextToBridge(spoken)
@@ -918,13 +822,16 @@ class MainActivity : AppCompatActivity() {
                 runOnUiThread { statusText.text = "Summarizing..." }
                 Thread {
                     try {
-                        val summary = requestLocalSummary(pending)
-                        val spokenSummary = summary.ifBlank { pending.originalDisplay }
+                        val summary = conversationEngine.requestLocalSummary(
+                            pending.request,
+                            maxChars = LONG_REPLY_SUMMARY_MAX_CHARS,
+                        )
+                        val spokenSummary = summary.ifBlank { pending.request.originalDisplay }
                         speak(spokenSummary, force = true)
                         runOnUiThread { statusText.text = "Brief spoken" }
                     } catch (e: Exception) {
                         appendResult("[system] 简报失败，改为原文播报: ${e.message ?: "unknown"}")
-                        speak(pending.originalRaw, force = true)
+                        speak(pending.request.originalRaw, force = true)
                         runOnUiThread { statusText.text = "Original spoken" }
                     }
                 }.start()
@@ -933,7 +840,7 @@ class MainActivity : AppCompatActivity() {
             LongReplyChoice.ORIGINAL -> {
                 clearPendingLongReply()
                 appendResult("[system] 接线员：已选择原文播报")
-                speak(pending.originalRaw, force = true)
+                speak(pending.request.originalRaw, force = true)
                 runOnUiThread { statusText.text = "Original spoken" }
             }
 

@@ -1,0 +1,152 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#050507"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/visualStatusText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:background="#1A1A1E"
+            android:ellipsize="end"
+            android:maxLines="2"
+            android:padding="10dp"
+            android:text="Idle"
+            android:textColor="#E9EAED"
+            android:textSize="14sp" />
+
+        <Button
+            android:id="@+id/closeVisualButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:backgroundTint="#2E2F35"
+            android:text="关闭"
+            android:textColor="#F4F5F7" />
+    </LinearLayout>
+
+    <com.audiobridge.client.ui.EyeAvatarView
+        android:id="@+id/eyeAvatarView"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="10dp"
+        android:layout_weight="1.4" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginEnd="6dp"
+            android:layout_weight="1"
+            android:background="#111214"
+            android:orientation="vertical"
+            android:padding="10dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="本地接线员"
+                android:textColor="#79E0CF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/localSubtitleText"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="6dp"
+                android:layout_weight="1"
+                android:fontFamily="monospace"
+                android:text="(暂无)"
+                android:textColor="#D4F4EE"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="match_parent"
+            android:layout_marginStart="6dp"
+            android:layout_weight="1"
+            android:background="#111214"
+            android:orientation="vertical"
+            android:padding="10dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="龙虾大脑"
+                android:textColor="#84B8FF"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/openclawSubtitleText"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_marginTop="6dp"
+                android:layout_weight="1"
+                android:fontFamily="monospace"
+                android:text="(暂无)"
+                android:textColor="#DCE9FF"
+                android:textSize="12sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <EditText
+            android:id="@+id/visualInputText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:background="#1A1A1E"
+            android:hint="输入文本..."
+            android:imeOptions="actionSend"
+            android:inputType="textMultiLine"
+            android:maxLines="2"
+            android:minHeight="48dp"
+            android:padding="10dp"
+            android:textColor="#F2F3F5"
+            android:textColorHint="#8F949C" />
+
+        <Button
+            android:id="@+id/visualSendButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:backgroundTint="#2A6BF2"
+            android:text="发送"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/visualSttButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:backgroundTint="#214A77"
+            android:text="语音"
+            android:textColor="#FFFFFF" />
+    </LinearLayout>
+
+</LinearLayout>
