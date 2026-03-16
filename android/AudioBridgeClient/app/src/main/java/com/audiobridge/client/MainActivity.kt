@@ -9,8 +9,12 @@ import android.graphics.BitmapFactory
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.net.ConnectivityManager
 import android.net.Uri
+import android.net.NetworkCapabilities
+import android.net.wifi.WifiInfo
 import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -51,6 +55,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
+import java.net.Inet4Address
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.TimeUnit
@@ -83,6 +88,7 @@ class MainActivity : AppCompatActivity() {
         private const val LONG_REPLY_TIMEOUT_MS = 30_000L
         private const val LONG_REPLY_MAX_LISTEN_ATTEMPTS = 5
         private const val LONG_REPLY_SUMMARY_MAX_CHARS = 90
+        private const val LAN_ROUTE_IPV4_PREFIX_BYTES = 3
     }
 
     private enum class LinkMode { LAN, TUNNEL }
@@ -95,6 +101,15 @@ class MainActivity : AppCompatActivity() {
         val mode: LinkMode,
         val baseUrl: String,
         val wifiSsid: String?,
+    )
+
+    private data class RouteDecision(
+        val endpoint: BridgeEndpoint,
+        val wifiSsid: String?,
+        val activeWifiIpv4: String?,
+        val lanBaseIpv4: String?,
+        val usedSameSubnetFallback: Boolean,
+        val usedLanHealthProbeFallback: Boolean,
     )
 
     private data class PendingLongReply(
@@ -347,34 +362,132 @@ class MainActivity : AppCompatActivity() {
         tts = null
     }
 
+    private fun normalizeSsid(raw: String?): String? {
+        val value = raw?.trim()?.trim('"').orEmpty()
+        if (value.isBlank()) return null
+        if (value.equals("<unknown ssid>", ignoreCase = true)) return null
+        return value
+    }
+
+    private fun currentWifiSsidFromCapabilities(): String? {
+        val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return null
+        val active = cm.activeNetwork ?: return null
+        val caps = cm.getNetworkCapabilities(active) ?: return null
+        if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+        val wifiInfo = caps.transportInfo as? WifiInfo ?: return null
+        return normalizeSsid(wifiInfo.ssid)
+    }
+
     private fun currentWifiSsid(): String? {
         if (!hasLocationPermission()) return null
+        currentWifiSsidFromCapabilities()?.let { return it }
         return try {
             val manager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            val ssid = manager?.connectionInfo?.ssid?.trim()?.trim('"').orEmpty()
-            if (ssid.isBlank() || ssid.equals("<unknown ssid>", ignoreCase = true)) null else ssid
+            normalizeSsid(manager?.connectionInfo?.ssid)
         } catch (_: Exception) {
             null
         }
     }
 
-    private fun resolveBridgeEndpoint(): BridgeEndpoint {
+    private fun activeWifiIpv4(): String? {
+        val cm = applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return null
+        val active = cm.activeNetwork ?: return null
+        val caps = cm.getNetworkCapabilities(active) ?: return null
+        if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return null
+        val link = cm.getLinkProperties(active) ?: return null
+        val addr = link.linkAddresses
+            .mapNotNull { it.address as? Inet4Address }
+            .firstOrNull { !it.isLoopbackAddress }
+            ?: return null
+        return addr.hostAddress
+    }
+
+    private fun lanBaseIpv4(): String? {
+        val host = Uri.parse(LAN_BASE_URL).host ?: return null
+        val parts = host.split('.')
+        if (parts.size != 4) return null
+        return host
+    }
+
+    private fun sameIpv4Prefix(ipA: String, ipB: String, prefixBytes: Int): Boolean {
+        val a = ipA.split('.')
+        val b = ipB.split('.')
+        if (a.size != 4 || b.size != 4) return false
+        val checkedBytes = prefixBytes.coerceIn(1, 4)
+        for (i in 0 until checkedBytes) {
+            if (a[i] != b[i]) return false
+        }
+        return true
+    }
+
+    private fun isLanBaseHealthy(timeoutMillis: Long = 1200L): Boolean {
+        return try {
+            val req = Request.Builder()
+                .url("${LAN_BASE_URL.trimEnd('/')}/health")
+                .get()
+                .build()
+            httpClient.newBuilder()
+                .connectTimeout(timeoutMillis, TimeUnit.MILLISECONDS)
+                .readTimeout(timeoutMillis, TimeUnit.MILLISECONDS)
+                .build()
+                .newCall(req)
+                .execute()
+                .use { it.isSuccessful }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun resolveRouteDecision(allowNetworkProbe: Boolean = false): RouteDecision {
         val wifi = currentWifiSsid()
-        val useLan = wifi?.equals(LAN_WIFI_SSID, ignoreCase = true) == true
-        return if (useLan) {
+        val activeIpv4 = activeWifiIpv4()
+        val lanIpv4 = lanBaseIpv4()
+        val useSsidLan = wifi?.equals(LAN_WIFI_SSID, ignoreCase = true) == true
+        val useSameSubnetFallback = !useSsidLan &&
+            wifi == null &&
+            activeIpv4 != null &&
+            lanIpv4 != null &&
+            sameIpv4Prefix(activeIpv4, lanIpv4, LAN_ROUTE_IPV4_PREFIX_BYTES)
+        val useLanHealthProbeFallback = !useSsidLan &&
+            !useSameSubnetFallback &&
+            allowNetworkProbe &&
+            activeIpv4 != null &&
+            isLanBaseHealthy()
+        val useLan = useSsidLan || useSameSubnetFallback || useLanHealthProbeFallback
+        val endpoint = if (useLan) {
             BridgeEndpoint(LinkMode.LAN, LAN_BASE_URL, wifi)
         } else {
             BridgeEndpoint(LinkMode.TUNNEL, PUBLIC_BASE_URL, wifi)
         }
+        return RouteDecision(
+            endpoint = endpoint,
+            wifiSsid = wifi,
+            activeWifiIpv4 = activeIpv4,
+            lanBaseIpv4 = lanIpv4,
+            usedSameSubnetFallback = useSameSubnetFallback,
+            usedLanHealthProbeFallback = useLanHealthProbeFallback,
+        )
+    }
+
+    private fun resolveBridgeEndpoint(allowNetworkProbe: Boolean = false): BridgeEndpoint {
+        return resolveRouteDecision(allowNetworkProbe = allowNetworkProbe).endpoint
     }
 
     private fun refreshRouteInfo() {
-        val endpoint = resolveBridgeEndpoint()
+        val decision = resolveRouteDecision(allowNetworkProbe = false)
+        val endpoint = decision.endpoint
         routeInfoText.text = buildString {
             appendLine("Auto Route:")
-            appendLine("  current wifi: ${endpoint.wifiSsid ?: "N/A"}")
+            appendLine("  current wifi: ${decision.wifiSsid ?: "N/A"}")
+            appendLine("  active wifi ipv4: ${decision.activeWifiIpv4 ?: "N/A"}")
             appendLine("  location perm: ${if (hasLocationPermission()) "granted" else "missing"}")
             appendLine("  lan wifi: $LAN_WIFI_SSID")
+            appendLine("  lan host ipv4: ${decision.lanBaseIpv4 ?: "N/A"}")
+            appendLine("  same-subnet fallback: ${if (decision.usedSameSubnetFallback) "used" else "not-used"}")
+            appendLine("  lan health-probe fallback: ${if (decision.usedLanHealthProbeFallback) "used" else "not-used"}")
             appendLine("  selected mode: ${endpoint.mode}")
             appendLine("  selected base: ${endpoint.baseUrl}")
             appendLine("  lan base: $LAN_BASE_URL")
@@ -507,7 +620,7 @@ class MainActivity : AppCompatActivity() {
 
         Thread {
             try {
-                val endpoint = resolveBridgeEndpoint()
+                val endpoint = resolveBridgeEndpoint(allowNetworkProbe = true)
                 val sessionId = sessionIdInput.text?.toString()?.trim().orEmpty().ifBlank { "voice-bridge-session" }
                 val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
 
@@ -1455,15 +1568,15 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
-            val endpoint = resolveBridgeEndpoint()
             val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
-            val baseUrl = endpoint.baseUrl
-            activeMeetingBaseUrl = baseUrl
-            updateMeetingNetworkTargets(baseUrl)
             meetingModeSwitch.isEnabled = false
             meetingStatusText.text = "Starting meeting..."
 
             Thread {
+                val endpoint = resolveBridgeEndpoint(allowNetworkProbe = true)
+                val baseUrl = endpoint.baseUrl
+                activeMeetingBaseUrl = baseUrl
+                updateMeetingNetworkTargets(baseUrl)
                 val remoteMeetingId = createRemoteMeetingOnServer(baseUrl, clientId)
 
                 runOnUiThread {

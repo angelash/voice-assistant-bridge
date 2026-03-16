@@ -46,6 +46,12 @@ SOURCE_SYSTEM = "system"
 
 CONFIG_PATH = Path(__file__).with_name("config.json")
 
+NON_RETRIABLE_OPENCLAW_ERROR_HINTS = (
+    "plugin runtime subagent methods are only available during a gateway request",
+    "openclaw invalid payload",
+    "openclaw empty reply",
+)
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -75,6 +81,26 @@ def source_label(source: str) -> str:
         SOURCE_OPENCLAW: "龙虾大脑",
         SOURCE_SYSTEM: "系统",
     }.get(source, source)
+
+
+def is_non_retriable_openclaw_error(error: str) -> bool:
+    text = (error or "").strip().lower()
+    if not text:
+        return False
+
+    for hint in NON_RETRIABLE_OPENCLAW_ERROR_HINTS:
+        if hint in text:
+            return True
+
+    m = re.search(r"openclaw http\s+(\d{3})", text)
+    if not m:
+        return False
+
+    code = int(m.group(1))
+    # Retry transient network/service errors, fail fast on caller/request issues.
+    if 400 <= code < 500 and code not in (408, 409, 425, 429):
+        return True
+    return False
 
 
 def extract_json_obj(text: str) -> Optional[dict[str, Any]]:
@@ -623,7 +649,8 @@ class VoiceAssistantServer:
                     return
                 except Exception as exc:
                     err = str(exc).strip() or exc.__class__.__name__
-                    if attempt < max_retry:
+                    non_retriable = is_non_retriable_openclaw_error(err)
+                    if attempt < max_retry and not non_retriable:
                         backoff = self._backoff(attempt)
                         self.store.update(
                             message_id,
@@ -639,6 +666,8 @@ class VoiceAssistantServer:
                         row = self.store.get(message_id) or row
                         await self._emit_status(row, "waiting_openclaw")
                         continue
+                    if non_retriable:
+                        logger.warning("openclaw non-retriable failure, message=%s, attempt=%d, err=%s", message_id, attempt, err)
                     self.store.update(
                         message_id,
                         status=STATUS_FAILED,
@@ -647,7 +676,7 @@ class VoiceAssistantServer:
                         updated_at=now_iso(),
                     )
                     row = self.store.get(message_id) or row
-                    await self._emit_status(row, "failed")
+                    await self._emit_status(row, "failed", non_retriable=non_retriable)
                     return
 
     async def _wait_terminal(self, message_id: str, timeout_sec: Optional[int] = None) -> dict[str, Any]:
