@@ -1094,43 +1094,40 @@ class MainActivity : AppCompatActivity() {
         
         uploadQueueManager.onAllTasksComplete = {
             val uploadedMeetingId = pendingUploadMeetingId
-            if (uploadedMeetingId == null) {
-                return@onAllTasksComplete
-            }
+            if (uploadedMeetingId != null) {
+                val failed = uploadQueueManager.failedCount
+                if (failed > 0) {
+                    runOnUiThread {
+                        appendResult("[upload] Completed with $failed failed segments, keep local data for retry")
+                        meetingInfoText.text = "Upload failed: $failed segments"
+                        updateMeetingStatusUI()
+                    }
+                    pendingUploadMeetingId = null
+                    if (pendingFinalizeMeetingId == uploadedMeetingId) {
+                        pendingFinalizeMeetingId = null
+                        finalizeRemoteMeetingAsync(uploadedMeetingId, triggerTranscription = false)
+                    }
+                } else {
+                    runOnUiThread {
+                        appendResult("[upload] All segments uploaded")
+                        meetingInfoText.text = "All uploads complete"
+                    }
+                    val marked = meetingManager.markMeetingUploaded(uploadedMeetingId)
+                    val deleted = meetingManager.cleanupUploadedMeetings(7)
+                    Log.i(TAG, "Upload complete for $uploadedMeetingId, marked=$marked, cleaned=$deleted")
+                    if (deleted > 0) {
+                        runOnUiThread {
+                            appendResult("[cleanup] Deleted $deleted uploaded meetings (retention=7 days)")
+                            updateMeetingStatusUI()
+                        }
+                    }
+                    pendingUploadMeetingId = null
 
-            val failed = uploadQueueManager.failedCount
-            if (failed > 0) {
-                runOnUiThread {
-                    appendResult("[upload] Completed with $failed failed segments, keep local data for retry")
-                    meetingInfoText.text = "Upload failed: $failed segments"
-                    updateMeetingStatusUI()
+                    if (pendingFinalizeMeetingId == uploadedMeetingId) {
+                        pendingFinalizeMeetingId = null
+                        finalizeRemoteMeetingAsync(uploadedMeetingId)
+                    }
                 }
-                pendingUploadMeetingId = null
-                if (pendingFinalizeMeetingId == uploadedMeetingId) {
-                    pendingFinalizeMeetingId = null
-                    finalizeRemoteMeetingAsync(uploadedMeetingId, triggerTranscription = false)
-                }
-                return@onAllTasksComplete
-            }
-
-            runOnUiThread {
-                appendResult("[upload] All segments uploaded")
-                meetingInfoText.text = "All uploads complete"
-            }
-            val marked = meetingManager.markMeetingUploaded(uploadedMeetingId)
-            val deleted = meetingManager.cleanupUploadedMeetings(7)
-            Log.i(TAG, "Upload complete for $uploadedMeetingId, marked=$marked, cleaned=$deleted")
-            if (deleted > 0) {
-                runOnUiThread {
-                    appendResult("[cleanup] Deleted $deleted uploaded meetings (retention=7 days)")
-                    updateMeetingStatusUI()
-                }
-            }
-            pendingUploadMeetingId = null
-
-            if (pendingFinalizeMeetingId == uploadedMeetingId) {
-                pendingFinalizeMeetingId = null
-                finalizeRemoteMeetingAsync(uploadedMeetingId)
             }
         }
 
