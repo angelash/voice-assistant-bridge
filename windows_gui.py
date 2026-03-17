@@ -20,7 +20,7 @@ import time
 import wave
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import aiohttp
 
@@ -45,8 +45,10 @@ try:
         QLineEdit,
         QMainWindow,
         QMessageBox,
+        QProgressBar,
         QPushButton,
         QSpinBox,
+        QSlider,
         QTabWidget,
         QTextEdit,
         QListWidget,
@@ -930,15 +932,44 @@ class MainWindow(QMainWindow):
     def _ui_log_from_worker(self, message: str):
         QTimer.singleShot(0, lambda: self._log(message))
 
+    @staticmethod
+    def _format_mmss(seconds: float) -> str:
+        sec = max(0, int(seconds))
+        return f"{sec // 60:02d}:{sec % 60:02d}"
+
+    def _audio_duration_seconds(self, file_path: Path, sample_rate: int = 48000, channels: int = 1) -> float:
+        try:
+            with open(file_path, "rb") as f:
+                head = f.read(12)
+            is_wav = head.startswith(b"RIFF") and b"WAVE" in head
+            if is_wav:
+                with wave.open(str(file_path), "rb") as wf:
+                    framerate = wf.getframerate() or 1
+                    return float(wf.getnframes()) / float(framerate)
+            size = max(0, file_path.stat().st_size)
+            bytes_per_sec = max(1, sample_rate * channels * 2)
+            return float(size) / float(bytes_per_sec)
+        except Exception:
+            return 0.0
+
     def _stop_audio_playback(self):
         self._audio_play_stop.set()
         if self._audio_play_thread and self._audio_play_thread.is_alive():
             self._audio_play_thread.join(timeout=1.0)
         self._audio_play_thread = None
 
-    def _play_audio_file(self, file_path: Path, sample_rate: int = 48000, channels: int = 1):
+    def _play_audio_file(
+        self,
+        file_path: Path,
+        sample_rate: int = 48000,
+        channels: int = 1,
+        start_ratio: float = 0.0,
+        on_progress: Optional[Callable[[float], None]] = None,
+        on_finished: Optional[Callable[[], None]] = None,
+    ):
         self._stop_audio_playback()
         self._audio_play_stop.clear()
+        start_ratio = max(0.0, min(0.999, float(start_ratio or 0.0)))
 
         def _run():
             p = pyaudio.PyAudio()
@@ -949,20 +980,38 @@ class MainWindow(QMainWindow):
                 is_wav = head.startswith(b"RIFF") and b"WAVE" in head
                 if is_wav:
                     with wave.open(str(file_path), "rb") as wf:
+                        total_frames = max(1, int(wf.getnframes()))
+                        start_frame = int(total_frames * start_ratio)
+                        wf.setpos(max(0, min(total_frames - 1, start_frame)))
+                        frames_played = start_frame
                         stream = p.open(
                             format=p.get_format_from_width(wf.getsampwidth()),
                             channels=wf.getnchannels(),
                             rate=wf.getframerate(),
                             output=True,
                         )
-                        chunk = 4096
+                        chunk = 2048
                         while not self._audio_play_stop.is_set():
                             data = wf.readframes(chunk)
                             if not data:
                                 break
+                            frame_width = max(1, wf.getsampwidth() * wf.getnchannels())
+                            frames_played += len(data) // frame_width
                             stream.write(data)
+                            if on_progress:
+                                try:
+                                    on_progress(min(1.0, frames_played / total_frames))
+                                except Exception:
+                                    pass
                 else:
                     with open(file_path, "rb") as rf:
+                        total_bytes = max(1, file_path.stat().st_size)
+                        frame_width = max(2, channels * 2)
+                        start_byte = int(total_bytes * start_ratio)
+                        start_byte -= (start_byte % frame_width)
+                        start_byte = max(0, min(total_bytes - frame_width, start_byte))
+                        rf.seek(start_byte)
+                        played_bytes = start_byte
                         stream = p.open(
                             format=pyaudio.paInt16,
                             channels=channels,
@@ -975,6 +1024,12 @@ class MainWindow(QMainWindow):
                             if not data:
                                 break
                             stream.write(data)
+                            played_bytes += len(data)
+                            if on_progress:
+                                try:
+                                    on_progress(min(1.0, played_bytes / total_bytes))
+                                except Exception:
+                                    pass
             except Exception as exc:
                 self._ui_log_from_worker(f"[会议] 音频播放失败: {exc}")
             finally:
@@ -985,6 +1040,11 @@ class MainWindow(QMainWindow):
                 except Exception:
                     pass
                 p.terminate()
+                if on_finished:
+                    try:
+                        on_finished()
+                    except Exception:
+                        pass
 
         self._audio_play_thread = threading.Thread(target=_run, daemon=True)
         self._audio_play_thread.start()
@@ -1021,7 +1081,7 @@ class MainWindow(QMainWindow):
 
         dialog = QDialog(self)
         dialog.setWindowTitle(f"会议详情 - {meeting_id[:20]}...")
-        dialog.resize(980, 700)
+        dialog.resize(1080, 820)
         layout = QVBoxLayout(dialog)
 
         form = QFormLayout()
@@ -1051,10 +1111,78 @@ class MainWindow(QMainWindow):
         summary_view.setPlainText("\n".join(summary_lines))
         layout.addWidget(summary_view)
 
+        transcription_box = QGroupBox("转写任务（弹窗内手动触发）")
+        transcription_layout = QVBoxLayout(transcription_box)
+        transcription_btn_row = QHBoxLayout()
+        run_stt_btn = QPushButton("手动STT")
+        retry_stt_btn = QPushButton("重试STT")
+        cancel_stt_btn = QPushButton("取消排队任务")
+        refresh_stt_btn = QPushButton("刷新进度")
+        transcription_btn_row.addWidget(run_stt_btn)
+        transcription_btn_row.addWidget(retry_stt_btn)
+        transcription_btn_row.addWidget(cancel_stt_btn)
+        transcription_btn_row.addWidget(refresh_stt_btn)
+        transcription_layout.addLayout(transcription_btn_row)
+
+        transcription_status_label = QLabel("任务状态: -")
+        transcription_progress = QProgressBar()
+        transcription_progress.setRange(0, 100)
+        transcription_progress.setValue(0)
+        transcription_job_label = QLabel("")
+        transcription_jobs_view = QTextEdit()
+        transcription_jobs_view.setReadOnly(True)
+        transcription_jobs_view.setMaximumHeight(100)
+        transcription_layout.addWidget(transcription_status_label)
+        transcription_layout.addWidget(transcription_progress)
+        transcription_layout.addWidget(transcription_job_label)
+        transcription_layout.addWidget(transcription_jobs_view)
+        layout.addWidget(transcription_box)
+
         transcript_edit = QTextEdit()
         transcript_edit.setPlainText(transcript_text)
         transcript_edit.setPlaceholderText("会议转写文本（可人工修改）")
         layout.addWidget(transcript_edit, 2)
+
+        refined_box = QGroupBox("分段精修（可逐段改文案/说话人）")
+        refined_layout = QHBoxLayout(refined_box)
+        refined_list = QListWidget()
+        refined_list.setMinimumWidth(450)
+        refined_layout.addWidget(refined_list, 2)
+
+        refined_editor_col = QVBoxLayout()
+        refined_meta_form = QFormLayout()
+        refined_segment_id_edit = QLineEdit("")
+        refined_segment_id_edit.setReadOnly(True)
+        refined_time_label = QLabel("-")
+        refined_cluster_label = QLabel("-")
+        refined_speaker_edit = QLineEdit("")
+        refined_speaker_edit.setPlaceholderText("输入说话人名称")
+        refined_meta_form.addRow("分段ID", refined_segment_id_edit)
+        refined_meta_form.addRow("时间段", refined_time_label)
+        refined_meta_form.addRow("聚类ID", refined_cluster_label)
+        refined_meta_form.addRow("说话人", refined_speaker_edit)
+        refined_editor_col.addLayout(refined_meta_form)
+
+        refined_text_edit = QTextEdit()
+        refined_text_edit.setPlaceholderText("分段文本")
+        refined_text_edit.setMaximumHeight(140)
+        refined_editor_col.addWidget(refined_text_edit)
+
+        refined_btn_row = QHBoxLayout()
+        save_segment_text_btn = QPushButton("保存该段文本")
+        save_segment_speaker_btn = QPushButton("联动改名")
+        refresh_refined_btn = QPushButton("刷新分段")
+        refined_btn_row.addWidget(save_segment_text_btn)
+        refined_btn_row.addWidget(save_segment_speaker_btn)
+        refined_btn_row.addWidget(refresh_refined_btn)
+        refined_editor_col.addLayout(refined_btn_row)
+
+        refined_hint_label = QLabel("提示: 有聚类ID时会联动修改该说话人全部分段；无聚类ID仅修改当前分段。")
+        refined_hint_label.setWordWrap(True)
+        refined_editor_col.addWidget(refined_hint_label)
+        refined_editor_col.addStretch(1)
+        refined_layout.addLayout(refined_editor_col, 3)
+        layout.addWidget(refined_box, 2)
 
         audio_box = QGroupBox("语音文件")
         audio_layout = QVBoxLayout(audio_box)
@@ -1073,6 +1201,18 @@ class MainWindow(QMainWindow):
             audio_list.addItem(row)
         audio_layout.addWidget(audio_list)
 
+        audio_file_label = QLabel("未选择音频")
+        audio_layout.addWidget(audio_file_label)
+        audio_progress_row = QHBoxLayout()
+        audio_slider = QSlider(Qt.Horizontal)
+        audio_slider.setRange(0, 1000)
+        audio_slider.setValue(0)
+        audio_slider.setEnabled(False)
+        audio_time_label = QLabel("00:00 / 00:00")
+        audio_progress_row.addWidget(audio_slider, 1)
+        audio_progress_row.addWidget(audio_time_label)
+        audio_layout.addLayout(audio_progress_row)
+
         audio_btn_row = QHBoxLayout()
         play_btn = QPushButton("播放选中")
         stop_btn = QPushButton("停止播放")
@@ -1085,28 +1225,470 @@ class MainWindow(QMainWindow):
         layout.addWidget(status_label)
 
         button_row = QHBoxLayout()
-        save_btn = QPushButton("保存修改")
+        save_btn = QPushButton("保存会议名称/正文")
         close_btn = QPushButton("关闭")
         button_row.addWidget(save_btn)
         button_row.addWidget(close_btn)
         layout.addLayout(button_row)
 
-        def _play_selected():
+        transcript_dirty = False
+        suppress_transcript_dirty = False
+        poll_timer = QTimer(dialog)
+        poll_timer.setInterval(1800)
+        jobs_state: dict[str, object] = {
+            "jobs": list(jobs),
+            "latest_id": "",
+            "latest_status": "",
+        }
+        refined_state: dict[str, list[dict]] = {"segments": list(refined_segments)}
+        audio_state: dict[str, object] = {
+            "path": None,
+            "duration": 0.0,
+            "ratio": 0.0,
+            "dragging": False,
+            "user_stopped": False,
+        }
+
+        def _on_transcript_changed():
+            nonlocal transcript_dirty
+            if suppress_transcript_dirty:
+                return
+            transcript_dirty = True
+
+        transcript_edit.textChanged.connect(_on_transcript_changed)
+
+        def _dialog_alive() -> bool:
+            return dialog.isVisible()
+
+        def _set_summary_text():
+            current_jobs = jobs_state.get("jobs") or []
+            current_refined = refined_state.get("segments") or []
+            summary_view.setPlainText(
+                "\n".join(
+                    [
+                        f"status: {meeting.get('status', 'unknown')}",
+                        f"client_id: {meeting.get('client_id', 'unknown')}",
+                        f"created_at: {meeting.get('created_at', '')}",
+                        f"started_at: {meeting.get('started_at', '')}",
+                        f"ended_at: {meeting.get('ended_at', '')}",
+                        f"audio_segments: {len(audio_segments)}",
+                        f"transcription_jobs: {len(current_jobs)}",
+                        f"refined_segments: {len(current_refined)}",
+                    ]
+                )
+            )
+
+        def _is_meeting_ended() -> bool:
+            status = str(meeting.get("status") or "").strip().upper()
+            return status in {"MEETING_ENDING", "MEETING_ARCHIVED", "MEETING_READY"}
+
+        def _segment_item_text(seg: dict) -> str:
+            seq = int(seg.get("seq") or 0)
+            start_ts = float(seg.get("start_ts") or 0.0)
+            end_ts = float(seg.get("end_ts") or 0.0)
+            speaker = (seg.get("speaker_name") or seg.get("speaker_cluster_id") or "unknown").strip()
+            text = " ".join(str(seg.get("text") or "").split())
+            if len(text) > 80:
+                text = text[:80] + "..."
+            return f"#{seq:03d} [{self._format_mmss(start_ts)}-{self._format_mmss(end_ts)}] {speaker} | {text}"
+
+        def _get_selected_refined_segment() -> Optional[dict]:
+            item = refined_list.currentItem()
+            if item is None:
+                return None
+            seg = item.data(Qt.UserRole)
+            return seg if isinstance(seg, dict) else None
+
+        def _load_refined_editor(seg: Optional[dict]):
+            has_seg = isinstance(seg, dict) and bool(seg)
+            save_segment_text_btn.setEnabled(has_seg)
+            save_segment_speaker_btn.setEnabled(has_seg)
+            if not has_seg:
+                refined_segment_id_edit.setText("")
+                refined_time_label.setText("-")
+                refined_cluster_label.setText("-")
+                refined_speaker_edit.setText("")
+                refined_text_edit.setPlainText("")
+                save_segment_speaker_btn.setText("联动改名")
+                return
+
+            seg_id = str(seg.get("segment_ref_id") or "").strip()
+            start_ts = float(seg.get("start_ts") or 0.0)
+            end_ts = float(seg.get("end_ts") or 0.0)
+            cluster_id = (seg.get("speaker_cluster_id") or "").strip()
+            speaker_name = (seg.get("speaker_name") or "").strip()
+            if not speaker_name:
+                speaker_name = cluster_id or ""
+            refined_segment_id_edit.setText(seg_id)
+            refined_time_label.setText(f"{self._format_mmss(start_ts)} - {self._format_mmss(end_ts)}")
+            refined_cluster_label.setText(cluster_id or "(none)")
+            refined_speaker_edit.setText(speaker_name)
+            refined_text_edit.setPlainText((seg.get("text") or "").strip())
+            save_segment_speaker_btn.setText("联动改名" if cluster_id else "保存说话人(单段)")
+
+        def _set_refined_list(segments: list[dict], keep_selected: bool = True):
+            selected_id = ""
+            if keep_selected and refined_list.currentItem() is not None:
+                selected_seg = refined_list.currentItem().data(Qt.UserRole) or {}
+                selected_id = str(selected_seg.get("segment_ref_id") or "").strip()
+
+            refined_state["segments"] = list(segments)
+            refined_list.blockSignals(True)
+            refined_list.clear()
+            row_to_select = -1
+            for idx, seg in enumerate(segments):
+                row = QListWidgetItem(_segment_item_text(seg))
+                row.setData(Qt.UserRole, seg)
+                refined_list.addItem(row)
+                if selected_id and str(seg.get("segment_ref_id") or "").strip() == selected_id:
+                    row_to_select = idx
+            refined_list.blockSignals(False)
+            if row_to_select >= 0:
+                refined_list.setCurrentRow(row_to_select)
+            elif refined_list.count() > 0:
+                refined_list.setCurrentRow(0)
+            else:
+                _load_refined_editor(None)
+            _set_summary_text()
+
+        def _set_audio_ratio(ratio: float, from_user_drag: bool = False):
+            ratio_f = max(0.0, min(1.0, float(ratio or 0.0)))
+            audio_state["ratio"] = ratio_f
+            duration = float(audio_state.get("duration") or 0.0)
+            current_sec = duration * ratio_f
+            if not from_user_drag:
+                audio_slider.blockSignals(True)
+                audio_slider.setValue(int(ratio_f * 1000))
+                audio_slider.blockSignals(False)
+            audio_time_label.setText(f"{self._format_mmss(current_sec)} / {self._format_mmss(duration)}")
+
+        def _set_audio_file(seg: Optional[dict]) -> bool:
+            if not seg:
+                audio_state["path"] = None
+                audio_state["duration"] = 0.0
+                audio_state["ratio"] = 0.0
+                audio_file_label.setText("未选择音频")
+                audio_slider.setEnabled(False)
+                _set_audio_ratio(0.0)
+                return False
+
+            fp = self._resolve_audio_path(seg, meeting_id)
+            if not fp:
+                audio_state["path"] = None
+                audio_state["duration"] = 0.0
+                audio_state["ratio"] = 0.0
+                audio_file_label.setText("音频文件不存在")
+                audio_slider.setEnabled(False)
+                _set_audio_ratio(0.0)
+                return False
+
+            old_path = audio_state.get("path")
+            is_same_file = isinstance(old_path, Path) and old_path == fp
+            audio_state["path"] = fp
+            audio_state["duration"] = self._audio_duration_seconds(fp)
+            if not is_same_file:
+                audio_state["ratio"] = 0.0
+            audio_slider.setEnabled(True)
+            audio_file_label.setText(f"{fp.name} | {fp}")
+            _set_audio_ratio(float(audio_state.get("ratio") or 0.0))
+            return True
+
+        def _render_jobs(job_list: list[dict]):
+            jobs_state["jobs"] = list(job_list)
+            jobs_state["latest_id"] = ""
+            jobs_state["latest_status"] = ""
+            _set_summary_text()
+
+            if not job_list:
+                if _is_meeting_ended():
+                    transcription_status_label.setText("任务状态: 无（可手动启动）")
+                else:
+                    transcription_status_label.setText("任务状态: 无（会议未结束）")
+                transcription_progress.setValue(0)
+                transcription_job_label.setText("")
+                transcription_jobs_view.setPlainText("(无转写任务)")
+                run_stt_btn.setEnabled(_is_meeting_ended())
+                retry_stt_btn.setEnabled(False)
+                cancel_stt_btn.setEnabled(False)
+                poll_timer.stop()
+                return
+
+            lines: list[str] = []
+            for job in job_list[:8]:
+                jid = str(job.get("job_id") or "")[:16]
+                st = str(job.get("status") or "unknown")
+                p = int(job.get("progress_percent") or 0)
+                ct = str(job.get("created_at") or "")[:19].replace("T", " ")
+                lines.append(f"{ct} | {jid}... | {st} | {p}%")
+            transcription_jobs_view.setPlainText("\n".join(lines))
+
+            latest = job_list[0]
+            latest_id = str(latest.get("job_id") or "")
+            latest_status = str(latest.get("status") or "unknown").strip().lower()
+            latest_progress = int(latest.get("progress_percent") or 0)
+            latest_progress = max(0, min(100, latest_progress))
+            if latest_status == "success":
+                latest_progress = 100
+
+            jobs_state["latest_id"] = latest_id
+            jobs_state["latest_status"] = latest_status
+
+            transcription_status_label.setText(f"任务状态: {latest_status}")
+            transcription_progress.setValue(latest_progress)
+            extra = ""
+            if latest_status == "failed":
+                extra = f" | 错误: {str(latest.get('error_message') or 'unknown')[:60]}"
+            elif latest_status == "success":
+                out = str(latest.get("output_path") or "").strip()
+                extra = f" | 输出: {Path(out).name}" if out else ""
+            transcription_job_label.setText(f"最新任务: {latest_id[:24]}...{extra}")
+
+            running = latest_status in {"queued", "running"}
+            can_cancel = latest_status == "queued" and bool(latest_id)
+            if running:
+                if not poll_timer.isActive():
+                    poll_timer.start()
+            else:
+                poll_timer.stop()
+            ended = _is_meeting_ended()
+            run_stt_btn.setEnabled(ended and (not running))
+            retry_stt_btn.setEnabled(ended and (not running))
+            cancel_stt_btn.setEnabled(can_cancel)
+
+        async def _refresh_refined_data(update_transcript: bool, keep_selected: bool = True):
+            nonlocal suppress_transcript_dirty
+            if not _dialog_alive():
+                return
+
+            refined_result = await self._get_v2_json(f"/v2/meetings/{meeting_id}/refined")
+            if not refined_result.get("ok"):
+                status_label.setText(f"读取分段失败: {refined_result.get('error')}")
+                return
+            segments = refined_result.get("segments", []) or []
+            _set_refined_list(segments, keep_selected=keep_selected)
+
+            if not update_transcript:
+                return
+            latest_text = self._build_refined_transcript(segments).strip()
+            if not latest_text:
+                return
+            if transcript_dirty:
+                status_label.setText("分段已更新，但正文已人工编辑，未自动覆盖。")
+                return
+            current = transcript_edit.toPlainText().strip()
+            if current == latest_text:
+                return
+            suppress_transcript_dirty = True
+            transcript_edit.setPlainText(latest_text)
+            suppress_transcript_dirty = False
+            status_label.setText("转写分段已同步到正文。")
+
+        async def _refresh_transcription_jobs(refresh_refined: bool):
+            if not _dialog_alive():
+                return
+            jobs_result = await self._get_v2_json(f"/v2/meetings/{meeting_id}/transcription")
+            if not jobs_result.get("ok"):
+                transcription_status_label.setText(f"任务状态: 读取失败({jobs_result.get('error')})")
+                return
+            current_jobs = jobs_result.get("jobs", []) or []
+            _render_jobs(current_jobs)
+            if refresh_refined and current_jobs:
+                latest_status = str(current_jobs[0].get("status") or "").strip().lower()
+                if latest_status == "success":
+                    await _refresh_refined_data(update_transcript=True)
+
+        async def _trigger_manual_stt(from_retry: bool = False):
+            if not _is_meeting_ended():
+                status_label.setText("会议未结束，不能启动手动STT。")
+                run_stt_btn.setEnabled(False)
+                retry_stt_btn.setEnabled(False)
+                return
+            run_stt_btn.setEnabled(False)
+            retry_stt_btn.setEnabled(False)
+            action_name = "重试STT" if from_retry else "手动STT"
+            status_label.setText(f"正在提交{action_name}任务...")
+            model_name = (self.settings.get("stt_model_size") or "small").strip() or "small"
+            result = await self._post_v2_json(
+                f"/v2/meetings/{meeting_id}/transcription:run",
+                {"model": model_name},
+            )
+            if result.get("ok"):
+                jid = str(result.get("job_id") or "")
+                self._log(f"[会议] {action_name}任务已入队: {jid}")
+                status_label.setText(f"{action_name}已入队: {jid[:24]}...")
+            else:
+                err = str(result.get("error") or "unknown")
+                if err == "job_in_progress":
+                    status_label.setText("已有任务在执行中，已切换到进度跟踪。")
+                elif err == "meeting_not_ended":
+                    status_label.setText("会议未结束，不能启动手动STT。")
+                else:
+                    status_label.setText(f"{action_name}失败: {err}")
+            await _refresh_transcription_jobs(refresh_refined=True)
+
+        async def _cancel_latest_job():
+            latest_id = str(jobs_state.get("latest_id") or "").strip()
+            latest_status = str(jobs_state.get("latest_status") or "").strip().lower()
+            if not latest_id:
+                status_label.setText("没有可取消的任务。")
+                return
+            if latest_status != "queued":
+                status_label.setText(f"仅支持取消排队任务，当前状态: {latest_status}")
+                return
+
+            cancel_stt_btn.setEnabled(False)
+            status_label.setText(f"正在取消任务: {latest_id[:24]}...")
+            result = await self._post_v2_json(f"/v2/transcription/{latest_id}:cancel", {})
+            if result.get("ok"):
+                status_label.setText(f"已取消任务: {latest_id[:24]}...")
+                self._log(f"[会议] 已取消STT任务: {latest_id}")
+            else:
+                status_label.setText(f"取消失败: {result.get('error')}")
+            await _refresh_transcription_jobs(refresh_refined=False)
+
+        async def _save_selected_segment_text():
+            nonlocal transcript_dirty
+            seg = _get_selected_refined_segment()
+            if not seg:
+                status_label.setText("请先选择要修改的分段。")
+                return
+            seg_id = str(seg.get("segment_ref_id") or "").strip()
+            text = refined_text_edit.toPlainText().strip()
+            if not text:
+                status_label.setText("分段文本不能为空。")
+                return
+
+            save_segment_text_btn.setEnabled(False)
+            result = await self._patch_v2_json(
+                f"/v2/meetings/{meeting_id}/refined/{seg_id}",
+                {"text": text},
+            )
+            save_segment_text_btn.setEnabled(True)
+            if not result.get("ok"):
+                status_label.setText(f"保存分段文本失败: {result.get('error')}")
+                return
+
+            transcript_dirty = False
+            status_label.setText("分段文本已保存。")
+            await _refresh_refined_data(update_transcript=True, keep_selected=True)
+
+        async def _save_selected_segment_speaker():
+            nonlocal transcript_dirty
+            seg = _get_selected_refined_segment()
+            if not seg:
+                status_label.setText("请先选择要修改的分段。")
+                return
+            new_name = refined_speaker_edit.text().strip()
+            if not new_name:
+                status_label.setText("说话人名称不能为空。")
+                return
+
+            seg_id = str(seg.get("segment_ref_id") or "").strip()
+            cluster_id = (seg.get("speaker_cluster_id") or "").strip()
+            save_segment_speaker_btn.setEnabled(False)
+            if cluster_id:
+                result = await self._patch_v2_json(
+                    f"/v2/meetings/{meeting_id}/speakers/{cluster_id}",
+                    {
+                        "speaker_name": new_name,
+                        "changed_by": "windows-gui",
+                        "notes": f"segment_ref_id={seg_id}",
+                    },
+                )
+            else:
+                result = await self._patch_v2_json(
+                    f"/v2/meetings/{meeting_id}/refined/{seg_id}",
+                    {"speaker_name": new_name, "changed_by": "windows-gui"},
+                )
+            save_segment_speaker_btn.setEnabled(True)
+            if not result.get("ok"):
+                status_label.setText(f"保存说话人失败: {result.get('error')}")
+                return
+
+            transcript_dirty = False
+            if cluster_id:
+                updated_count = result.get("segments_updated")
+                status_label.setText(f"说话人联动改名已保存，影响 {updated_count} 段。")
+            else:
+                status_label.setText("单段说话人名称已保存。")
+            await _refresh_refined_data(update_transcript=True, keep_selected=True)
+
+        def _on_audio_progress_from_worker(ratio: float):
+            QTimer.singleShot(0, lambda r=ratio: _on_audio_progress_ui(r))
+
+        def _on_audio_progress_ui(ratio: float):
+            if not _dialog_alive():
+                return
+            if bool(audio_state.get("dragging")):
+                return
+            _set_audio_ratio(ratio)
+
+        def _on_audio_finished_from_worker():
+            QTimer.singleShot(0, _on_audio_finished_ui)
+
+        def _on_audio_finished_ui():
+            if not _dialog_alive():
+                return
+            if bool(audio_state.get("user_stopped")):
+                audio_state["user_stopped"] = False
+                return
+            _set_audio_ratio(1.0)
+            fp = audio_state.get("path")
+            if isinstance(fp, Path):
+                status_label.setText(f"播放完成: {fp.name}")
+
+        def _play_selected(start_ratio: Optional[float] = None):
             current = audio_list.currentItem()
             if current is None:
                 status_label.setText("请选择一段音频")
                 return
+
             seg = current.data(Qt.UserRole) or {}
-            fp = self._resolve_audio_path(seg, meeting_id)
-            if not fp:
+            if not _set_audio_file(seg):
                 status_label.setText("音频文件不存在或路径不可用")
                 return
-            self._play_audio_file(fp)
-            status_label.setText(f"播放中: {fp.name}")
+            fp = audio_state.get("path")
+            if not isinstance(fp, Path):
+                status_label.setText("音频路径无效")
+                return
+
+            ratio = float(audio_state.get("ratio") or 0.0) if start_ratio is None else float(start_ratio)
+            ratio = max(0.0, min(0.999, ratio))
+            _set_audio_ratio(ratio)
+            audio_state["user_stopped"] = False
+
+            self._play_audio_file(
+                fp,
+                start_ratio=ratio,
+                on_progress=_on_audio_progress_from_worker,
+                on_finished=_on_audio_finished_from_worker,
+            )
+            duration = float(audio_state.get("duration") or 0.0)
+            status_label.setText(f"播放中: {fp.name} ({self._format_mmss(duration)})")
 
         def _stop_play():
+            audio_state["user_stopped"] = True
             self._stop_audio_playback()
             status_label.setText("已停止播放")
+
+        def _on_audio_selection_changed():
+            current = audio_list.currentItem()
+            seg = current.data(Qt.UserRole) if current is not None else None
+            _set_audio_file(seg)
+
+        def _on_audio_slider_pressed():
+            audio_state["dragging"] = True
+
+        def _on_audio_slider_released():
+            audio_state["dragging"] = False
+            ratio = float(audio_slider.value()) / 1000.0
+            _set_audio_ratio(ratio, from_user_drag=True)
+            if isinstance(audio_state.get("path"), Path):
+                _play_selected(start_ratio=ratio)
+
+        def _on_audio_slider_changed(v: int):
+            if bool(audio_state.get("dragging")):
+                _set_audio_ratio(float(v) / 1000.0, from_user_drag=True)
 
         async def _regen_title():
             src = transcript_edit.toPlainText().strip()
@@ -1134,14 +1716,43 @@ class MainWindow(QMainWindow):
                 status_label.setText(f"保存失败: {result.get('error')}")
             save_btn.setEnabled(True)
 
-        play_btn.clicked.connect(_play_selected)
+        play_btn.clicked.connect(lambda: _play_selected())
         stop_btn.clicked.connect(_stop_play)
+        run_stt_btn.clicked.connect(lambda: asyncio.create_task(_trigger_manual_stt(False)))
+        retry_stt_btn.clicked.connect(lambda: asyncio.create_task(_trigger_manual_stt(True)))
+        cancel_stt_btn.clicked.connect(lambda: asyncio.create_task(_cancel_latest_job()))
+        refresh_stt_btn.clicked.connect(lambda: asyncio.create_task(_refresh_transcription_jobs(refresh_refined=True)))
         gen_title_btn.clicked.connect(lambda: asyncio.create_task(_regen_title()))
         save_btn.clicked.connect(lambda: asyncio.create_task(_save_changes()))
         close_btn.clicked.connect(dialog.accept)
         audio_list.itemDoubleClicked.connect(lambda _: _play_selected())
+        audio_list.currentItemChanged.connect(lambda *_: _on_audio_selection_changed())
+        audio_slider.sliderPressed.connect(_on_audio_slider_pressed)
+        audio_slider.sliderReleased.connect(_on_audio_slider_released)
+        audio_slider.valueChanged.connect(_on_audio_slider_changed)
+        refined_list.currentItemChanged.connect(lambda *_: _load_refined_editor(_get_selected_refined_segment()))
+        save_segment_text_btn.clicked.connect(lambda: asyncio.create_task(_save_selected_segment_text()))
+        save_segment_speaker_btn.clicked.connect(lambda: asyncio.create_task(_save_selected_segment_speaker()))
+        refresh_refined_btn.clicked.connect(lambda: asyncio.create_task(_refresh_refined_data(update_transcript=False)))
+        poll_timer.timeout.connect(lambda: asyncio.create_task(_refresh_transcription_jobs(refresh_refined=True)))
+
+        _set_refined_list(refined_segments, keep_selected=False)
+        _on_audio_selection_changed()
+        _render_jobs(jobs)
+        if jobs:
+            latest_status = str(jobs[0].get("status") or "").strip().lower()
+            if latest_status in {"queued", "running"} and not poll_timer.isActive():
+                poll_timer.start()
+            elif latest_status == "success":
+                await _refresh_refined_data(update_transcript=True)
+        else:
+            ended = _is_meeting_ended()
+            run_stt_btn.setEnabled(ended)
+            retry_stt_btn.setEnabled(ended)
+            cancel_stt_btn.setEnabled(False)
 
         dialog.exec()
+        poll_timer.stop()
         self._stop_audio_playback()
 
     async def _refresh_meeting_history(self):

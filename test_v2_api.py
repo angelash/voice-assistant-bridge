@@ -292,6 +292,32 @@ class TestV2MeetingAPI(unittest.TestCase):
         self.assertFalse(body["ok"])
         self.assertIn("after_seq", body["error"])
 
+    def test_handle_patch_meeting_meta(self):
+        """Test PATCH /v2/meetings/{meeting_id} metadata update."""
+        meeting = self.store.create_meeting(client_id="test-client")
+
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        request.json = AsyncMock(
+            return_value={
+                "meeting_name": "周会-需求评审",
+                "transcript_text": "这是转写正文",
+                "meta": {"custom_tag": "qa"},
+            }
+        )
+
+        response = asyncio.run(self.api.handle_patch_meeting(request))
+        self.assertEqual(response.status, 200)
+        body = json.loads(response.text)
+        self.assertTrue(body["ok"])
+
+        updated = self.store.get_meeting(meeting["meeting_id"])
+        self.assertIsNotNone(updated)
+        meta = json.loads(updated["meta_json"])
+        self.assertEqual(meta.get("meeting_name"), "周会-需求评审")
+        self.assertEqual(meta.get("transcript_text"), "这是转写正文")
+        self.assertEqual(meta.get("custom_tag"), "qa")
+
 
 class TestAudioUpload(unittest.TestCase):
     """Test audio upload with checksum verification"""
@@ -1091,6 +1117,74 @@ class TestM4SpeakerDiarization(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual(len(body["segments"]), 1)
         self.assertEqual(body["segments"][0]["text"], "Test")
+
+    def test_api_handle_patch_refined_segment_text(self):
+        """Test PATCH /v2/meetings/{meeting_id}/refined/{segment_ref_id} text update."""
+        meeting = self.store.create_meeting(client_id="test-client")
+        seg = self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            start_ts=0.0,
+            end_ts=5.0,
+            text="Old text",
+            speaker_cluster_id="speaker_0",
+        )
+
+        request = MagicMock()
+        request.match_info = {
+            "meeting_id": meeting["meeting_id"],
+            "segment_ref_id": seg["segment_ref_id"],
+        }
+        request.json = AsyncMock(return_value={"text": "New text"})
+
+        response = asyncio.run(self.api.handle_patch_refined_segment(request))
+        self.assertEqual(response.status, 200)
+        body = json.loads(response.text)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["changed_fields"]["text"])
+        self.assertEqual(body["updated_segment"]["text"], "New text")
+
+        updated = self.store.get_refined_segment(seg["segment_ref_id"])
+        self.assertEqual(updated["text"], "New text")
+
+    def test_api_handle_patch_refined_segment_linked_speaker_rename(self):
+        """Test PATCH refined speaker_name triggers linked cluster rename."""
+        meeting = self.store.create_meeting(client_id="test-client")
+        seg1 = self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=1,
+            start_ts=0.0,
+            end_ts=5.0,
+            text="A",
+            speaker_cluster_id="speaker_0",
+        )
+        self.store.create_refined_segment(
+            meeting_id=meeting["meeting_id"],
+            seq=2,
+            start_ts=5.0,
+            end_ts=10.0,
+            text="B",
+            speaker_cluster_id="speaker_0",
+        )
+
+        request = MagicMock()
+        request.match_info = {
+            "meeting_id": meeting["meeting_id"],
+            "segment_ref_id": seg1["segment_ref_id"],
+        }
+        request.json = AsyncMock(return_value={"speaker_name": "Alice", "changed_by": "tester"})
+
+        response = asyncio.run(self.api.handle_patch_refined_segment(request))
+        self.assertEqual(response.status, 200)
+        body = json.loads(response.text)
+        self.assertTrue(body["ok"])
+        self.assertTrue(body["changed_fields"]["speaker_name"])
+        self.assertTrue(body["speaker_rename"]["linked"])
+        self.assertEqual(body["speaker_rename"]["updated_count"], 2)
+
+        segments = self.store.get_refined_segments(meeting["meeting_id"])
+        names = [s.get("speaker_name") for s in segments if s.get("speaker_cluster_id") == "speaker_0"]
+        self.assertEqual(names, ["Alice", "Alice"])
         
     def test_api_handle_get_speakers(self):
         """Test GET /v2/meetings/{meeting_id}/speakers endpoint"""

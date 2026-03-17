@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import logging
 import os
 from pathlib import Path
@@ -898,6 +899,120 @@ class V2MeetingAPI:
             "count": len(segments),
         })
 
+    async def handle_patch_refined_segment(self, request: web.Request) -> web.Response:
+        """PATCH /v2/meetings/{meeting_id}/refined/{segment_ref_id} - Update refined segment text/speaker.
+
+        Supports:
+        - text: update only this segment text
+        - speaker_name: if segment has speaker_cluster_id, rename whole speaker cluster
+          (linked update); otherwise update only this segment speaker_name.
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        segment_ref_id = request.match_info.get("segment_ref_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+        if not segment_ref_id:
+            return web.json_response({"ok": False, "error": "segment_ref_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        seg = self.store.get_refined_segment(segment_ref_id)
+        if not seg:
+            return web.json_response({"ok": False, "error": "segment_not_found"}, status=404)
+        if seg.get("meeting_id") != meeting_id:
+            return web.json_response({
+                "ok": False,
+                "error": "segment_meeting_mismatch",
+            }, status=409)
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+        if not isinstance(data, dict):
+            return web.json_response({"ok": False, "error": "invalid_payload"}, status=400)
+
+        text = data.get("text")
+        speaker_name = data.get("speaker_name")
+        has_text = text is not None
+        has_speaker = speaker_name is not None
+        if not has_text and not has_speaker:
+            return web.json_response({"ok": False, "error": "no_fields_to_update"}, status=400)
+
+        changed_fields: dict[str, Any] = {}
+
+        if has_text:
+            text_value = str(text or "").strip()
+            if not text_value:
+                return web.json_response({"ok": False, "error": "text_required"}, status=400)
+            self.store.update_refined_segment(segment_ref_id, text=text_value)
+            changed_fields["text"] = True
+
+        rename_info: dict[str, Any] | None = None
+        if has_speaker:
+            new_name = str(speaker_name or "").strip()
+            if not new_name:
+                return web.json_response({"ok": False, "error": "speaker_name_required"}, status=400)
+            cluster_id = (seg.get("speaker_cluster_id") or "").strip()
+            old_name = seg.get("speaker_name")
+            if cluster_id:
+                updated_count = self.store.update_speaker_for_cluster(
+                    meeting_id=meeting_id,
+                    speaker_cluster_id=cluster_id,
+                    speaker_name=new_name,
+                    source=SPEAKER_SOURCE_MANUAL,
+                )
+                self.store.create_speaker_mapping(
+                    meeting_id=meeting_id,
+                    speaker_cluster_id=cluster_id,
+                    old_name=old_name,
+                    new_name=new_name,
+                    source=SPEAKER_SOURCE_MANUAL,
+                    changed_by=data.get("changed_by"),
+                    notes=data.get("notes"),
+                )
+                rename_info = {
+                    "linked": True,
+                    "speaker_cluster_id": cluster_id,
+                    "updated_count": updated_count,
+                }
+                event = self.store.append_event(
+                    meeting_id=meeting_id,
+                    source="api",
+                    event_type=EVT_SPEAKER_RENAMED,
+                    payload={
+                        "speaker_cluster_id": cluster_id,
+                        "old_name": old_name,
+                        "new_name": new_name,
+                        "updated_count": updated_count,
+                    },
+                )
+                await self.event_hub.publish(build_event_envelope(event))
+            else:
+                self.store.update_refined_segment(
+                    segment_ref_id,
+                    speaker_name=new_name,
+                    speaker_name_source=SPEAKER_SOURCE_MANUAL,
+                )
+                rename_info = {
+                    "linked": False,
+                    "updated_count": 1,
+                }
+            changed_fields["speaker_name"] = True
+
+        updated = self.store.get_refined_segment(segment_ref_id) or seg
+
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "segment_ref_id": segment_ref_id,
+            "updated_segment": updated,
+            "changed_fields": changed_fields,
+            "speaker_rename": rename_info,
+        })
+
     async def handle_get_speakers(self, request: web.Request) -> web.Response:
         """GET /v2/meetings/{meeting_id}/speakers - Get speakers for a meeting.
         
@@ -1436,6 +1551,7 @@ class V2MeetingAPI:
         app.router.add_get("/v2/transcription/queue", self.handle_list_transcription_queue)
         # M4 routes - Refined segments and speaker management
         app.router.add_get("/v2/meetings/{meeting_id}/refined", self.handle_get_refined_segments)
+        app.router.add_patch("/v2/meetings/{meeting_id}/refined/{segment_ref_id}", self.handle_patch_refined_segment)
         app.router.add_get("/v2/meetings/{meeting_id}/speakers", self.handle_get_speakers)
         app.router.add_patch("/v2/meetings/{meeting_id}/speakers/{speaker_cluster_id}", self.handle_rename_speaker)
         app.router.add_get("/v2/meetings/{meeting_id}/speakers/history", self.handle_get_speaker_history)
