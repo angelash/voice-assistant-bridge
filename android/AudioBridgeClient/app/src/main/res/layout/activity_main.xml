@@ -1,41 +1,137 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="match_parent">
+    android:layout_height="match_parent"
+    android:background="@drawable/bg_visual_stage"
+    android:orientation="vertical"
+    android:padding="12dp">
 
     <LinearLayout
+        android:id="@+id/mainTopBar"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="16dp">
+        android:layout_height="52dp"
+        android:background="@drawable/bg_visual_panel"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="10dp"
+        android:paddingEnd="8dp">
 
         <TextView
             android:id="@+id/titleText"
-            android:layout_width="match_parent"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Voice Bridge Client"
-            android:textSize="20sp"
+            android:text="Voice Bridge"
+            android:textColor="#ECF3FF"
+            android:textSize="14sp"
             android:textStyle="bold" />
 
         <TextView
             android:id="@+id/statusText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:background="@drawable/bg_visual_chip"
+            android:ellipsize="end"
+            android:gravity="center_vertical"
+            android:maxLines="1"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
             android:text="Idle"
-            android:textColor="#333333" />
+            android:textColor="#E8F1FF"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/mainDebugPanelToggleButton"
+            android:layout_width="84dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:backgroundTint="#29303C"
+            android:minWidth="0dp"
+            android:text="&#x8BCA;&#x65AD; &#x25BE;"
+            android:textAllCaps="false"
+            android:textColor="#D7DEEA"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/visualModeButton"
+            android:layout_width="94dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:backgroundTint="#2A6BF2"
+            android:minWidth="0dp"
+            android:text="&#x8868;&#x60C5;&#x6A21;&#x5F0F;"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/mainMeetingQuickBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_visual_panel"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="10dp"
+        android:paddingTop="8dp"
+        android:paddingEnd="8dp"
+        android:paddingBottom="8dp">
+
+        <Switch
+            android:id="@+id/meetingModeSwitch"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="&#x4F1A;&#x8BAE;&#x6A21;&#x5F0F;"
+            android:textColor="#D7E2F6"
+            android:textSize="13sp" />
+
+        <TextView
+            android:id="@+id/meetingStatusText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:ellipsize="end"
+            android:maxLines="1"
+            android:text="Idle"
+            android:textColor="#BFD2EF"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/mainMeetingPanelToggleButton"
+            android:layout_width="84dp"
+            android:layout_height="34dp"
+            android:layout_marginStart="6dp"
+            android:backgroundTint="#34425C"
+            android:minWidth="0dp"
+            android:text="&#x8BE6;&#x60C5; &#x25BE;"
+            android:textAllCaps="false"
+            android:textColor="#E6EEFF"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/mainDebugPanelContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_visual_panel"
+        android:orientation="vertical"
+        android:padding="10dp"
+        android:visibility="gone">
 
         <TextView
             android:id="@+id/routeInfoText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:background="#F5F5F5"
+            android:background="#152133"
             android:fontFamily="monospace"
-            android:padding="10dp"
+            android:padding="8dp"
             android:text="(route info)"
-            android:textColor="#555555"
-            android:textSize="12sp" />
+            android:textColor="#BFD2EF"
+            android:textSize="11sp" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -46,79 +142,62 @@
             <EditText
                 android:id="@+id/sessionIdInput"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="42dp"
                 android:layout_weight="1"
+                android:background="#1B2532"
+                android:gravity="center_vertical|start"
                 android:hint="Session ID"
-                android:inputType="text" />
+                android:inputType="text"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:textColor="#F2F6FF"
+                android:textColorHint="#95A9C7" />
 
             <EditText
                 android:id="@+id/clientIdInput"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="42dp"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
+                android:background="#1B2532"
+                android:gravity="center_vertical|start"
                 android:hint="Client ID"
-                android:inputType="text" />
+                android:inputType="text"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:textColor="#F2F6FF"
+                android:textColorHint="#95A9C7" />
         </LinearLayout>
-
-        <EditText
-            android:id="@+id/textInput"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:hint="Type text for bridge"
-            android:inputType="textMultiLine"
-            android:maxLines="4"
-            android:minLines="2" />
 
         <Switch
             android:id="@+id/speakSwitch"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
             android:checked="true"
-            android:text="Speak assistant messages (TTS)" />
+            android:text="Speak assistant messages (TTS)"
+            android:textColor="#D7E2F6" />
+    </LinearLayout>
 
-        <!-- Meeting Mode Section -->
-        <TextView
-            android:id="@+id/meetingSectionTitle"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="Meeting Mode"
-            android:textSize="16sp"
-            android:textStyle="bold" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Switch
-                android:id="@+id/meetingModeSwitch"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Enable Meeting Mode" />
-
-            <TextView
-                android:id="@+id/meetingStatusText"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Idle"
-                android:textColor="#666666"
-                android:textSize="12sp" />
-        </LinearLayout>
+    <LinearLayout
+        android:id="@+id/mainMeetingPanelContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_visual_panel"
+        android:orientation="vertical"
+        android:padding="10dp"
+        android:visibility="gone">
 
         <TextView
             android:id="@+id/meetingInfoText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="#E8F5E9"
+            android:background="#152133"
             android:fontFamily="monospace"
             android:padding="8dp"
             android:text="(meeting info)"
-            android:textColor="#2E7D32"
+            android:textColor="#BFD2EF"
             android:textSize="11sp" />
 
         <LinearLayout
@@ -129,39 +208,54 @@
             android:orientation="horizontal">
 
             <TextView
+                android:id="@+id/meetingSectionTitle"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Meeting History (Local + Server)"
-                android:textSize="14sp"
+                android:text="Meeting History"
+                android:textColor="#CCE0FF"
+                android:textSize="13sp"
                 android:textStyle="bold" />
 
             <Button
                 android:id="@+id/refreshMeetingHistoryButton"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Refresh" />
+                android:layout_width="74dp"
+                android:layout_height="34dp"
+                android:backgroundTint="#364155"
+                android:minWidth="0dp"
+                android:text="Refresh"
+                android:textAllCaps="false"
+                android:textColor="#E7ECF6"
+                android:textSize="12sp" />
         </LinearLayout>
 
-        <TextView
-            android:id="@+id/meetingHistoryText"
+        <ScrollView
+            android:id="@+id/meetingHistoryScroll"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="#ECEFF1"
-            android:fontFamily="monospace"
-            android:padding="8dp"
-            android:text="(no meeting history)"
-            android:textColor="#37474F"
-            android:textSize="11sp" />
+            android:layout_height="120dp"
+            android:layout_marginTop="6dp"
+            android:background="#101925"
+            android:fillViewport="true">
 
-        <!-- Image Upload Section (M5) -->
+            <TextView
+                android:id="@+id/meetingHistoryText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:padding="8dp"
+                android:text="(no meeting history)"
+                android:textColor="#9DB2D0"
+                android:textSize="11sp" />
+        </ScrollView>
+
         <TextView
             android:id="@+id/imageSectionTitle"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
+            android:layout_marginTop="8dp"
             android:text="Meeting Images"
-            android:textSize="16sp"
+            android:textColor="#CCE0FF"
+            android:textSize="13sp"
             android:textStyle="bold"
             android:visibility="gone" />
 
@@ -169,100 +263,164 @@
             android:id="@+id/imageButtonContainer"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
             android:orientation="horizontal"
             android:visibility="gone">
 
             <Button
                 android:id="@+id/captureImageButton"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="36dp"
                 android:layout_weight="1"
-                android:text="📷 Capture Photo" />
+                android:backgroundTint="#2B66D8"
+                android:text="Capture Photo"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp" />
 
             <Button
                 android:id="@+id/selectImageButton"
                 android:layout_width="0dp"
-                android:layout_height="wrap_content"
+                android:layout_height="36dp"
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
-                android:text="📁 Select Image" />
+                android:backgroundTint="#364155"
+                android:text="Select Image"
+                android:textAllCaps="false"
+                android:textColor="#E7ECF6"
+                android:textSize="12sp" />
         </LinearLayout>
 
         <TextView
             android:id="@+id/imageUploadStatusText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="#FFF3E0"
+            android:layout_marginTop="6dp"
+            android:background="#1A2B40"
             android:fontFamily="monospace"
             android:padding="8dp"
             android:text="(image upload status)"
-            android:textColor="#E65100"
+            android:textColor="#9DB2D0"
             android:textSize="11sp"
             android:visibility="gone" />
+    </LinearLayout>
 
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/sendTextButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Send Text" />
-
-            <Button
-                android:id="@+id/sttButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="Speak To Text" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:id="@+id/longReplyChoiceContainer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:orientation="horizontal"
-            android:visibility="gone">
-
-            <Button
-                android:id="@+id/longReplySummaryButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="简报" />
-
-            <Button
-                android:id="@+id/longReplyOriginalButton"
-                android:layout_width="0dp"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:text="原文" />
-        </LinearLayout>
+    <LinearLayout
+        android:id="@+id/longReplyChoiceContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
 
         <Button
-            android:id="@+id/visualModeButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="Enter Visual Stage" />
+            android:id="@+id/longReplySummaryButton"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_weight="1"
+            android:backgroundTint="#2E5CB8"
+            android:text="&#x7B80;&#x62A5;"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/longReplyOriginalButton"
+            android:layout_width="0dp"
+            android:layout_height="36dp"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:backgroundTint="#3D4554"
+            android:text="&#x539F;&#x6587;"
+            android:textAllCaps="false"
+            android:textColor="#EAF1FF" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/mainChatCard"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_marginTop="8dp"
+        android:layout_weight="1"
+        android:background="@drawable/bg_visual_stage_panel"
+        android:orientation="vertical"
+        android:padding="10dp">
 
         <TextView
-            android:id="@+id/textResultView"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:background="#F5F5F5"
-            android:fontFamily="monospace"
-            android:padding="10dp"
-            android:text="(text result)"
-            android:textColor="#333333"
-            android:textSize="12sp" />
+            android:text="&#x5BF9;&#x8BDD;&#x65E5;&#x5FD7;"
+            android:textColor="#CCE0FF"
+            android:textSize="13sp"
+            android:textStyle="bold" />
 
+        <ScrollView
+            android:id="@+id/textResultScroll"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_marginTop="6dp"
+            android:layout_weight="1"
+            android:background="#101925"
+            android:fillViewport="true">
+
+            <TextView
+                android:id="@+id/textResultView"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:padding="10dp"
+                android:text="(text result)"
+                android:textColor="#D7E4F8"
+                android:textSize="12sp" />
+        </ScrollView>
     </LinearLayout>
-</ScrollView>
+
+    <LinearLayout
+        android:id="@+id/mainBottomBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:background="@drawable/bg_visual_panel"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:padding="8dp">
+
+        <EditText
+            android:id="@+id/textInput"
+            android:layout_width="0dp"
+            android:layout_height="42dp"
+            android:layout_weight="1"
+            android:background="#1B2532"
+            android:gravity="center_vertical|start"
+            android:hint="Type text for bridge"
+            android:inputType="textMultiLine"
+            android:maxLines="2"
+            android:minHeight="42dp"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:textColor="#F2F6FF"
+            android:textColorHint="#95A9C7" />
+
+        <Button
+            android:id="@+id/sendTextButton"
+            android:layout_width="88dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="8dp"
+            android:backgroundTint="#2A6BF2"
+            android:text="Send"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/sttButton"
+            android:layout_width="112dp"
+            android:layout_height="42dp"
+            android:layout_marginStart="8dp"
+            android:backgroundTint="#215D9A"
+            android:text="Speak To Text"
+            android:textAllCaps="false"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
+    </LinearLayout>
+
+</LinearLayout>

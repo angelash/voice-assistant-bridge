@@ -150,6 +150,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var sendTextButton: Button
     private lateinit var sttButton: Button
     private lateinit var visualModeButton: Button
+    private lateinit var mainDebugPanelToggleButton: Button
+    private lateinit var mainMeetingPanelToggleButton: Button
+    private lateinit var mainDebugPanelContainer: LinearLayout
+    private lateinit var mainMeetingPanelContainer: LinearLayout
     private lateinit var longReplyChoiceContainer: LinearLayout
     private lateinit var longReplySummaryButton: Button
     private lateinit var longReplyOriginalButton: Button
@@ -185,6 +189,8 @@ class MainActivity : AppCompatActivity() {
     private var pendingUploadMeetingId: String? = null
     private var pendingFinalizeMeetingId: String? = null
     private var activeMeetingBaseUrl: String? = null
+    private var isDebugPanelExpanded = false
+    private var isMeetingPanelExpanded = false
     private var suppressMeetingSwitchCallback = false
     private val meetingToggleInFlight = AtomicBoolean(false)
     private var lastMeetingHistoryRefreshMs = 0L
@@ -368,6 +374,10 @@ class MainActivity : AppCompatActivity() {
         sendTextButton = findViewById(R.id.sendTextButton)
         sttButton = findViewById(R.id.sttButton)
         visualModeButton = findViewById(R.id.visualModeButton)
+        mainDebugPanelToggleButton = findViewById(R.id.mainDebugPanelToggleButton)
+        mainMeetingPanelToggleButton = findViewById(R.id.mainMeetingPanelToggleButton)
+        mainDebugPanelContainer = findViewById(R.id.mainDebugPanelContainer)
+        mainMeetingPanelContainer = findViewById(R.id.mainMeetingPanelContainer)
         longReplyChoiceContainer = findViewById(R.id.longReplyChoiceContainer)
         longReplySummaryButton = findViewById(R.id.longReplySummaryButton)
         longReplyOriginalButton = findViewById(R.id.longReplyOriginalButton)
@@ -394,9 +404,18 @@ class MainActivity : AppCompatActivity() {
         initTts()
         loadPrefs()
         refreshRouteInfo()
+        applyMainPanelExpansionStates()
         speakSwitch.setOnCheckedChangeListener { _, isChecked ->
             savePrefs()
             appendResult("[system] TTS ${if (isChecked) "enabled" else "disabled"}")
+        }
+        mainDebugPanelToggleButton.setOnClickListener {
+            isDebugPanelExpanded = !isDebugPanelExpanded
+            applyMainPanelExpansionStates()
+        }
+        mainMeetingPanelToggleButton.setOnClickListener {
+            isMeetingPanelExpanded = !isMeetingPanelExpanded
+            applyMainPanelExpansionStates()
         }
         refreshMeetingHistoryButton.setOnClickListener {
             refreshMeetingHistoryUI(force = true)
@@ -464,6 +483,7 @@ class MainActivity : AppCompatActivity() {
         ConversationUiState.setActiveView(VIEW_ID)
         setLongReplyChoiceButtonsVisible(isPendingLongReplyActive())
         refreshRouteInfo()
+        applyMainPanelExpansionStates()
         updateMeetingStatusUI()
     }
 
@@ -647,6 +667,27 @@ class MainActivity : AppCompatActivity() {
             appendLine("  lan base: $LAN_BASE_URL")
             appendLine("  public base: $PUBLIC_BASE_URL")
         }
+    }
+
+    private fun applyMainPanelExpansionStates() {
+        mainDebugPanelContainer.visibility = if (isDebugPanelExpanded) View.VISIBLE else View.GONE
+        mainMeetingPanelContainer.visibility = if (isMeetingPanelExpanded) View.VISIBLE else View.GONE
+        updateMainPanelToggleTexts()
+    }
+
+    private fun updateMainPanelToggleTexts() {
+        mainDebugPanelToggleButton.text = if (isDebugPanelExpanded) {
+            "\u8BCA\u65AD \u25B2"
+        } else {
+            "\u8BCA\u65AD \u25BE"
+        }
+        val meetingState = when {
+            meetingToggleInFlight.get() -> "\u8BE6\u60C5(\u5904\u7406\u4E2D)"
+            meetingManager.isActive -> "\u8BE6\u60C5(\u4F1A\u8BAE\u4E2D)"
+            else -> "\u8BE6\u60C5"
+        }
+        val arrow = if (isMeetingPanelExpanded) "\u25B2" else "\u25BE"
+        mainMeetingPanelToggleButton.text = "$meetingState $arrow"
     }
 
     private fun appendResult(line: String) {
@@ -1775,52 +1816,46 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateMeetingStatusUI() {
-        val sb = StringBuilder()
-
-        if (meetingManager.isActive) {
+        val stats = meetingManager.getStorageStats()
+        val detail = StringBuilder()
+        val quickStatus = if (meetingManager.isActive) {
             val meetingId = meetingManager.meetingId ?: "unknown"
-            sb.append("Meeting: $meetingId\n")
-            sb.append("Wake word: ${wakeWordStateMachine.getStateDescription()}\n")
-
-            // Show active consumers
+            detail.append("Meeting: $meetingId\n")
+            detail.append("Wake word: ${wakeWordStateMachine.getStateDescription()}\n")
             val activeConsumers = pcmBus.getActiveConsumerNames()
             if (activeConsumers.isNotEmpty()) {
-                sb.append("Audio: ${activeConsumers.joinToString(", ")}\n")
+                detail.append("Audio: ${activeConsumers.joinToString(", ")}\n")
             }
-
-            val stats = meetingManager.getStorageStats()
-            sb.append("Storage: %.1f MB in %d meetings".format(stats.totalMb, stats.totalMeetings))
+            "Active | ${meetingId.take(14)}"
         } else {
-            // Show STT status when not in meeting
             if (sttListening) {
-                sb.append("STT: Listening...\n")
+                detail.append("STT: Listening...\n")
             }
             if (pcmBus.isRunning) {
                 val activeConsumers = pcmBus.getActiveConsumerNames()
                 if (activeConsumers.isNotEmpty()) {
-                    sb.append("Audio: ${activeConsumers.joinToString(", ")}\n")
+                    detail.append("Audio: ${activeConsumers.joinToString(", ")}\n")
                 }
             }
-            
-            // M2: Show upload queue status
             if (::uploadQueueManager.isInitialized && uploadQueueManager.isQueueActive) {
-                sb.append("Upload: ${uploadQueueManager.uploadedCount}/${uploadQueueManager.pendingCount + uploadQueueManager.uploadedCount + uploadQueueManager.failedCount}\n")
+                detail.append(
+                    "Upload: ${uploadQueueManager.uploadedCount}/" +
+                        "${uploadQueueManager.pendingCount + uploadQueueManager.uploadedCount + uploadQueueManager.failedCount}\n",
+                )
             }
-            
-            if (sb.isEmpty()) {
-                sb.append("Idle")
-            }
+            if (detail.isEmpty()) "Idle" else "Idle | background active"
         }
 
-        meetingStatusText.text = sb.toString()
-
-        // Update info text with storage stats
-        val stats = meetingManager.getStorageStats()
-        meetingInfoText.text = "Local: %.1f MB, %d meetings, oldest: %d min".format(
-            stats.totalMb,
-            stats.totalMeetings,
-            stats.oldestMeetingAgeMs / 60000
+        detail.append(
+            "Storage: %.1f MB, %d meetings, oldest: %d min".format(
+                stats.totalMb,
+                stats.totalMeetings,
+                stats.oldestMeetingAgeMs / 60000,
+            ),
         )
+        meetingStatusText.text = quickStatus
+        meetingInfoText.text = detail.toString()
+        updateMainPanelToggleTexts()
         publishMeetingUiSnapshot()
         refreshMeetingHistoryUI(force = false)
     }

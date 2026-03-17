@@ -33,7 +33,7 @@
 
         <Button
             android:id="@+id/visualMeetingPanelToggleButton"
-            android:layout_width="wrap_content"
+            android:layout_width="118dp"
             android:layout_height="36dp"
             android:layout_marginStart="8dp"
             android:backgroundTint="#253951"
@@ -47,7 +47,7 @@
 
         <Button
             android:id="@+id/visualMorePanelToggleButton"
-            android:layout_width="wrap_content"
+            android:layout_width="86dp"
             android:layout_height="36dp"
             android:layout_marginStart="6dp"
             android:backgroundTint="#29303C"
@@ -61,7 +61,7 @@
 
         <Button
             android:id="@+id/closeVisualButton"
-            android:layout_width="wrap_content"
+            android:layout_width="84dp"
             android:layout_height="36dp"
             android:layout_marginStart="6dp"
             android:backgroundTint="#3A3E48"
@@ -278,10 +278,10 @@
                 <Button
                     android:id="@+id/localSubtitleToggleButton"
                     android:layout_width="wrap_content"
-                    android:layout_height="28dp"
+                    android:layout_height="32dp"
                     android:backgroundTint="#304D45"
-                    android:minHeight="0dp"
-                    android:minWidth="0dp"
+                    android:minHeight="32dp"
+                    android:minWidth="70dp"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp"
                     android:text="&#x5C55;&#x5F00;"
@@ -331,10 +331,10 @@
                 <Button
                     android:id="@+id/openclawSubtitleToggleButton"
                     android:layout_width="wrap_content"
-                    android:layout_height="28dp"
+                    android:layout_height="32dp"
                     android:backgroundTint="#34425C"
-                    android:minHeight="0dp"
-                    android:minWidth="0dp"
+                    android:minHeight="32dp"
+                    android:minWidth="70dp"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp"
                     android:text="&#x5C55;&#x5F00;"
