@@ -21,6 +21,7 @@ import android.os.Looper
 import android.provider.MediaStore
 import android.speech.tts.TextToSpeech
 import android.util.Log
+import android.view.KeyEvent
 import android.view.View
 import android.widget.Button
 import android.widget.EditText
@@ -141,6 +142,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var imageUploadStatusText: TextView
 
     private var tts: TextToSpeech? = null
+    private var ttsReady = false
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // Meeting mode components
@@ -207,6 +209,10 @@ class MainActivity : AppCompatActivity() {
         override fun onRoleMessage(message: com.audiobridge.client.conversation.RoleMessage) {
             appendResult("[${message.sourceLabel}] ${message.textDisplay}")
             if (message.source == RoleSource.OPENCLAW && !message.requiresLongDecision) {
+                if (!speakSwitch.isChecked) {
+                    appendResult("[system] TTS is disabled, skip voice playback")
+                    return
+                }
                 speak(message.textRaw)
             }
         }
@@ -317,6 +323,10 @@ class MainActivity : AppCompatActivity() {
         initTts()
         loadPrefs()
         refreshRouteInfo()
+        speakSwitch.setOnCheckedChangeListener { _, isChecked ->
+            savePrefs()
+            appendResult("[system] TTS ${if (isChecked) "enabled" else "disabled"}")
+        }
 
         sendTextButton.setOnClickListener {
             val text = textInput.text?.toString()?.trim().orEmpty()
@@ -324,6 +334,14 @@ class MainActivity : AppCompatActivity() {
                 statusText.text = "Please enter text"
                 return@setOnClickListener
             }
+            if (isPendingLongReplyActive()) {
+                clearPendingLongReply()
+            }
+            sendTextToBridge(text)
+        }
+        bindEnterToSend(textInput) {
+            val text = textInput.text?.toString()?.trim().orEmpty()
+            if (text.isBlank()) return@bindEnterToSend
             if (isPendingLongReplyActive()) {
                 clearPendingLongReply()
             }
@@ -404,6 +422,7 @@ class MainActivity : AppCompatActivity() {
         tts?.stop()
         tts?.shutdown()
         tts = null
+        ttsReady = false
     }
 
     private fun normalizeSsid(raw: String?): String? {
@@ -1016,10 +1035,28 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initTts() {
+        ttsReady = false
+        try {
+            tts?.shutdown()
+        } catch (_: Exception) {
+            // ignore
+        }
         tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale.SIMPLIFIED_CHINESE
+            if (status != TextToSpeech.SUCCESS) {
+                Log.e(TAG, "TTS init failed: status=$status")
+                runOnUiThread { appendResult("[system] TTS init failed: $status") }
+                return@TextToSpeech
             }
+            val zhResult = tts?.setLanguage(Locale.SIMPLIFIED_CHINESE) ?: TextToSpeech.LANG_NOT_SUPPORTED
+            if (zhResult == TextToSpeech.LANG_MISSING_DATA || zhResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                val fallback = tts?.setLanguage(Locale.CHINESE) ?: TextToSpeech.LANG_NOT_SUPPORTED
+                if (fallback == TextToSpeech.LANG_MISSING_DATA || fallback == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    Log.w(TAG, "TTS language unsupported: zhResult=$zhResult fallback=$fallback")
+                    runOnUiThread { appendResult("[system] TTS Chinese voice unavailable on device") }
+                }
+            }
+            ttsReady = true
+            Log.i(TAG, "TTS initialized, engine=${tts?.defaultEngine}")
         }
     }
 
@@ -1626,6 +1663,13 @@ class MainActivity : AppCompatActivity() {
         if (!force && !speakSwitch.isChecked) return
         val speakText = normalizeForSpeech(text)
         if (speakText.isBlank()) return
+        Log.i(TAG, "TTS speak requested, force=$force, length=${speakText.length}")
+        if (!ttsReady || tts == null) {
+            Log.w(TAG, "TTS not ready, reinitializing")
+            appendResult("[system] TTS not ready, reinitializing")
+            initTts()
+            return
+        }
 
         // Suppress wake word during TTS playback
         if (::wakeWordController.isInitialized && meetingManager.isActive) {
@@ -1654,7 +1698,14 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        tts?.speak(speakText, TextToSpeech.QUEUE_ADD, null, utteranceId)
+        val ret = tts?.speak(speakText, TextToSpeech.QUEUE_ADD, null, utteranceId) ?: TextToSpeech.ERROR
+        Log.i(TAG, "TTS speak return code=$ret")
+        if (ret != TextToSpeech.SUCCESS) {
+            Log.e(TAG, "TTS speak failed: ret=$ret")
+            appendResult("[system] TTS speak failed: $ret")
+            ttsReady = false
+            initTts()
+        }
     }
 
     private fun prefs() = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)
@@ -1817,6 +1868,26 @@ class MainActivity : AppCompatActivity() {
         imageButtonContainer.visibility = View.VISIBLE
         imageUploadStatusText.visibility = View.VISIBLE
         updateImageUploadStatus()
+    }
+
+    private fun bindEnterToSend(
+        input: EditText,
+        onSend: () -> Unit,
+    ) {
+        input.setOnKeyListener { _, keyCode, event ->
+            if (keyCode != KeyEvent.KEYCODE_ENTER || event == null) {
+                return@setOnKeyListener false
+            }
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    if (event.isShiftPressed) return@setOnKeyListener false
+                    onSend()
+                    true
+                }
+                KeyEvent.ACTION_UP -> !event.isShiftPressed
+                else -> false
+            }
+        }
     }
     
     private fun hideImageUploadUI() {

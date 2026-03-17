@@ -122,7 +122,6 @@
             android:layout_weight="1"
             android:background="#1A1A1E"
             android:hint="输入文本..."
-            android:imeOptions="actionSend"
             android:inputType="textMultiLine"
             android:maxLines="2"
             android:minHeight="48dp"

@@ -17,7 +17,7 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.util.Log
-import android.view.inputmethod.EditorInfo
+import android.view.KeyEvent
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
@@ -95,6 +95,7 @@ class VisualStageActivity : AppCompatActivity() {
     private lateinit var closeButton: Button
 
     private var tts: TextToSpeech? = null
+    private var ttsReady = false
     private var ttsSpeaking = false
 
     private var sessionId: String = "voice-bridge-session"
@@ -261,13 +262,8 @@ class VisualStageActivity : AppCompatActivity() {
         closeButton.setOnClickListener {
             finish()
         }
-        inputText.setOnEditorActionListener { _, actionId, _ ->
-            if (actionId == EditorInfo.IME_ACTION_SEND) {
-                sendTextToBridge(inputText.text?.toString().orEmpty())
-                true
-            } else {
-                false
-            }
+        bindEnterToSend(inputText) {
+            sendTextToBridge(inputText.text?.toString().orEmpty())
         }
 
         if (!hasLocationPermission()) {
@@ -301,6 +297,7 @@ class VisualStageActivity : AppCompatActivity() {
         tts?.stop()
         tts?.shutdown()
         tts = null
+        ttsReady = false
     }
 
     private fun loadSessionClient() {
@@ -336,6 +333,26 @@ class VisualStageActivity : AppCompatActivity() {
                 endpoint = endpoint,
             )
         )
+    }
+
+    private fun bindEnterToSend(
+        input: EditText,
+        onSend: () -> Unit,
+    ) {
+        input.setOnKeyListener { _, keyCode, event ->
+            if (keyCode != KeyEvent.KEYCODE_ENTER || event == null) {
+                return@setOnKeyListener false
+            }
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    if (event.isShiftPressed) return@setOnKeyListener false
+                    onSend()
+                    true
+                }
+                KeyEvent.ACTION_UP -> !event.isShiftPressed
+                else -> false
+            }
+        }
     }
 
     private fun pushRoleLine(queue: ArrayDeque<String>, line: String) {
@@ -434,10 +451,27 @@ class VisualStageActivity : AppCompatActivity() {
     }
 
     private fun initTts() {
+        ttsReady = false
+        try {
+            tts?.shutdown()
+        } catch (_: Exception) {
+            // ignore
+        }
         tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                tts?.language = Locale.SIMPLIFIED_CHINESE
+            if (status != TextToSpeech.SUCCESS) {
+                Log.e(TAG, "TTS init failed: status=$status")
+                runOnUiThread { updateStatus("TTS init failed: $status", isError = true) }
+                return@TextToSpeech
             }
+            val zhResult = tts?.setLanguage(Locale.SIMPLIFIED_CHINESE) ?: TextToSpeech.LANG_NOT_SUPPORTED
+            if (zhResult == TextToSpeech.LANG_MISSING_DATA || zhResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                val fallback = tts?.setLanguage(Locale.CHINESE) ?: TextToSpeech.LANG_NOT_SUPPORTED
+                if (fallback == TextToSpeech.LANG_MISSING_DATA || fallback == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    runOnUiThread { updateStatus("TTS Chinese voice unavailable", isError = true) }
+                }
+            }
+            ttsReady = true
+            Log.i(TAG, "TTS initialized, engine=${tts?.defaultEngine}")
         }
     }
 
@@ -445,6 +479,13 @@ class VisualStageActivity : AppCompatActivity() {
         val speakText = normalizeForSpeech(text)
         if (speakText.isBlank()) return
         if (!force && speakText.isBlank()) return
+        Log.i(TAG, "TTS speak requested, force=$force, length=${speakText.length}")
+        if (!ttsReady || tts == null) {
+            Log.w(TAG, "TTS not ready, reinitializing")
+            updateStatus("TTS not ready, retrying...")
+            initTts()
+            return
+        }
 
         val utteranceId = "visual-${System.currentTimeMillis()}"
         tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
@@ -469,7 +510,14 @@ class VisualStageActivity : AppCompatActivity() {
                 }
             }
         })
-        tts?.speak(speakText, TextToSpeech.QUEUE_ADD, null, utteranceId)
+        val ret = tts?.speak(speakText, TextToSpeech.QUEUE_ADD, null, utteranceId) ?: TextToSpeech.ERROR
+        Log.i(TAG, "TTS speak return code=$ret")
+        if (ret != TextToSpeech.SUCCESS) {
+            Log.e(TAG, "TTS speak failed: ret=$ret")
+            updateStatus("TTS speak failed: $ret", isError = true)
+            ttsReady = false
+            initTts()
+        }
     }
 
     private fun normalizedLength(text: String): Int {

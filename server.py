@@ -549,19 +549,18 @@ class VoiceAssistantServer:
             if not row or row["status"] != STATUS_NEW:
                 return row or {}
 
-            decision = await self.local_operator.decide(row["text"], self.store.recent_session(row["session_id"]))
-            reason = (decision.get("reason") or "local_operator").strip() or "local_operator"
-            quick_reply = (decision.get("quick_reply") or "").strip() or "收到，我正在转给龙虾大脑处理。"
+            reason = "openclaw_first"
+            quick_reply = "已转发给龙虾大脑，正在处理。"
 
             if not self.openclaw.enabled:
                 reason = f"{reason}|openclaw_disabled"
-                quick_reply = f"{quick_reply}（链路不可用：OpenClaw 未配置）"
+                quick_reply = "龙虾大脑链路不可用：OpenClaw 未配置。"
                 self.store.update(
                     message_id,
                     status=STATUS_FAILED,
                     decision="forward_openclaw",
                     decision_reason=reason,
-                    decision_confidence=decision.get("confidence", 0.6),
+                    decision_confidence=0.95,
                     local_reply=quick_reply,
                     last_error="openclaw disabled",
                     updated_at=now_iso(),
@@ -571,35 +570,26 @@ class VoiceAssistantServer:
                 await self._emit_status(row, "failed")
                 return row
 
-            ok, probe_msg = await self.openclaw.health(timeout_sec=self.openclaw_probe_timeout)
-            if not ok:
-                reason = f"{reason}|openclaw_probe_failed"
-                quick_reply = f"{quick_reply}（链路检测异常，已进入重试队列）"
-
             self.store.update(
                 message_id,
-                status=STATUS_LOCAL_REPLIED,
+                status=STATUS_FORWARDED,
                 decision="forward_openclaw",
                 decision_reason=reason,
-                decision_confidence=decision.get("confidence", 0.6),
-                local_reply=quick_reply,
+                decision_confidence=0.9,
                 updated_at=now_iso(),
             )
             row = self.store.get(message_id) or row
-            await self._emit_reply(row, SOURCE_LOCAL, row.get("local_reply") or "", "local_reply")
-
-            if not ok:
-                self.store.update(message_id, last_error=f"probe_failed: {probe_msg}", updated_at=now_iso())
-                row = self.store.get(message_id) or row
-                await self._emit_status(row, "openclaw_probe_failed")
-
-            self.store.update(message_id, status=STATUS_FORWARDED, updated_at=now_iso())
-            row = self.store.get(message_id) or row
             await self._emit_status(row, "forwarded")
+
             self.store.update(message_id, status=STATUS_WAITING_OPENCLAW, updated_at=now_iso())
             row = self.store.get(message_id) or row
             await self._emit_status(row, "waiting_openclaw")
             self._ensure_forward_task(message_id)
+
+            # Keep local operator message after forward is accepted, instead of blocking submit.
+            self.store.update(message_id, local_reply=quick_reply, updated_at=now_iso())
+            row = self.store.get(message_id) or row
+            await self._emit_reply(row, SOURCE_LOCAL, row.get("local_reply") or "", "local_reply")
             return row
 
     def _ensure_forward_task(self, message_id: str) -> None:
