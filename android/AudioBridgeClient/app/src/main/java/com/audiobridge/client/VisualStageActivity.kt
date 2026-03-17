@@ -153,11 +153,15 @@ class VisualStageActivity : AppCompatActivity() {
                 if (message.source == RoleSource.LOCAL_OPERATOR) {
                     pushRoleLine(localMessages, message.textDisplay)
                     renderRoleMessages()
+                    eyeAvatarView.pulseEmotion(EyeAvatarView.Emotion.NEUTRAL, durationMs = 900L)
                     return@runOnUiThread
                 }
 
                 pushRoleLine(openclawMessages, message.textDisplay)
                 renderRoleMessages()
+                val inferred = inferEmotionFromText(message.textRaw)
+                eyeAvatarView.setEmotion(inferred)
+                eyeAvatarView.pulseEmotion(inferred, durationMs = 2400L)
                 if (!message.requiresLongDecision) {
                     speak(message.textRaw)
                 }
@@ -169,6 +173,8 @@ class VisualStageActivity : AppCompatActivity() {
                 updateStatus(notice.text, isError = notice.isError)
                 if (notice.isError) {
                     eyeAvatarView.setMode(EyeAvatarView.Mode.FAILED)
+                    eyeAvatarView.setEmotion(EyeAvatarView.Emotion.ANGRY)
+                    eyeAvatarView.pulseEmotion(EyeAvatarView.Emotion.ANGRY, durationMs = 2600L)
                 }
             }
         }
@@ -237,6 +243,7 @@ class VisualStageActivity : AppCompatActivity() {
 
         initTts()
         loadSessionClient()
+        eyeAvatarView.setEmotion(EyeAvatarView.Emotion.NEUTRAL)
         renderRoleMessages()
         refreshEyeMode()
 
@@ -317,6 +324,8 @@ class VisualStageActivity : AppCompatActivity() {
             return
         }
         inputText.setText("")
+        eyeAvatarView.setEmotion(EyeAvatarView.Emotion.NEUTRAL)
+        eyeAvatarView.pulseEmotion(EyeAvatarView.Emotion.NEUTRAL, durationMs = 700L)
         val endpoint = resolveBridgeEndpoint(allowNetworkProbe = true)
         updateStatus("Sending (${endpoint.mode}, wifi=${endpoint.wifiSsid ?: "N/A"})")
         conversationEngine.submitText(
@@ -354,8 +363,10 @@ class VisualStageActivity : AppCompatActivity() {
             return
         }
         val mode = when (currentConversationState) {
-            ConversationState.SENDING -> EyeAvatarView.Mode.SENDING
-            ConversationState.WAITING_OPENCLAW, ConversationState.RETRYING -> EyeAvatarView.Mode.WAITING
+            ConversationState.SENDING,
+            ConversationState.WAITING_OPENCLAW,
+            ConversationState.RETRYING,
+            -> EyeAvatarView.Mode.THINKING
             ConversationState.FAILED -> EyeAvatarView.Mode.FAILED
             else -> EyeAvatarView.Mode.IDLE
         }
@@ -381,6 +392,45 @@ class VisualStageActivity : AppCompatActivity() {
         cleaned = cleaned.replace(Regex("""[*_~#>]"""), " ")
         cleaned = cleaned.replace(Regex("""\s{2,}"""), " ").trim()
         return cleaned
+    }
+
+    private fun inferEmotionFromText(text: String): EyeAvatarView.Emotion {
+        val normalized = normalizeForDisplay(text)
+            .lowercase(Locale.getDefault())
+            .replace(Regex("""\s+"""), "")
+        if (normalized.isBlank()) return EyeAvatarView.Emotion.NEUTRAL
+
+        val joyKeywords = listOf(
+            "\u592a\u68d2", "\u8d85\u68d2", "\u60ca\u559c", "\u8d5e\u7206", "\u597d\u8036",
+            "awesome", "amazing", "excellent", "fantastic",
+        )
+        val happyKeywords = listOf(
+            "\u5f00\u5fc3", "\u6109\u5feb", "\u4e0d\u9519", "\u597d\u7684", "\u8c22\u8c22",
+            "great", "nice", "good", "thanks",
+        )
+        val angryKeywords = listOf(
+            "\u751f\u6c14", "\u6124\u6012", "\u6c14\u6b7b", "\u53ef\u6076", "\u70e6", "\u65e0\u8bed",
+            "angry", "furious", "mad", "annoying", "hate",
+        )
+        val sadKeywords = listOf(
+            "\u96be\u8fc7", "\u5931\u671b", "\u9057\u61be", "\u4f24\u5fc3", "\u62b1\u6b49",
+            "sad", "sorry", "unfortunately", "regret", "upset",
+        )
+        val exclamations = text.count { it == '!' || it == '\uFF01' }
+
+        if (joyKeywords.any { normalized.contains(it) } || exclamations >= 2) {
+            return EyeAvatarView.Emotion.JOY
+        }
+        if (angryKeywords.any { normalized.contains(it) }) {
+            return EyeAvatarView.Emotion.ANGRY
+        }
+        if (sadKeywords.any { normalized.contains(it) }) {
+            return EyeAvatarView.Emotion.SAD
+        }
+        if (happyKeywords.any { normalized.contains(it) }) {
+            return EyeAvatarView.Emotion.HAPPY
+        }
+        return EyeAvatarView.Emotion.NEUTRAL
     }
 
     private fun initTts() {
