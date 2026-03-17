@@ -337,12 +337,13 @@ class TestAudioUpload(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _create_mock_multipart(self, segment_id, seq, checksum, audio_data):
+    def _create_mock_multipart(self, segment_id, seq, checksum, audio_data, audio_filename=None):
         """Create a mock multipart reader that works with the API's async iteration"""
         class MockField:
-            def __init__(self, name, data):
+            def __init__(self, name, data, filename=None):
                 self.name = name
                 self._data = data if isinstance(data, bytes) else data.encode()
+                self.filename = filename
             
             async def read(self):
                 return self._data
@@ -366,7 +367,7 @@ class TestAudioUpload(unittest.TestCase):
             MockField("segment_id", segment_id),
             MockField("seq", str(seq)),
             MockField("checksum", checksum),
-            MockField("audio", audio_data),
+            MockField("audio", audio_data, filename=audio_filename),
         ]
         
         # Return an async function that returns the reader (since API does `await request.multipart()`)
@@ -408,6 +409,39 @@ class TestAudioUpload(unittest.TestCase):
         # Verify segment updated
         updated = self.store.get_audio_segment(segment["segment_id"])
         self.assertEqual(updated["upload_status"], UPLOAD_STATUS_UPLOADED)
+
+    def test_upload_raw_pcm_with_wav_filename_is_stored_as_pcm(self):
+        """Non-RIFF audio should be treated as PCM even if uploaded filename is .wav."""
+        meeting = self.store.create_meeting(client_id="test-client")
+        self.store.update_meeting(meeting["meeting_id"], status=MEETING_STATUS_ACTIVE, mode="on")
+        segment = self.store.create_audio_segment(meeting_id=meeting["meeting_id"], seq=1)
+
+        # 1s of 48kHz mono int16 silence PCM
+        pcm_data = b"\x00\x00" * 48000
+        checksum = hashlib.sha256(pcm_data).hexdigest()
+
+        request = MagicMock()
+        request.match_info = {"meeting_id": meeting["meeting_id"]}
+        request.multipart = self._create_mock_multipart(
+            segment["segment_id"],
+            1,
+            checksum,
+            pcm_data,
+            audio_filename="segment.wav",
+        )
+
+        response = asyncio.run(self.api.handle_audio_upload(request))
+        self.assertEqual(response.status, 200)
+        body = json.loads(response.text)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body.get("audio_format"), "pcm")
+        self.assertTrue(str(body.get("path") or "").endswith(".pcm"))
+        self.assertGreaterEqual(int(body.get("duration_ms") or 0), 900)
+
+        updated = self.store.get_audio_segment(segment["segment_id"])
+        self.assertIsNotNone(updated)
+        self.assertTrue(str(updated.get("local_path") or "").endswith(".pcm"))
+        self.assertGreaterEqual(int(updated.get("duration_ms") or 0), 900)
         
     def test_upload_with_invalid_checksum(self):
         """Test audio upload with wrong checksum"""
@@ -817,6 +851,23 @@ class TestTranscriptionWorkerNonBlocking(unittest.TestCase):
         
         self.assertEqual(worker.max_workers, 2)
         self.assertIsNotNone(worker._executor)
+
+    def test_worker_load_audio_fallback_for_non_riff_wav(self):
+        """_load_audio should fallback to raw PCM when .wav file lacks RIFF header."""
+        from transcription_worker import TranscriptionWorker
+
+        worker = TranscriptionWorker(
+            self.store,
+            self.event_hub,
+            max_workers=1,
+        )
+
+        raw_wav = Path(self.temp_dir) / "fake.wav"
+        raw_wav.write_bytes((b"\x01\x00\x02\x00") * 4000)  # int16 PCM payload
+
+        audio_array, sample_rate = worker._load_audio(str(raw_wav))
+        self.assertEqual(sample_rate, 48000)
+        self.assertGreater(len(audio_array), 0)
         
     def test_worker_can_start_and_stop(self):
         """Test that worker can be started and stopped cleanly"""

@@ -511,6 +511,7 @@ class V2MeetingAPI:
             seq = None
             checksum_expected = None
             audio_data = None
+            audio_upload_name = None
             
             async for field in reader:
                 if field.name == "segment_id":
@@ -520,6 +521,7 @@ class V2MeetingAPI:
                 elif field.name == "checksum":
                     checksum_expected = (await field.read()).decode("utf-8").strip().lower()
                 elif field.name == "audio":
+                    audio_upload_name = (getattr(field, "filename", None) or "").strip() or None
                     audio_data = await field.read()
             
             # Validate required fields
@@ -587,7 +589,32 @@ class V2MeetingAPI:
             artifacts_dir = Path("artifacts/meetings") / meeting_id / "audio" / "raw"
             artifacts_dir.mkdir(parents=True, exist_ok=True)
             
-            audio_filename = f"{segment_id}.wav"
+            header = bytes(audio_data[:12] if audio_data else b"")
+            looks_like_wav = header.startswith(b"RIFF") and b"WAVE" in header
+            upload_ext = Path(audio_upload_name or "").suffix.lower()
+            if looks_like_wav:
+                file_ext = ".wav"
+            elif upload_ext in {".pcm", ".raw"}:
+                file_ext = upload_ext
+            else:
+                file_ext = ".pcm"
+
+            duration_ms = None
+            if looks_like_wav:
+                try:
+                    import wave
+                    with wave.open(io.BytesIO(audio_data), "rb") as wf:
+                        fr = wf.getframerate() or 1
+                        frames = wf.getnframes()
+                        duration_ms = int((frames * 1000) / fr)
+                except Exception:
+                    duration_ms = None
+            else:
+                # Android meeting segments are 48kHz/16bit/mono PCM.
+                bytes_per_sec = 48000 * 1 * 2
+                duration_ms = int((len(audio_data) * 1000) / bytes_per_sec) if audio_data else 0
+
+            audio_filename = f"{segment_id}{file_ext}"
             audio_path = artifacts_dir / audio_filename
             
             with open(audio_path, "wb") as f:
@@ -599,6 +626,7 @@ class V2MeetingAPI:
                 local_path=str(audio_path),
                 checksum=checksum_actual,
                 size_bytes=len(audio_data),
+                duration_ms=duration_ms,
                 upload_status="uploaded",
                 uploaded_at=now_iso(),
             )
@@ -613,6 +641,8 @@ class V2MeetingAPI:
                     "seq": seq,
                     "size_bytes": len(audio_data),
                     "checksum": checksum_actual,
+                    "duration_ms": duration_ms,
+                    "audio_format": "wav" if looks_like_wav else "pcm",
                     "path": str(audio_path),
                 },
             )
@@ -626,6 +656,8 @@ class V2MeetingAPI:
                 "upload_status": "uploaded",
                 "checksum_verified": True,
                 "size_bytes": len(audio_data),
+                "duration_ms": duration_ms,
+                "audio_format": "wav" if looks_like_wav else "pcm",
                 "path": str(audio_path),
             })
             

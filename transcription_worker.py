@@ -411,24 +411,57 @@ class TranscriptionWorker:
     def _load_audio(self, audio_path: str) -> tuple:
         """Load audio file for transcription."""
         import numpy as np
+        import wave
         
-        # Check if it's a WAV file
         path = Path(audio_path)
-        if path.suffix.lower() == ".wav":
-            import wave
-            with wave.open(str(path), "rb") as wf:
-                sample_rate = wf.getframerate()
-                n_frames = wf.getnframes()
-                audio_data = wf.readframes(n_frames)
-                
-                # Convert to numpy array
-                audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
+
+        def _pcm_to_float_array(raw_bytes: bytes) -> np.ndarray:
+            if not raw_bytes:
+                return np.zeros(0, dtype=np.float32)
+            # Keep 16-bit frame alignment for frombuffer.
+            usable = raw_bytes[: len(raw_bytes) - (len(raw_bytes) % 2)]
+            if not usable:
+                return np.zeros(0, dtype=np.float32)
+            return np.frombuffer(usable, dtype=np.int16).astype(np.float32) / 32768.0
+
+        # Prefer WAV parser only when header is actually RIFF/WAVE.
+        try:
+            with open(path, "rb") as f:
+                header = f.read(12)
+        except Exception:
+            header = b""
+        looks_like_wav = header.startswith(b"RIFF") and b"WAVE" in header
+
+        if path.suffix.lower() == ".wav" and looks_like_wav:
+            try:
+                with wave.open(str(path), "rb") as wf:
+                    sample_rate = wf.getframerate() or 16000
+                    channels = max(1, wf.getnchannels())
+                    sample_width = wf.getsampwidth()
+                    n_frames = wf.getnframes()
+                    audio_data = wf.readframes(n_frames)
+
+                if sample_width != 2:
+                    logger.warning(
+                        "Unsupported WAV sample width=%s for %s, fallback to raw int16 decode",
+                        sample_width,
+                        audio_path,
+                    )
+                    return _pcm_to_float_array(audio_data), sample_rate
+
+                audio_array = _pcm_to_float_array(audio_data)
+                if channels > 1 and audio_array.size > 0:
+                    frame_count = audio_array.size // channels
+                    if frame_count > 0:
+                        audio_array = audio_array[: frame_count * channels].reshape(frame_count, channels).mean(axis=1)
                 return audio_array, sample_rate
-        else:
-            # Assume raw PCM
-            audio_data = path.read_bytes()
-            audio_array = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
-            return audio_array, 48000  # Assume 48kHz for raw PCM
+            except (wave.Error, OSError, EOFError) as exc:
+                logger.warning("Invalid WAV header for %s, fallback to raw PCM: %s", audio_path, exc)
+
+        # Raw PCM fallback (Android meeting segments are 48kHz/16bit/mono PCM).
+        audio_data = path.read_bytes()
+        audio_array = _pcm_to_float_array(audio_data)
+        return audio_array, 48000
 
 
 def create_transcription_job_on_meeting_end(
