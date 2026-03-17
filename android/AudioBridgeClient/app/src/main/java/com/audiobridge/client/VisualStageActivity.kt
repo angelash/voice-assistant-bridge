@@ -16,7 +16,9 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.text.TextUtils
 import android.util.Log
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
 import android.widget.Button
@@ -91,8 +93,13 @@ class VisualStageActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private lateinit var eyeAvatarView: EyeAvatarView
+    private lateinit var subtitleRowContainer: LinearLayout
+    private lateinit var localSubtitleCardContainer: LinearLayout
+    private lateinit var openclawSubtitleCardContainer: LinearLayout
     private lateinit var localSubtitleText: TextView
+    private lateinit var localSubtitleToggleButton: Button
     private lateinit var openclawSubtitleText: TextView
+    private lateinit var openclawSubtitleToggleButton: Button
     private lateinit var inputText: EditText
     private lateinit var sendButton: Button
     private lateinit var sttButton: Button
@@ -110,6 +117,8 @@ class VisualStageActivity : AppCompatActivity() {
 
     private val localMessages = ArrayDeque<String>()
     private val openclawMessages = ArrayDeque<String>()
+    private var isLocalSubtitleExpanded = false
+    private var isOpenclawSubtitleExpanded = false
     private val mainHandler = Handler(Looper.getMainLooper())
     private val conversationEngine = SharedConversationEngine.engine
     private var currentConversationState = ConversationState.IDLE
@@ -217,7 +226,7 @@ class VisualStageActivity : AppCompatActivity() {
                     sttListening = false
                     stopAudioCapture()
                     runOnUiThread {
-                        sttButton.text = "璇煶"
+                        sttButton.text = "\u8bed\u97f3"
                         updateStatus(if (purpose == SpeechPurpose.LONG_REPLY_DECISION) "Choice recognized" else "Speech recognized")
                     }
                     emitSpeechResult(textRaw.ifBlank { lastAsrText }, purpose)
@@ -230,7 +239,7 @@ class VisualStageActivity : AppCompatActivity() {
             val purpose = currentSpeechPurpose
             sttListening = false
             stopAudioCapture()
-            runOnUiThread { sttButton.text = "璇煶" }
+            runOnUiThread { sttButton.text = "\u8bed\u97f3" }
 
             if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                 sttFinished.set(true)
@@ -250,8 +259,13 @@ class VisualStageActivity : AppCompatActivity() {
 
         statusText = findViewById(R.id.visualStatusText)
         eyeAvatarView = findViewById(R.id.eyeAvatarView)
+        subtitleRowContainer = findViewById(R.id.subtitleRowContainer)
+        localSubtitleCardContainer = findViewById(R.id.localSubtitleCardContainer)
+        openclawSubtitleCardContainer = findViewById(R.id.openclawSubtitleCardContainer)
         localSubtitleText = findViewById(R.id.localSubtitleText)
+        localSubtitleToggleButton = findViewById(R.id.localSubtitleToggleButton)
         openclawSubtitleText = findViewById(R.id.openclawSubtitleText)
+        openclawSubtitleToggleButton = findViewById(R.id.openclawSubtitleToggleButton)
         inputText = findViewById(R.id.visualInputText)
         sendButton = findViewById(R.id.visualSendButton)
         sttButton = findViewById(R.id.visualSttButton)
@@ -276,7 +290,19 @@ class VisualStageActivity : AppCompatActivity() {
             sendTextToBridge(inputText.text?.toString().orEmpty())
         }
         sttButton.setOnClickListener {
-            if (sttListening) stopSpeechToText() else startSpeechToText(SpeechPurpose.USER_MESSAGE)
+            runCatching {
+                if (sttListening) stopSpeechToText() else startSpeechToText(SpeechPurpose.USER_MESSAGE)
+            }.onFailure { err ->
+                handleSttException("button-click", err, SpeechPurpose.USER_MESSAGE)
+            }
+        }
+        localSubtitleToggleButton.setOnClickListener {
+            isLocalSubtitleExpanded = !isLocalSubtitleExpanded
+            applySubtitleExpansionStates()
+        }
+        openclawSubtitleToggleButton.setOnClickListener {
+            isOpenclawSubtitleExpanded = !isOpenclawSubtitleExpanded
+            applySubtitleExpansionStates()
         }
         longReplySummaryButton.setOnClickListener {
             handleLongReplyDecisionButton(LongReplyChoice.SUMMARY)
@@ -299,6 +325,7 @@ class VisualStageActivity : AppCompatActivity() {
         if (!hasRecordAudioPermission()) {
             requestRecordAudioPermission()
         }
+        applySubtitleExpansionStates()
     }
 
     override fun onResume() {
@@ -306,6 +333,7 @@ class VisualStageActivity : AppCompatActivity() {
         ConversationUiState.setActiveView(VIEW_ID)
         setLongReplyChoiceButtonsVisible(isPendingLongReplyActive())
         restoreFromSharedState()
+        applySubtitleExpansionStates()
     }
 
     override fun onDestroy() {
@@ -414,8 +442,75 @@ class VisualStageActivity : AppCompatActivity() {
     }
 
     private fun renderRoleMessages() {
-        localSubtitleText.text = if (localMessages.isEmpty()) "(鏆傛棤)" else localMessages.joinToString("\n")
-        openclawSubtitleText.text = if (openclawMessages.isEmpty()) "(鏆傛棤)" else openclawMessages.joinToString("\n")
+        localSubtitleText.text = if (localMessages.isEmpty()) "(\u6682\u65e0)" else localMessages.joinToString("\n")
+        openclawSubtitleText.text = if (openclawMessages.isEmpty()) "(\u6682\u65e0)" else openclawMessages.joinToString("\n")
+    }
+
+    private fun applySubtitleExpansionStates() {
+        applySubtitleExpansion(
+            textView = localSubtitleText,
+            toggleButton = localSubtitleToggleButton,
+            expanded = isLocalSubtitleExpanded,
+        )
+        applySubtitleExpansion(
+            textView = openclawSubtitleText,
+            toggleButton = openclawSubtitleToggleButton,
+            expanded = isOpenclawSubtitleExpanded,
+        )
+        updateSubtitleRowLayout()
+    }
+
+    private fun updateSubtitleRowLayout() {
+        val anyExpanded = isLocalSubtitleExpanded || isOpenclawSubtitleExpanded
+
+        val rowParams = subtitleRowContainer.layoutParams as LinearLayout.LayoutParams
+        rowParams.height = if (anyExpanded) 0 else LinearLayout.LayoutParams.WRAP_CONTENT
+        rowParams.weight = if (anyExpanded) 1f else 0f
+        subtitleRowContainer.layoutParams = rowParams
+        subtitleRowContainer.gravity = Gravity.BOTTOM
+
+        updateSubtitleCardLayout(localSubtitleCardContainer, isLocalSubtitleExpanded, anyExpanded)
+        updateSubtitleCardLayout(openclawSubtitleCardContainer, isOpenclawSubtitleExpanded, anyExpanded)
+    }
+
+    private fun updateSubtitleCardLayout(
+        cardContainer: LinearLayout,
+        expanded: Boolean,
+        anyExpanded: Boolean,
+    ) {
+        val params = cardContainer.layoutParams as LinearLayout.LayoutParams
+        params.width = 0
+        params.weight = 1f
+        params.height = if (expanded && anyExpanded) {
+            LinearLayout.LayoutParams.MATCH_PARENT
+        } else {
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        }
+        params.gravity = Gravity.BOTTOM
+        cardContainer.layoutParams = params
+        cardContainer.gravity = if (!expanded && anyExpanded) Gravity.BOTTOM else Gravity.TOP
+    }
+
+    private fun applySubtitleExpansion(
+        textView: TextView,
+        toggleButton: Button,
+        expanded: Boolean,
+    ) {
+        val params = textView.layoutParams as LinearLayout.LayoutParams
+        if (expanded) {
+            params.height = 0
+            params.weight = 1f
+            textView.maxLines = Int.MAX_VALUE
+            textView.ellipsize = null
+            toggleButton.text = "\u6298\u53e0"
+        } else {
+            params.height = LinearLayout.LayoutParams.WRAP_CONTENT
+            params.weight = 0f
+            textView.maxLines = 1
+            textView.ellipsize = TextUtils.TruncateAt.END
+            toggleButton.text = "\u5c55\u5f00"
+        }
+        textView.layoutParams = params
     }
 
     private fun updateStatus(text: String, isError: Boolean = false) {
@@ -748,69 +843,96 @@ class VisualStageActivity : AppCompatActivity() {
         }
     }
 
+    private fun handleSttException(
+        stage: String,
+        throwable: Throwable,
+        purpose: SpeechPurpose,
+    ) {
+        val msg = throwable.message ?: throwable::class.java.simpleName
+        Log.e(TAG, "STT $stage exception", throwable)
+        if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+            scheduleLongReplyDecisionListening(delayMs = 700)
+            return
+        }
+        sttListening = false
+        stopAudioCapture()
+        runOnUiThread {
+            sttButton.text = "\u8bed\u97f3"
+            updateStatus("STT error: $msg", isError = true)
+        }
+    }
+
     private fun startSpeechToText(purpose: SpeechPurpose) {
-        if (sttListening) return
-        if (!hasRecordAudioPermission()) {
-            requestRecordAudioPermission()
-            return
-        }
-        if (!ensureSparkInitialized()) return
-
-        currentSpeechPurpose = purpose
-        ensureAsr()
-        val asrClient = asr ?: return
-        asrClient.language("zh_cn")
-        asrClient.domain("iat")
-        asrClient.accent("mandarin")
-        asrClient.vinfo(true)
-        asrClient.dwa("wpgs")
-
-        lastAsrText = ""
-        sttFinished.set(false)
-        asrToken += 1
-        val ret = asrClient.start("visual-stage-$asrToken")
-        if (ret != 0) {
-            if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
-                scheduleLongReplyDecisionListening(delayMs = 700)
-            } else {
-                updateStatus("STT start failed: $ret", isError = true)
+        try {
+            if (sttListening) return
+            if (!hasRecordAudioPermission()) {
+                requestRecordAudioPermission()
+                return
             }
-            return
-        }
+            if (!ensureSparkInitialized()) return
 
-        if (!startAudioCapture(asrClient)) {
-            asrClient.stop(true)
-            if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
-                scheduleLongReplyDecisionListening(delayMs = 700)
-            } else {
-                updateStatus("Microphone unavailable", isError = true)
+            currentSpeechPurpose = purpose
+            ensureAsr()
+            val asrClient = asr ?: return
+            asrClient.language("zh_cn")
+            asrClient.domain("iat")
+            asrClient.accent("mandarin")
+            asrClient.vinfo(true)
+            asrClient.dwa("wpgs")
+
+            lastAsrText = ""
+            sttFinished.set(false)
+            asrToken += 1
+            val ret = asrClient.start("visual-stage-$asrToken")
+            if (ret != 0) {
+                if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                    scheduleLongReplyDecisionListening(delayMs = 700)
+                } else {
+                    updateStatus("STT start failed: $ret", isError = true)
+                }
+                return
             }
-            return
-        }
 
-        sttListening = true
-        sttButton.text = "鍋滄"
-        updateStatus(if (purpose == SpeechPurpose.LONG_REPLY_DECISION) "Listening choice..." else "Listening...")
+            if (!startAudioCapture(asrClient)) {
+                asrClient.stop(true)
+                if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                    scheduleLongReplyDecisionListening(delayMs = 700)
+                } else {
+                    updateStatus("Microphone unavailable", isError = true)
+                }
+                return
+            }
+
+            sttListening = true
+            sttButton.text = "\u505c\u6b62"
+            updateStatus(if (purpose == SpeechPurpose.LONG_REPLY_DECISION) "Listening choice..." else "Listening...")
+        } catch (err: Throwable) {
+            handleSttException("start", err, purpose)
+        }
     }
 
     private fun stopSpeechToText() {
-        if (!sttListening) return
-        sttListening = false
-        sttButton.text = "璇煶"
-        updateStatus("Processing...")
-        stopAudioCapture()
+        try {
+            if (!sttListening) return
+            sttListening = false
+            sttButton.text = "\u8bed\u97f3"
+            updateStatus("Processing...")
+            stopAudioCapture()
 
-        val purpose = currentSpeechPurpose
-        val ret = asr?.stop(false) ?: -1
-        if (ret != 0 && sttFinished.compareAndSet(false, true)) {
-            val fallback = lastAsrText.trim()
-            if (fallback.isNotBlank()) {
-                emitSpeechResult(fallback, purpose)
-            } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
-                scheduleLongReplyDecisionListening(delayMs = 700)
-            } else {
-                updateStatus("STT stop failed: $ret", isError = true)
+            val purpose = currentSpeechPurpose
+            val ret = asr?.stop(false) ?: -1
+            if (ret != 0 && sttFinished.compareAndSet(false, true)) {
+                val fallback = lastAsrText.trim()
+                if (fallback.isNotBlank()) {
+                    emitSpeechResult(fallback, purpose)
+                } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                    scheduleLongReplyDecisionListening(delayMs = 700)
+                } else {
+                    updateStatus("STT stop failed: $ret", isError = true)
+                }
             }
+        } catch (err: Throwable) {
+            handleSttException("stop", err, currentSpeechPurpose)
         }
     }
 
@@ -871,7 +993,7 @@ class VisualStageActivity : AppCompatActivity() {
                         audioWriting.set(false)
                         sttListening = false
                         runOnUiThread {
-                            sttButton.text = "璇煶"
+                            sttButton.text = "\u8bed\u97f3"
                             updateStatus("STT write failed: $ret", isError = true)
                         }
                         try {
@@ -1056,5 +1178,6 @@ class VisualStageActivity : AppCompatActivity() {
         }
     }
 }
+
 
 

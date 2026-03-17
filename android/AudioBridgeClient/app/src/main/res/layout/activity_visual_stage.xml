@@ -31,7 +31,7 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="12dp"
             android:backgroundTint="#2E2F35"
-            android:text="关闭"
+            android:text="&#x5173;&#x95ED;"
             android:textColor="#F4F5F7" />
     </LinearLayout>
 
@@ -50,7 +50,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:backgroundTint="#2E5CB8"
-            android:text="Summary"
+            android:text="&#x7B80;&#x62A5;"
             android:textColor="#FFFFFF" />
 
         <Button
@@ -60,7 +60,7 @@
             android:layout_marginStart="8dp"
             android:layout_weight="1"
             android:backgroundTint="#2E2F35"
-            android:text="Original"
+            android:text="&#x539F;&#x6587;"
             android:textColor="#F4F5F7" />
     </LinearLayout>
 
@@ -72,13 +72,16 @@
         android:layout_weight="1.4" />
 
     <LinearLayout
+        android:id="@+id/subtitleRowContainer"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
         android:layout_marginTop="8dp"
+        android:layout_weight="1"
+        android:gravity="bottom"
         android:orientation="horizontal">
 
         <LinearLayout
+            android:id="@+id/localSubtitleCardContainer"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginEnd="6dp"
@@ -87,13 +90,35 @@
             android:orientation="vertical"
             android:padding="10dp">
 
-            <TextView
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="本地接线员"
-                android:textColor="#79E0CF"
-                android:textSize="13sp"
-                android:textStyle="bold" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="&#x672C;&#x5730;&#x63A5;&#x7EBF;&#x5458;"
+                    android:textColor="#79E0CF"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/localSubtitleToggleButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp"
+                    android:paddingTop="2dp"
+                    android:paddingBottom="2dp"
+                    android:text="&#x5C55;&#x5F00;"
+                    android:textAllCaps="false"
+                    android:textSize="11sp" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/localSubtitleText"
@@ -102,12 +127,13 @@
                 android:layout_marginTop="6dp"
                 android:layout_weight="1"
                 android:fontFamily="monospace"
-                android:text="(暂无)"
+                android:text="(&#x6682;&#x65E0;)"
                 android:textColor="#D4F4EE"
                 android:textSize="12sp" />
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/openclawSubtitleCardContainer"
             android:layout_width="0dp"
             android:layout_height="match_parent"
             android:layout_marginStart="6dp"
@@ -116,13 +142,35 @@
             android:orientation="vertical"
             android:padding="10dp">
 
-            <TextView
-                android:layout_width="wrap_content"
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="龙虾大脑"
-                android:textColor="#84B8FF"
-                android:textSize="13sp"
-                android:textStyle="bold" />
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="&#x9F99;&#x867E;&#x5927;&#x8111;"
+                    android:textColor="#84B8FF"
+                    android:textSize="13sp"
+                    android:textStyle="bold" />
+
+                <Button
+                    android:id="@+id/openclawSubtitleToggleButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minHeight="0dp"
+                    android:minWidth="0dp"
+                    android:paddingStart="8dp"
+                    android:paddingEnd="8dp"
+                    android:paddingTop="2dp"
+                    android:paddingBottom="2dp"
+                    android:text="&#x5C55;&#x5F00;"
+                    android:textAllCaps="false"
+                    android:textSize="11sp" />
+            </LinearLayout>
 
             <TextView
                 android:id="@+id/openclawSubtitleText"
@@ -131,7 +179,7 @@
                 android:layout_marginTop="6dp"
                 android:layout_weight="1"
                 android:fontFamily="monospace"
-                android:text="(暂无)"
+                android:text="(&#x6682;&#x65E0;)"
                 android:textColor="#DCE9FF"
                 android:textSize="12sp" />
         </LinearLayout>
@@ -150,7 +198,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:background="#1A1A1E"
-            android:hint="输入文本..."
+            android:hint="&#x8F93;&#x5165;&#x6587;&#x672C;..."
             android:inputType="textMultiLine"
             android:maxLines="2"
             android:minHeight="48dp"
@@ -164,7 +212,7 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:backgroundTint="#2A6BF2"
-            android:text="发送"
+            android:text="&#x53D1;&#x9001;"
             android:textColor="#FFFFFF" />
 
         <Button
@@ -173,7 +221,7 @@
             android:layout_height="wrap_content"
             android:layout_marginStart="8dp"
             android:backgroundTint="#214A77"
-            android:text="语音"
+            android:text="&#x8BED;&#x97F3;"
             android:textColor="#FFFFFF" />
     </LinearLayout>
 

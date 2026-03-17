@@ -366,10 +366,14 @@ class MainActivity : AppCompatActivity() {
         }
 
         sttButton.setOnClickListener {
-            if (sttListening) {
-                stopSpeechToText()
-            } else {
-                startSpeechToText(SpeechPurpose.USER_MESSAGE)
+            runCatching {
+                if (sttListening) {
+                    stopSpeechToText()
+                } else {
+                    startSpeechToText(SpeechPurpose.USER_MESSAGE)
+                }
+            }.onFailure { err ->
+                handleSttException("button-click", err, SpeechPurpose.USER_MESSAGE)
             }
         }
         longReplySummaryButton.setOnClickListener {
@@ -797,86 +801,113 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun handleSttException(
+        stage: String,
+        throwable: Throwable,
+        purpose: SpeechPurpose,
+    ) {
+        val msg = throwable.message ?: throwable::class.java.simpleName
+        Log.e(TAG, "STT $stage exception", throwable)
+        if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+            scheduleLongReplyDecisionListening(delayMs = 700)
+            return
+        }
+        sttListening = false
+        runOnUiThread {
+            sttButton.text = "Speak To Text"
+            statusText.text = "STT error: $msg"
+        }
+        appendResult("[system] STT $stage exception: $msg")
+    }
+
     private fun startSpeechToText(purpose: SpeechPurpose) {
-        if (sttListening) return
+        try {
+            if (sttListening) return
 
-        if (!hasRecordAudioPermission()) {
-            requestRecordAudioPermission()
-            return
-        }
-
-        if (!ensureSparkInitialized()) {
-            return
-        }
-
-        currentSpeechPurpose = purpose
-        ensureAsr()
-        val asrClient = asr ?: return
-        asrClient.language("zh_cn")
-        asrClient.domain("iat")
-        asrClient.accent("mandarin")
-        asrClient.vinfo(true)
-        asrClient.dwa("wpgs")
-
-        lastAsrText = ""
-        sttFinished.set(false)
-        asrToken += 1
-        val ret = asrClient.start("voice-bridge-$asrToken")
-        if (ret != 0) {
-            sttListening = false
-            if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
-                scheduleLongReplyDecisionListening(delayMs = 700)
-            } else {
-                appendResult("[system] STT start failed: $ret")
-                statusText.text = "STT start failed: $ret"
+            if (!hasRecordAudioPermission()) {
+                requestRecordAudioPermission()
+                return
             }
-            return
-        }
 
-        // Use unified audio capture via PcmDistributionBus
-        if (!startUnifiedAudioCapture()) {
-            asrClient.stop(true)
-            sttListening = false
-            if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
-                scheduleLongReplyDecisionListening(delayMs = 700)
-            } else {
-                appendResult("[system] microphone unavailable")
-                statusText.text = "Microphone unavailable"
+            if (!ensureSparkInitialized()) {
+                return
             }
-            return
-        }
 
-        sttListening = true
-        sttButton.text = "Stop Listening"
-        statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
-            "Listening choice..."
-        } else {
-            "Listening..."
+            currentSpeechPurpose = purpose
+            ensureAsr()
+            val asrClient = asr ?: return
+            asrClient.language("zh_cn")
+            asrClient.domain("iat")
+            asrClient.accent("mandarin")
+            asrClient.vinfo(true)
+            asrClient.dwa("wpgs")
+
+            lastAsrText = ""
+            sttFinished.set(false)
+            asrToken += 1
+            val ret = asrClient.start("voice-bridge-$asrToken")
+            if (ret != 0) {
+                sttListening = false
+                if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                    scheduleLongReplyDecisionListening(delayMs = 700)
+                } else {
+                    appendResult("[system] STT start failed: $ret")
+                    statusText.text = "STT start failed: $ret"
+                }
+                return
+            }
+
+            // Use unified audio capture via PcmDistributionBus
+            if (!startUnifiedAudioCapture()) {
+                asrClient.stop(true)
+                sttListening = false
+                if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                    scheduleLongReplyDecisionListening(delayMs = 700)
+                } else {
+                    appendResult("[system] microphone unavailable")
+                    statusText.text = "Microphone unavailable"
+                }
+                return
+            }
+
+            sttListening = true
+            sttButton.text = "Stop Listening"
+            statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
+                "Listening choice..."
+            } else {
+                "Listening..."
+            }
+        } catch (err: Throwable) {
+            handleSttException("start", err, purpose)
         }
     }
 
     private fun stopSpeechToText() {
-        if (!sttListening) return
-        sttListening = false
-        sttButton.text = "Speak To Text"
-        statusText.text = "Processing..."
-        
-        // Disable STT forwarder and stop unified capture if not in meeting mode
-        sttForwarderConsumer?.enabled = false
-        stopUnifiedAudioCapture()
-        
-        val purpose = currentSpeechPurpose
-        val ret = asr?.stop(false) ?: -1
-        if (ret != 0 && sttFinished.compareAndSet(false, true)) {
-            val fallback = lastAsrText.trim()
-            if (fallback.isNotBlank()) {
-                emitSpeechResult(fallback, purpose)
-            } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
-                scheduleLongReplyDecisionListening(delayMs = 700)
-            } else {
-                appendResult("[system] STT stop failed: $ret")
-                statusText.text = "STT stop failed: $ret"
+        try {
+            if (!sttListening) return
+            sttListening = false
+            sttButton.text = "Speak To Text"
+            statusText.text = "Processing..."
+
+            // Disable STT forwarder and stop unified capture if not in meeting mode
+            sttForwarderConsumer?.enabled = false
+            stopUnifiedAudioCapture()
+
+            val purpose = currentSpeechPurpose
+            val ret = asr?.stop(false) ?: -1
+            if (ret != 0 && sttFinished.compareAndSet(false, true)) {
+                val fallback = lastAsrText.trim()
+                if (fallback.isNotBlank()) {
+                    emitSpeechResult(fallback, purpose)
+                } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                    scheduleLongReplyDecisionListening(delayMs = 700)
+                } else {
+                    appendResult("[system] STT stop failed: $ret")
+                    statusText.text = "STT stop failed: $ret"
+                }
             }
+        } catch (err: Throwable) {
+            handleSttException("stop", err, currentSpeechPurpose)
         }
     }
 
