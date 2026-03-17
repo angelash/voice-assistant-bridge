@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import wave
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -86,6 +86,40 @@ RATE = 16000
 
 def _now() -> str:
     return datetime.now().strftime("%H:%M:%S")
+
+
+def _parse_api_datetime(raw: str) -> Optional[datetime]:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00") if text.endswith("Z") else text
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+    ):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _format_api_datetime(raw: str, fallback: str = "n/a") -> str:
+    parsed = _parse_api_datetime(raw)
+    if parsed is None:
+        text = (raw or "").strip()
+        if text:
+            return text.replace("T", " ").replace("Z", "")[:19]
+        return fallback
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _derive_audio_path(chat_path: str) -> str:
@@ -1098,9 +1132,9 @@ class MainWindow(QMainWindow):
         summary_lines = [
             f"status: {meeting.get('status', 'unknown')}",
             f"client_id: {meeting.get('client_id', 'unknown')}",
-            f"created_at: {meeting.get('created_at', '')}",
-            f"started_at: {meeting.get('started_at', '')}",
-            f"ended_at: {meeting.get('ended_at', '')}",
+            f"created_at: {_format_api_datetime(meeting.get('created_at', ''), fallback='')}",
+            f"started_at: {_format_api_datetime(meeting.get('started_at', ''), fallback='')}",
+            f"ended_at: {_format_api_datetime(meeting.get('ended_at', ''), fallback='')}",
             f"audio_segments: {len(audio_segments)}",
             f"transcription_jobs: {len(jobs)}",
             f"refined_segments: {len(refined_segments)}",
@@ -1268,9 +1302,9 @@ class MainWindow(QMainWindow):
                     [
                         f"status: {meeting.get('status', 'unknown')}",
                         f"client_id: {meeting.get('client_id', 'unknown')}",
-                        f"created_at: {meeting.get('created_at', '')}",
-                        f"started_at: {meeting.get('started_at', '')}",
-                        f"ended_at: {meeting.get('ended_at', '')}",
+                        f"created_at: {_format_api_datetime(meeting.get('created_at', ''), fallback='')}",
+                        f"started_at: {_format_api_datetime(meeting.get('started_at', ''), fallback='')}",
+                        f"ended_at: {_format_api_datetime(meeting.get('ended_at', ''), fallback='')}",
                         f"audio_segments: {len(audio_segments)}",
                         f"transcription_jobs: {len(current_jobs)}",
                         f"refined_segments: {len(current_refined)}",
@@ -1418,7 +1452,7 @@ class MainWindow(QMainWindow):
                 jid = str(job.get("job_id") or "")[:16]
                 st = str(job.get("status") or "unknown")
                 p = int(job.get("progress_percent") or 0)
-                ct = str(job.get("created_at") or "")[:19].replace("T", " ")
+                ct = _format_api_datetime(str(job.get("created_at") or ""), fallback="n/a")
                 lines.append(f"{ct} | {jid}... | {st} | {p}%")
             transcription_jobs_view.setPlainText("\n".join(lines))
 
@@ -1770,7 +1804,7 @@ class MainWindow(QMainWindow):
 
         for row in meetings:
             meeting_id = (row.get("meeting_id") or "").strip()
-            created_at = (row.get("created_at") or "")[:19].replace("T", " ")
+            created_at = _format_api_datetime(row.get("created_at") or "", fallback="n/a")
             status = (row.get("status") or "unknown").strip()
             if not meeting_id:
                 continue

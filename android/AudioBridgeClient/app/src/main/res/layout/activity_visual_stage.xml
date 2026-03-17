@@ -2,119 +2,203 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#050507"
+    android:background="@drawable/bg_visual_stage"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:padding="12dp">
 
     <LinearLayout
+        android:id="@+id/visualTopBar"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content"
+        android:layout_height="52dp"
+        android:background="@drawable/bg_visual_panel"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:paddingStart="10dp"
+        android:paddingEnd="8dp">
 
         <TextView
             android:id="@+id/visualStatusText"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="36dp"
             android:layout_weight="1"
-            android:background="#1A1A1E"
+            android:background="@drawable/bg_visual_chip"
             android:ellipsize="end"
-            android:maxLines="2"
-            android:padding="10dp"
+            android:gravity="center_vertical"
+            android:maxLines="1"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
             android:text="Idle"
-            android:textColor="#E9EAED"
-            android:textSize="14sp" />
+            android:textColor="#E8F1FF"
+            android:textSize="13sp" />
+
+        <Button
+            android:id="@+id/visualMeetingPanelToggleButton"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_marginStart="8dp"
+            android:backgroundTint="#253951"
+            android:minWidth="0dp"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:text="&#x4F1A;&#x8BAE;:&#x5173; &#x25BE;"
+            android:textAllCaps="false"
+            android:textColor="#D6E7FF"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/visualMorePanelToggleButton"
+            android:layout_width="wrap_content"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:backgroundTint="#29303C"
+            android:minWidth="0dp"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:text="&#x66F4;&#x591A; &#x25BE;"
+            android:textAllCaps="false"
+            android:textColor="#D7DEEA"
+            android:textSize="12sp" />
 
         <Button
             android:id="@+id/closeVisualButton"
             android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="12dp"
-            android:backgroundTint="#2E2F35"
+            android:layout_height="36dp"
+            android:layout_marginStart="6dp"
+            android:backgroundTint="#3A3E48"
+            android:minWidth="0dp"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
             android:text="&#x5173;&#x95ED;"
-            android:textColor="#F4F5F7" />
+            android:textAllCaps="false"
+            android:textColor="#F3F5F9"
+            android:textSize="12sp" />
     </LinearLayout>
 
     <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:gravity="center_vertical"
-        android:orientation="horizontal">
-
-        <Switch
-            android:id="@+id/visualMeetingModeSwitch"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="&#x4F1A;&#x8BAE;&#x6A21;&#x5F0F;"
-            android:textColor="#D7DADF" />
-
-        <Button
-            android:id="@+id/visualMeetingActionButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="10dp"
-            android:backgroundTint="#2966CC"
-            android:text="&#x5F00;&#x59CB;&#x4F1A;&#x8BAE;"
-            android:textColor="#FFFFFF"
-            android:textSize="12sp" />
-
-        <Button
-            android:id="@+id/visualMeetingRefreshButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginStart="8dp"
-            android:backgroundTint="#2E2F35"
-            android:text="&#x5237;&#x65B0;"
-            android:textColor="#E9EAED"
-            android:textSize="12sp" />
-    </LinearLayout>
-
-    <TextView
-        android:id="@+id/visualMeetingStatusText"
+        android:id="@+id/visualMeetingPanelContainer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="6dp"
-        android:background="#10141A"
-        android:ellipsize="end"
-        android:maxLines="3"
-        android:padding="8dp"
-        android:text="Idle"
-        android:textColor="#C2C7D1"
-        android:textSize="12sp" />
+        android:background="@drawable/bg_visual_panel"
+        android:orientation="vertical"
+        android:padding="10dp"
+        android:visibility="gone">
 
-    <TextView
-        android:id="@+id/visualMeetingIdText"
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <Switch
+                android:id="@+id/visualMeetingModeSwitch"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="&#x4F1A;&#x8BAE;&#x6A21;&#x5F0F;"
+                android:textColor="#D7E2F6" />
+
+            <Button
+                android:id="@+id/visualMeetingActionButton"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginStart="8dp"
+                android:backgroundTint="#2B66D8"
+                android:minWidth="0dp"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:text="&#x5F00;&#x59CB;&#x4F1A;&#x8BAE;"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp" />
+
+            <Button
+                android:id="@+id/visualMeetingRefreshButton"
+                android:layout_width="wrap_content"
+                android:layout_height="34dp"
+                android:layout_marginStart="6dp"
+                android:backgroundTint="#364155"
+                android:minWidth="0dp"
+                android:paddingStart="10dp"
+                android:paddingEnd="10dp"
+                android:text="&#x5237;&#x65B0;"
+                android:textAllCaps="false"
+                android:textColor="#E7ECF6"
+                android:textSize="12sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/visualMeetingStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:background="#152133"
+            android:maxLines="3"
+            android:padding="8dp"
+            android:text="Idle"
+            android:textColor="#BFD2EF"
+            android:textSize="12sp" />
+
+        <TextView
+            android:id="@+id/visualMeetingIdText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#101925"
+            android:ellipsize="middle"
+            android:maxLines="1"
+            android:padding="8dp"
+            android:text="Meeting ID: (none)"
+            android:textColor="#A5BAD6"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/visualMeetingInfoText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#101925"
+            android:maxLines="2"
+            android:padding="8dp"
+            android:text="Meeting info"
+            android:textColor="#9DB2D0"
+            android:textSize="11sp" />
+    </LinearLayout>
+
+    <LinearLayout
+        android:id="@+id/visualMorePanelContainer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:background="#0E1116"
-        android:ellipsize="middle"
-        android:maxLines="1"
-        android:padding="8dp"
-        android:text="Meeting ID: (none)"
-        android:textColor="#A4B0C3"
-        android:textSize="11sp" />
+        android:layout_marginTop="6dp"
+        android:background="@drawable/bg_visual_panel"
+        android:orientation="vertical"
+        android:padding="10dp"
+        android:visibility="gone">
 
-    <TextView
-        android:id="@+id/visualMeetingInfoText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="4dp"
-        android:background="#13161B"
-        android:ellipsize="end"
-        android:maxLines="2"
-        android:padding="8dp"
-        android:text="Meeting info"
-        android:textColor="#9CA6B8"
-        android:textSize="11sp" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="&#x94FE;&#x8DEF;&#x4FE1;&#x606F;"
+            android:textColor="#CCE0FF"
+            android:textSize="12sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/visualRouteInfoText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:maxLines="3"
+            android:text="(n/a)"
+            android:textColor="#A9BDD9"
+            android:textSize="11sp" />
+    </LinearLayout>
 
     <LinearLayout
         android:id="@+id/visualLongReplyChoiceContainer"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
+        android:layout_marginTop="6dp"
         android:gravity="center_vertical"
         android:orientation="horizontal"
         android:visibility="gone">
@@ -122,48 +206,59 @@
         <Button
             android:id="@+id/visualLongReplySummaryButton"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="36dp"
             android:layout_weight="1"
             android:backgroundTint="#2E5CB8"
             android:text="&#x7B80;&#x62A5;"
+            android:textAllCaps="false"
             android:textColor="#FFFFFF" />
 
         <Button
             android:id="@+id/visualLongReplyOriginalButton"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="36dp"
             android:layout_marginStart="8dp"
             android:layout_weight="1"
-            android:backgroundTint="#2E2F35"
+            android:backgroundTint="#3D4554"
             android:text="&#x539F;&#x6587;"
-            android:textColor="#F4F5F7" />
+            android:textAllCaps="false"
+            android:textColor="#EAF1FF" />
     </LinearLayout>
 
-    <com.audiobridge.client.ui.EyeAvatarView
-        android:id="@+id/eyeAvatarView"
+    <FrameLayout
+        android:id="@+id/visualEyeStageContainer"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_marginTop="10dp"
-        android:layout_weight="1.4" />
+        android:layout_marginTop="8dp"
+        android:layout_weight="2.2"
+        android:background="@drawable/bg_visual_stage_panel"
+        android:padding="10dp">
+
+        <com.audiobridge.client.ui.EyeAvatarView
+            android:id="@+id/eyeAvatarView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+    </FrameLayout>
 
     <LinearLayout
         android:id="@+id/subtitleRowContainer"
         android:layout_width="match_parent"
-        android:layout_height="0dp"
+        android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
-        android:layout_weight="1"
         android:gravity="bottom"
         android:orientation="horizontal">
 
         <LinearLayout
             android:id="@+id/localSubtitleCardContainer"
             android:layout_width="0dp"
-            android:layout_height="match_parent"
+            android:layout_height="wrap_content"
             android:layout_marginEnd="6dp"
             android:layout_weight="1"
-            android:background="#111214"
+            android:background="#1A2A25"
+            android:gravity="bottom"
+            android:minHeight="74dp"
             android:orientation="vertical"
-            android:padding="10dp">
+            android:padding="9dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -176,46 +271,47 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="&#x672C;&#x5730;&#x63A5;&#x7EBF;&#x5458;"
-                    android:textColor="#79E0CF"
-                    android:textSize="13sp"
+                    android:textColor="#9CF4DF"
+                    android:textSize="12sp"
                     android:textStyle="bold" />
 
                 <Button
                     android:id="@+id/localSubtitleToggleButton"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_height="28dp"
+                    android:backgroundTint="#304D45"
                     android:minHeight="0dp"
                     android:minWidth="0dp"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp"
-                    android:paddingTop="2dp"
-                    android:paddingBottom="2dp"
                     android:text="&#x5C55;&#x5F00;"
                     android:textAllCaps="false"
+                    android:textColor="#DFFDF5"
                     android:textSize="11sp" />
             </LinearLayout>
 
             <TextView
                 android:id="@+id/localSubtitleText"
                 android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_marginTop="6dp"
-                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
                 android:fontFamily="monospace"
                 android:text="(&#x6682;&#x65E0;)"
-                android:textColor="#D4F4EE"
+                android:textColor="#E4FFF8"
                 android:textSize="12sp" />
         </LinearLayout>
 
         <LinearLayout
             android:id="@+id/openclawSubtitleCardContainer"
             android:layout_width="0dp"
-            android:layout_height="match_parent"
+            android:layout_height="wrap_content"
             android:layout_marginStart="6dp"
             android:layout_weight="1"
-            android:background="#111214"
+            android:background="#1A2232"
+            android:gravity="bottom"
+            android:minHeight="74dp"
             android:orientation="vertical"
-            android:padding="10dp">
+            android:padding="9dp">
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -228,75 +324,81 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="&#x9F99;&#x867E;&#x5927;&#x8111;"
-                    android:textColor="#84B8FF"
-                    android:textSize="13sp"
+                    android:textColor="#A6C8FF"
+                    android:textSize="12sp"
                     android:textStyle="bold" />
 
                 <Button
                     android:id="@+id/openclawSubtitleToggleButton"
                     android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
+                    android:layout_height="28dp"
+                    android:backgroundTint="#34425C"
                     android:minHeight="0dp"
                     android:minWidth="0dp"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp"
-                    android:paddingTop="2dp"
-                    android:paddingBottom="2dp"
                     android:text="&#x5C55;&#x5F00;"
                     android:textAllCaps="false"
+                    android:textColor="#E6EEFF"
                     android:textSize="11sp" />
             </LinearLayout>
 
             <TextView
                 android:id="@+id/openclawSubtitleText"
                 android:layout_width="match_parent"
-                android:layout_height="0dp"
-                android:layout_marginTop="6dp"
-                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
                 android:fontFamily="monospace"
                 android:text="(&#x6682;&#x65E0;)"
-                android:textColor="#DCE9FF"
+                android:textColor="#E8F2FF"
                 android:textSize="12sp" />
         </LinearLayout>
     </LinearLayout>
 
     <LinearLayout
+        android:id="@+id/visualBottomBar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="8dp"
+        android:background="@drawable/bg_visual_panel"
         android:gravity="center_vertical"
-        android:orientation="horizontal">
+        android:orientation="horizontal"
+        android:padding="8dp">
 
         <EditText
             android:id="@+id/visualInputText"
             android:layout_width="0dp"
-            android:layout_height="wrap_content"
+            android:layout_height="42dp"
             android:layout_weight="1"
-            android:background="#1A1A1E"
+            android:background="#1B2532"
+            android:gravity="center_vertical|start"
             android:hint="&#x8F93;&#x5165;&#x6587;&#x672C;..."
             android:inputType="textMultiLine"
             android:maxLines="2"
-            android:minHeight="48dp"
-            android:padding="10dp"
-            android:textColor="#F2F3F5"
-            android:textColorHint="#8F949C" />
+            android:minHeight="42dp"
+            android:paddingStart="10dp"
+            android:paddingEnd="10dp"
+            android:textColor="#F2F6FF"
+            android:textColorHint="#95A9C7" />
 
         <Button
             android:id="@+id/visualSendButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="74dp"
+            android:layout_height="42dp"
             android:layout_marginStart="8dp"
             android:backgroundTint="#2A6BF2"
             android:text="&#x53D1;&#x9001;"
+            android:textAllCaps="false"
             android:textColor="#FFFFFF" />
 
         <Button
             android:id="@+id/visualSttButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="74dp"
+            android:layout_height="42dp"
             android:layout_marginStart="8dp"
-            android:backgroundTint="#214A77"
+            android:backgroundTint="#215D9A"
             android:text="&#x8BED;&#x97F3;"
+            android:textAllCaps="false"
             android:textColor="#FFFFFF" />
     </LinearLayout>
 

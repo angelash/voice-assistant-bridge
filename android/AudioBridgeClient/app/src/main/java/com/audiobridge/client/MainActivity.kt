@@ -67,7 +67,9 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
 import java.net.Inet4Address
+import java.text.SimpleDateFormat
 import java.util.Locale
+import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -1934,7 +1936,43 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun formatHistoryTime(raw: String): String {
-        return raw.trim()
+        val value = raw.trim()
+        if (value.isBlank()) return ""
+
+        val normalized = if (value.endsWith("Z", ignoreCase = true)) {
+            value.dropLast(1) + "+00:00"
+        } else {
+            value
+        }
+        val parserPatterns = listOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd HH:mm:ss.SSSXXX",
+            "yyyy-MM-dd HH:mm:ssXXX",
+            "yyyy-MM-dd'T'HH:mm:ss.SSS",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd HH:mm:ss.SSS",
+            "yyyy-MM-dd HH:mm:ss",
+        )
+        for (pattern in parserPatterns) {
+            try {
+                val parser = SimpleDateFormat(pattern, Locale.US).apply {
+                    isLenient = false
+                    if (!pattern.contains("XXX")) {
+                        // Old records may omit timezone but are generated in UTC on backend.
+                        timeZone = TimeZone.getTimeZone("UTC")
+                    }
+                }
+                val parsed = parser.parse(normalized) ?: continue
+                val output = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).apply {
+                    timeZone = TimeZone.getDefault()
+                }
+                return output.format(parsed)
+            } catch (_: Exception) {
+                // try next pattern
+            }
+        }
+        return value
             .replace("T", " ")
             .replace("Z", "")
             .take(19)

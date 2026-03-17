@@ -14,7 +14,7 @@ import asyncio
 import json
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -55,6 +55,40 @@ MEETING_STATUS_ENDING = "MEETING_ENDING"
 
 def _now() -> str:
     return datetime.now().strftime("%H:%M:%S")
+
+
+def _parse_api_datetime(raw: str) -> Optional[datetime]:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    normalized = text.replace("Z", "+00:00") if text.endswith("Z") else text
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        pass
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f",
+        "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d %H:%M:%S.%f",
+        "%Y-%m-%d %H:%M:%S",
+    ):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _format_api_datetime(raw: str, fallback: str = "n/a") -> str:
+    parsed = _parse_api_datetime(raw)
+    if parsed is None:
+        text = (raw or "").strip()
+        if text:
+            return text.replace("T", " ").replace("Z", "")[:19]
+        return fallback
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
 
 
 class MeetingClient:
@@ -363,7 +397,7 @@ class MeetingHistoryWidget(QWidget):
                 for meeting in result.get("meetings", []):
                     meeting_id = meeting.get("meeting_id", "unknown")
                     status = meeting.get("status", "unknown")
-                    created = meeting.get("created_at", "")[:19]
+                    created = _format_api_datetime(meeting.get("created_at", ""), fallback="n/a")
                     item = QListWidgetItem(f"{created} | {status} | {meeting_id[:16]}...")
                     item.setData(Qt.UserRole, meeting_id)
                     self.meeting_list.addItem(item)
@@ -401,9 +435,9 @@ class MeetingHistoryWidget(QWidget):
             f"meeting_id: {meeting.get('meeting_id', meeting_id)}",
             f"status: {meeting.get('status', 'unknown')}",
             f"client_id: {meeting.get('client_id', 'unknown')}",
-            f"created_at: {meeting.get('created_at', '')}",
-            f"started_at: {meeting.get('started_at', '')}",
-            f"ended_at: {meeting.get('ended_at', '')}",
+            f"created_at: {_format_api_datetime(meeting.get('created_at', ''), fallback='')}",
+            f"started_at: {_format_api_datetime(meeting.get('started_at', ''), fallback='')}",
+            f"ended_at: {_format_api_datetime(meeting.get('ended_at', ''), fallback='')}",
             "",
             f"audio_segments: total={len(segments)}, uploaded={uploaded}, pending={pending}, failed={failed}",
             f"transcription_jobs: {len(jobs)}",

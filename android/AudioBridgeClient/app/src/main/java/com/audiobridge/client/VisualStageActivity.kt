@@ -38,6 +38,7 @@ import com.audiobridge.client.conversation.RoleMessage
 import com.audiobridge.client.conversation.RoleSource
 import com.audiobridge.client.conversation.SharedConversationEngine
 import com.audiobridge.client.meeting.MeetingControlBus
+import com.audiobridge.client.meeting.MeetingUiSnapshot
 import com.audiobridge.client.meeting.MeetingUiState
 import com.audiobridge.client.ui.EyeAvatarView
 import com.iflytek.sparkchain.core.LogLvl
@@ -96,12 +97,17 @@ class VisualStageActivity : AppCompatActivity() {
     )
 
     private lateinit var statusText: TextView
+    private lateinit var visualMeetingPanelToggleButton: Button
+    private lateinit var visualMorePanelToggleButton: Button
+    private lateinit var visualMeetingPanelContainer: LinearLayout
+    private lateinit var visualMorePanelContainer: LinearLayout
     private lateinit var visualMeetingModeSwitch: Switch
     private lateinit var visualMeetingActionButton: Button
     private lateinit var visualMeetingRefreshButton: Button
     private lateinit var visualMeetingStatusText: TextView
     private lateinit var visualMeetingIdText: TextView
     private lateinit var visualMeetingInfoText: TextView
+    private lateinit var visualRouteInfoText: TextView
     private lateinit var eyeAvatarView: EyeAvatarView
     private lateinit var subtitleRowContainer: LinearLayout
     private lateinit var localSubtitleCardContainer: LinearLayout
@@ -128,6 +134,8 @@ class VisualStageActivity : AppCompatActivity() {
 
     private val localMessages = ArrayDeque<String>()
     private val openclawMessages = ArrayDeque<String>()
+    private var isMeetingPanelExpanded = false
+    private var isMorePanelExpanded = false
     private var isLocalSubtitleExpanded = false
     private var isOpenclawSubtitleExpanded = false
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -275,12 +283,17 @@ class VisualStageActivity : AppCompatActivity() {
         setContentView(R.layout.activity_visual_stage)
 
         statusText = findViewById(R.id.visualStatusText)
+        visualMeetingPanelToggleButton = findViewById(R.id.visualMeetingPanelToggleButton)
+        visualMorePanelToggleButton = findViewById(R.id.visualMorePanelToggleButton)
+        visualMeetingPanelContainer = findViewById(R.id.visualMeetingPanelContainer)
+        visualMorePanelContainer = findViewById(R.id.visualMorePanelContainer)
         visualMeetingModeSwitch = findViewById(R.id.visualMeetingModeSwitch)
         visualMeetingActionButton = findViewById(R.id.visualMeetingActionButton)
         visualMeetingRefreshButton = findViewById(R.id.visualMeetingRefreshButton)
         visualMeetingStatusText = findViewById(R.id.visualMeetingStatusText)
         visualMeetingIdText = findViewById(R.id.visualMeetingIdText)
         visualMeetingInfoText = findViewById(R.id.visualMeetingInfoText)
+        visualRouteInfoText = findViewById(R.id.visualRouteInfoText)
         eyeAvatarView = findViewById(R.id.eyeAvatarView)
         subtitleRowContainer = findViewById(R.id.subtitleRowContainer)
         localSubtitleCardContainer = findViewById(R.id.localSubtitleCardContainer)
@@ -334,6 +347,15 @@ class VisualStageActivity : AppCompatActivity() {
             handleLongReplyDecisionButton(LongReplyChoice.ORIGINAL)
         }
         setLongReplyChoiceButtonsVisible(false)
+        visualMeetingPanelToggleButton.setOnClickListener {
+            isMeetingPanelExpanded = !isMeetingPanelExpanded
+            applyTopPanelExpansionStates()
+        }
+        visualMorePanelToggleButton.setOnClickListener {
+            isMorePanelExpanded = !isMorePanelExpanded
+            refreshRouteInfo(allowNetworkProbe = false)
+            applyTopPanelExpansionStates()
+        }
         visualMeetingModeSwitch.setOnCheckedChangeListener { _, isChecked ->
             if (suppressVisualMeetingSwitchCallback) {
                 return@setOnCheckedChangeListener
@@ -373,6 +395,8 @@ class VisualStageActivity : AppCompatActivity() {
             requestRecordAudioPermission()
         }
         syncMeetingSnapshot()
+        refreshRouteInfo(allowNetworkProbe = false)
+        applyTopPanelExpansionStates()
         applySubtitleExpansionStates()
     }
 
@@ -382,7 +406,9 @@ class VisualStageActivity : AppCompatActivity() {
         setLongReplyChoiceButtonsVisible(isPendingLongReplyActive())
         restoreFromSharedState()
         syncMeetingSnapshot()
+        refreshRouteInfo(allowNetworkProbe = false)
         mainHandler.post(meetingUiSyncTask)
+        applyTopPanelExpansionStates()
         applySubtitleExpansionStates()
     }
 
@@ -441,7 +467,9 @@ class VisualStageActivity : AppCompatActivity() {
         inputText.setText("")
         eyeAvatarView.setEmotion(EyeAvatarView.Emotion.NEUTRAL)
         eyeAvatarView.pulseEmotion(EyeAvatarView.Emotion.NEUTRAL, durationMs = 700L)
-        val endpoint = resolveBridgeEndpoint(allowNetworkProbe = true)
+        val routeDecision = resolveRouteDecision(allowNetworkProbe = true)
+        val endpoint = routeDecision.endpoint
+        refreshRouteInfo(routeDecision)
         updateStatus("Sending (${endpoint.mode}, wifi=${endpoint.wifiSsid ?: "N/A"})")
         conversationEngine.submitText(
             ConversationSubmitRequest(
@@ -488,6 +516,40 @@ class VisualStageActivity : AppCompatActivity() {
         }
     }
 
+    private fun applyTopPanelExpansionStates() {
+        visualMeetingPanelContainer.visibility = if (isMeetingPanelExpanded) View.VISIBLE else View.GONE
+        visualMorePanelContainer.visibility = if (isMorePanelExpanded) View.VISIBLE else View.GONE
+        updateMeetingPanelToggleText(MeetingUiState.snapshot())
+        visualMorePanelToggleButton.text = if (isMorePanelExpanded) {
+            "\u66F4\u591A \u25B2"
+        } else {
+            "\u66F4\u591A \u25BE"
+        }
+    }
+
+    private fun updateMeetingPanelToggleText(snapshot: MeetingUiSnapshot) {
+        val status = when {
+            snapshot.busy -> "\u4F1A\u8BAE:\u5904\u7406\u4E2D"
+            snapshot.active -> "\u4F1A\u8BAE:\u5F00"
+            else -> "\u4F1A\u8BAE:\u5173"
+        }
+        val arrow = if (isMeetingPanelExpanded) "\u25B2" else "\u25BE"
+        visualMeetingPanelToggleButton.text = "$status $arrow"
+    }
+
+    private fun refreshRouteInfo(allowNetworkProbe: Boolean) {
+        val routeDecision = resolveRouteDecision(allowNetworkProbe = allowNetworkProbe)
+        refreshRouteInfo(routeDecision)
+    }
+
+    private fun refreshRouteInfo(routeDecision: RouteDecision) {
+        val wifi = routeDecision.wifiSsid ?: "N/A"
+        val ipv4 = routeDecision.activeWifiIpv4 ?: "N/A"
+        val lanIpv4 = routeDecision.lanBaseIpv4 ?: "N/A"
+        val endpoint = routeDecision.endpoint
+        visualRouteInfoText.text = "mode=${endpoint.mode} | wifi=$wifi | ipv4=$ipv4 | lan=$lanIpv4\nbase=${endpoint.baseUrl}"
+    }
+
     private fun pushRoleLine(queue: ArrayDeque<String>, line: String) {
         if (line.isBlank()) return
         if (queue.isNotEmpty() && queue.last() == line) return
@@ -521,7 +583,7 @@ class VisualStageActivity : AppCompatActivity() {
 
         val rowParams = subtitleRowContainer.layoutParams as LinearLayout.LayoutParams
         rowParams.height = if (anyExpanded) 0 else LinearLayout.LayoutParams.WRAP_CONTENT
-        rowParams.weight = if (anyExpanded) 1f else 0f
+        rowParams.weight = if (anyExpanded) 0.9f else 0f
         subtitleRowContainer.layoutParams = rowParams
         subtitleRowContainer.gravity = Gravity.BOTTOM
 
@@ -620,6 +682,7 @@ class VisualStageActivity : AppCompatActivity() {
             "Meeting ID: $mid"
         }
         visualMeetingInfoText.text = snapshot.infoText.ifBlank { "No meeting info" }
+        updateMeetingPanelToggleText(snapshot)
     }
 
     private fun setVisualMeetingSwitchChecked(checked: Boolean) {
