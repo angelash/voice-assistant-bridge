@@ -20,7 +20,7 @@
             android:id="@+id/titleText"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="Voice Bridge"
+            android:text="语音桥接"
             android:textColor="#ECF3FF"
             android:textSize="14sp"
             android:textStyle="bold" />
@@ -37,13 +37,13 @@
             android:maxLines="1"
             android:paddingStart="10dp"
             android:paddingEnd="10dp"
-            android:text="Idle"
+            android:text="空闲"
             android:textColor="#E8F1FF"
             android:textSize="13sp" />
 
         <Button
             android:id="@+id/mainDebugPanelToggleButton"
-            android:layout_width="84dp"
+            android:layout_width="92dp"
             android:layout_height="36dp"
             android:layout_marginStart="6dp"
             android:backgroundTint="#29303C"
@@ -55,7 +55,7 @@
 
         <Button
             android:id="@+id/visualModeButton"
-            android:layout_width="94dp"
+            android:layout_width="100dp"
             android:layout_height="36dp"
             android:layout_marginStart="6dp"
             android:backgroundTint="#2A6BF2"
@@ -95,13 +95,13 @@
             android:layout_weight="1"
             android:ellipsize="end"
             android:maxLines="1"
-            android:text="Idle"
+            android:text="空闲"
             android:textColor="#BFD2EF"
             android:textSize="12sp" />
 
         <Button
             android:id="@+id/mainMeetingPanelToggleButton"
-            android:layout_width="84dp"
+            android:layout_width="122dp"
             android:layout_height="34dp"
             android:layout_marginStart="6dp"
             android:backgroundTint="#34425C"
@@ -129,7 +129,7 @@
             android:background="#152133"
             android:fontFamily="monospace"
             android:padding="8dp"
-            android:text="(route info)"
+            android:text="(链路信息)"
             android:textColor="#BFD2EF"
             android:textSize="11sp" />
 
@@ -146,7 +146,7 @@
                 android:layout_weight="1"
                 android:background="#1B2532"
                 android:gravity="center_vertical|start"
-                android:hint="Session ID"
+                android:hint="会话ID"
                 android:inputType="text"
                 android:paddingStart="10dp"
                 android:paddingEnd="10dp"
@@ -161,7 +161,7 @@
                 android:layout_weight="1"
                 android:background="#1B2532"
                 android:gravity="center_vertical|start"
-                android:hint="Client ID"
+                android:hint="客户端ID"
                 android:inputType="text"
                 android:paddingStart="10dp"
                 android:paddingEnd="10dp"
@@ -175,7 +175,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
             android:checked="true"
-            android:text="Speak assistant messages (TTS)"
+            android:text="播报助手消息（TTS）"
             android:textColor="#D7E2F6" />
     </LinearLayout>
 
@@ -196,7 +196,7 @@
             android:background="#152133"
             android:fontFamily="monospace"
             android:padding="8dp"
-            android:text="(meeting info)"
+            android:text="(会议信息)"
             android:textColor="#BFD2EF"
             android:textSize="11sp" />
 
@@ -212,7 +212,7 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="Meeting History"
+                android:text="会议历史"
                 android:textColor="#CCE0FF"
                 android:textSize="13sp"
                 android:textStyle="bold" />
@@ -223,7 +223,7 @@
                 android:layout_height="34dp"
                 android:backgroundTint="#364155"
                 android:minWidth="0dp"
-                android:text="Refresh"
+                android:text="刷新"
                 android:textAllCaps="false"
                 android:textColor="#E7ECF6"
                 android:textSize="12sp" />
@@ -243,7 +243,7 @@
                 android:layout_height="wrap_content"
                 android:fontFamily="monospace"
                 android:padding="8dp"
-                android:text="(no meeting history)"
+                android:text="(暂无会议历史)"
                 android:textColor="#9DB2D0"
                 android:textSize="11sp" />
         </ScrollView>
@@ -253,7 +253,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Meeting Images"
+            android:text="会议图片"
             android:textColor="#CCE0FF"
             android:textSize="13sp"
             android:textStyle="bold"
@@ -273,7 +273,7 @@
                 android:layout_height="36dp"
                 android:layout_weight="1"
                 android:backgroundTint="#2B66D8"
-                android:text="Capture Photo"
+                android:text="拍照上传"
                 android:textAllCaps="false"
                 android:textColor="#FFFFFF"
                 android:textSize="12sp" />
@@ -285,7 +285,7 @@
                 android:layout_marginStart="8dp"
                 android:layout_weight="1"
                 android:backgroundTint="#364155"
-                android:text="Select Image"
+                android:text="选择图片"
                 android:textAllCaps="false"
                 android:textColor="#E7ECF6"
                 android:textSize="12sp" />
@@ -299,7 +299,7 @@
             android:background="#1A2B40"
             android:fontFamily="monospace"
             android:padding="8dp"
-            android:text="(image upload status)"
+            android:text="(图片上传状态)"
             android:textColor="#9DB2D0"
             android:textSize="11sp"
             android:visibility="gone" />
@@ -369,7 +369,7 @@
                 android:layout_height="wrap_content"
                 android:fontFamily="monospace"
                 android:padding="10dp"
-                android:text="(text result)"
+                android:text="(对话记录)"
                 android:textColor="#D7E4F8"
                 android:textSize="12sp" />
         </ScrollView>
@@ -392,7 +392,7 @@
             android:layout_weight="1"
             android:background="#1B2532"
             android:gravity="center_vertical|start"
-            android:hint="Type text for bridge"
+            android:hint="输入文本后回车发送，Shift+回车换行"
             android:inputType="textMultiLine"
             android:maxLines="2"
             android:minHeight="42dp"
@@ -403,21 +403,21 @@
 
         <Button
             android:id="@+id/sendTextButton"
-            android:layout_width="88dp"
+            android:layout_width="78dp"
             android:layout_height="42dp"
             android:layout_marginStart="8dp"
             android:backgroundTint="#2A6BF2"
-            android:text="Send"
+            android:text="发送"
             android:textAllCaps="false"
             android:textColor="#FFFFFF" />
 
         <Button
             android:id="@+id/sttButton"
-            android:layout_width="112dp"
+            android:layout_width="92dp"
             android:layout_height="42dp"
             android:layout_marginStart="8dp"
             android:backgroundTint="#215D9A"
-            android:text="Speak To Text"
+            android:text="语音输入"
             android:textAllCaps="false"
             android:textColor="#FFFFFF"
             android:textSize="12sp" />

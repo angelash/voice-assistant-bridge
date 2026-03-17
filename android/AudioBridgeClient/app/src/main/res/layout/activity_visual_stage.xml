@@ -27,13 +27,13 @@
             android:maxLines="1"
             android:paddingStart="10dp"
             android:paddingEnd="10dp"
-            android:text="Idle"
+            android:text="空闲"
             android:textColor="#E8F1FF"
             android:textSize="13sp" />
 
         <Button
             android:id="@+id/visualMeetingPanelToggleButton"
-            android:layout_width="118dp"
+            android:layout_width="126dp"
             android:layout_height="36dp"
             android:layout_marginStart="8dp"
             android:backgroundTint="#253951"
@@ -47,7 +47,7 @@
 
         <Button
             android:id="@+id/visualMorePanelToggleButton"
-            android:layout_width="86dp"
+            android:layout_width="90dp"
             android:layout_height="36dp"
             android:layout_marginStart="6dp"
             android:backgroundTint="#29303C"
@@ -61,7 +61,7 @@
 
         <Button
             android:id="@+id/closeVisualButton"
-            android:layout_width="84dp"
+            android:layout_width="88dp"
             android:layout_height="36dp"
             android:layout_marginStart="6dp"
             android:backgroundTint="#3A3E48"
@@ -135,7 +135,7 @@
             android:background="#152133"
             android:maxLines="3"
             android:padding="8dp"
-            android:text="Idle"
+            android:text="空闲"
             android:textColor="#BFD2EF"
             android:textSize="12sp" />
 
@@ -148,7 +148,7 @@
             android:ellipsize="middle"
             android:maxLines="1"
             android:padding="8dp"
-            android:text="Meeting ID: (none)"
+            android:text="会议ID：（无）"
             android:textColor="#A5BAD6"
             android:textSize="11sp" />
 
@@ -160,7 +160,7 @@
             android:background="#101925"
             android:maxLines="2"
             android:padding="8dp"
-            android:text="Meeting info"
+            android:text="会议信息"
             android:textColor="#9DB2D0"
             android:textSize="11sp" />
     </LinearLayout>
@@ -189,7 +189,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="4dp"
             android:maxLines="3"
-            android:text="(n/a)"
+            android:text="(暂无数据)"
             android:textColor="#A9BDD9"
             android:textSize="11sp" />
     </LinearLayout>
@@ -277,17 +277,17 @@
 
                 <Button
                     android:id="@+id/localSubtitleToggleButton"
-                    android:layout_width="wrap_content"
+                    android:layout_width="50dp"
                     android:layout_height="32dp"
                     android:backgroundTint="#304D45"
                     android:minHeight="32dp"
-                    android:minWidth="70dp"
+                    android:minWidth="0dp"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp"
-                    android:text="&#x5C55;&#x5F00;"
+                    android:text="&#x25BC;"
                     android:textAllCaps="false"
                     android:textColor="#DFFDF5"
-                    android:textSize="11sp" />
+                    android:textSize="13sp" />
             </LinearLayout>
 
             <TextView
@@ -330,17 +330,17 @@
 
                 <Button
                     android:id="@+id/openclawSubtitleToggleButton"
-                    android:layout_width="wrap_content"
+                    android:layout_width="50dp"
                     android:layout_height="32dp"
                     android:backgroundTint="#34425C"
                     android:minHeight="32dp"
-                    android:minWidth="70dp"
+                    android:minWidth="0dp"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp"
-                    android:text="&#x5C55;&#x5F00;"
+                    android:text="&#x25BC;"
                     android:textAllCaps="false"
                     android:textColor="#E6EEFF"
-                    android:textSize="11sp" />
+                    android:textSize="13sp" />
             </LinearLayout>
 
             <TextView
@@ -383,7 +383,7 @@
 
         <Button
             android:id="@+id/visualSendButton"
-            android:layout_width="74dp"
+            android:layout_width="82dp"
             android:layout_height="42dp"
             android:layout_marginStart="8dp"
             android:backgroundTint="#2A6BF2"
@@ -393,11 +393,11 @@
 
         <Button
             android:id="@+id/visualSttButton"
-            android:layout_width="74dp"
+            android:layout_width="92dp"
             android:layout_height="42dp"
             android:layout_marginStart="8dp"
             android:backgroundTint="#215D9A"
-            android:text="&#x8BED;&#x97F3;"
+            android:text="&#x8BED;&#x97F3;&#x8F93;&#x5165;"
             android:textAllCaps="false"
             android:textColor="#FFFFFF" />
     </LinearLayout>

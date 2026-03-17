@@ -260,12 +260,12 @@ class MainActivity : AppCompatActivity() {
             if (!ConversationUiState.isActiveView(VIEW_ID)) return
             runOnUiThread {
                 statusText.text = when (state) {
-                    ConversationState.IDLE -> "Idle"
-                    ConversationState.SENDING -> "Sending..."
-                    ConversationState.WAITING_OPENCLAW -> "Waiting OpenClaw..."
-                    ConversationState.RETRYING -> "Retrying..."
-                    ConversationState.DELIVERED -> "Send complete"
-                    ConversationState.FAILED -> "Send failed"
+                    ConversationState.IDLE -> "空闲"
+                    ConversationState.SENDING -> "发送中..."
+                    ConversationState.WAITING_OPENCLAW -> "等待龙虾大脑..."
+                    ConversationState.RETRYING -> "重试中..."
+                    ConversationState.DELIVERED -> "发送完成"
+                    ConversationState.FAILED -> "发送失败"
                 }
             }
         }
@@ -276,7 +276,7 @@ class MainActivity : AppCompatActivity() {
             if (!ConversationUiState.isActiveView(VIEW_ID)) return
             if (message.source == RoleSource.OPENCLAW && !message.requiresLongDecision) {
                 if (!speakSwitch.isChecked) {
-                    appendResult("[system] TTS is disabled, skip voice playback")
+                    appendResult("[系统] 已关闭语音播报，跳过TTS")
                     return
                 }
                 speak(message.textRaw)
@@ -284,10 +284,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         override fun onSystemNotice(notice: com.audiobridge.client.conversation.SystemNotice) {
-            appendResult("[system] ${notice.text}")
+            appendResult("[系统] ${notice.text}")
             if (!ConversationUiState.isActiveView(VIEW_ID)) return
             if (notice.isError) {
-                runOnUiThread { statusText.text = "Send failed" }
+                runOnUiThread { statusText.text = "发送失败" }
             }
         }
 
@@ -313,9 +313,9 @@ class MainActivity : AppCompatActivity() {
                 0, 1 -> {
                     runOnUiThread {
                         statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
-                            "Listening choice..."
+                            "正在听取选择..."
                         } else {
-                            "Recognizing..."
+                            "识别中..."
                         }
                     }
                 }
@@ -325,16 +325,16 @@ class MainActivity : AppCompatActivity() {
                     sttForwarderConsumer?.enabled = false
                     stopUnifiedAudioCapture()
                     runOnUiThread {
-                        sttButton.text = "Speak To Text"
+                        sttButton.text = "语音输入"
                         statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
-                            "Choice recognized"
+                            "已识别到选择"
                         } else {
-                            "Speech recognized"
+                            "语音识别完成"
                         }
                     }
                     emitSpeechResult(textRaw.ifBlank { lastAsrText }, purpose)
                 }
-                else -> runOnUiThread { statusText.text = "Recognizing..." }
+                else -> runOnUiThread { statusText.text = "识别中..." }
             }
         }
 
@@ -345,19 +345,19 @@ class MainActivity : AppCompatActivity() {
             sttForwarderConsumer?.enabled = false
             stopUnifiedAudioCapture()
             runOnUiThread {
-                sttButton.text = "Speak To Text"
+                sttButton.text = "语音输入"
             }
 
             if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                 sttFinished.set(true)
-                runOnUiThread { statusText.text = "Waiting your choice..." }
+                runOnUiThread { statusText.text = "等待你的选择..." }
                 scheduleLongReplyDecisionListening(delayMs = 700)
                 return
             }
 
-            runOnUiThread { statusText.text = "STT failed: ${asrError.code}" }
+            runOnUiThread { statusText.text = "语音识别失败: ${asrError.code}" }
             val msg = asrError.errMsg ?: "unknown"
-            appendResult("[system] STT failed: code=${asrError.code}, msg=$msg")
+            appendResult("[系统] 语音识别失败: code=${asrError.code}, msg=$msg")
             sttFinished.set(true)
         }
     }
@@ -407,7 +407,7 @@ class MainActivity : AppCompatActivity() {
         applyMainPanelExpansionStates()
         speakSwitch.setOnCheckedChangeListener { _, isChecked ->
             savePrefs()
-            appendResult("[system] TTS ${if (isChecked) "enabled" else "disabled"}")
+            appendResult("[系统] TTS${if (isChecked) "已开启" else "已关闭"}")
         }
         mainDebugPanelToggleButton.setOnClickListener {
             isDebugPanelExpanded = !isDebugPanelExpanded
@@ -424,7 +424,7 @@ class MainActivity : AppCompatActivity() {
         sendTextButton.setOnClickListener {
             val text = textInput.text?.toString()?.trim().orEmpty()
             if (text.isBlank()) {
-                statusText.text = "Please enter text"
+                statusText.text = "请输入文本"
                 return@setOnClickListener
             }
             if (isPendingLongReplyActive()) {
@@ -654,18 +654,18 @@ class MainActivity : AppCompatActivity() {
         val decision = resolveRouteDecision(allowNetworkProbe = false)
         val endpoint = decision.endpoint
         routeInfoText.text = buildString {
-            appendLine("Auto Route:")
-            appendLine("  current wifi: ${decision.wifiSsid ?: "N/A"}")
-            appendLine("  active wifi ipv4: ${decision.activeWifiIpv4 ?: "N/A"}")
-            appendLine("  location perm: ${if (hasLocationPermission()) "granted" else "missing"}")
-            appendLine("  lan wifi: $LAN_WIFI_SSID")
-            appendLine("  lan host ipv4: ${decision.lanBaseIpv4 ?: "N/A"}")
-            appendLine("  same-subnet fallback: ${if (decision.usedSameSubnetFallback) "used" else "not-used"}")
-            appendLine("  lan health-probe fallback: ${if (decision.usedLanHealthProbeFallback) "used" else "not-used"}")
-            appendLine("  selected mode: ${endpoint.mode}")
-            appendLine("  selected base: ${endpoint.baseUrl}")
-            appendLine("  lan base: $LAN_BASE_URL")
-            appendLine("  public base: $PUBLIC_BASE_URL")
+            appendLine("自动路由:")
+            appendLine("  当前WiFi: ${decision.wifiSsid ?: "无"}")
+            appendLine("  当前WiFi IPv4: ${decision.activeWifiIpv4 ?: "无"}")
+            appendLine("  定位权限: ${if (hasLocationPermission()) "已授权" else "缺失"}")
+            appendLine("  内网WiFi: $LAN_WIFI_SSID")
+            appendLine("  内网主机IPv4: ${decision.lanBaseIpv4 ?: "无"}")
+            appendLine("  同网段回退: ${if (decision.usedSameSubnetFallback) "已使用" else "未使用"}")
+            appendLine("  健康探测回退: ${if (decision.usedLanHealthProbeFallback) "已使用" else "未使用"}")
+            appendLine("  已选链路: ${endpoint.mode}")
+            appendLine("  已选服务: ${endpoint.baseUrl}")
+            appendLine("  内网地址: $LAN_BASE_URL")
+            appendLine("  公网地址: $PUBLIC_BASE_URL")
         }
     }
 
@@ -693,7 +693,7 @@ class MainActivity : AppCompatActivity() {
     private fun appendResult(line: String) {
         runOnUiThread {
             val old = textResultView.text?.toString().orEmpty()
-            val next = if (old.isBlank() || old == "(text result)") line else "$old\n$line"
+            val next = if (old.isBlank() || old == "(对话记录)") line else "$old\n$line"
             textResultView.text = next
         }
     }
@@ -756,7 +756,7 @@ class MainActivity : AppCompatActivity() {
         val pending = pendingLongReply
         if (pending == null || System.currentTimeMillis() >= pending.request.deadlineAtMs) {
             clearPendingLongReply()
-            runOnUiThread { statusText.text = "Long-reply choice expired" }
+            runOnUiThread { statusText.text = "长回复选择已超时" }
             return
         }
         applyLongReplyChoice(pending, choice)
@@ -769,8 +769,8 @@ class MainActivity : AppCompatActivity() {
         when (choice) {
             LongReplyChoice.SUMMARY -> {
                 clearPendingLongReply()
-                appendResult("[system] 接线员：已选择简报播报")
-                runOnUiThread { statusText.text = "Summarizing..." }
+                appendResult("[系统] 接线员：已选择简报播报")
+                runOnUiThread { statusText.text = "正在生成简报..." }
                 Thread {
                     try {
                         val summary = conversationEngine.requestLocalSummary(
@@ -779,20 +779,20 @@ class MainActivity : AppCompatActivity() {
                         )
                         val spokenSummary = summary.ifBlank { pending.request.originalDisplay }
                         speak(spokenSummary, force = true)
-                        runOnUiThread { statusText.text = "Brief spoken" }
+                        runOnUiThread { statusText.text = "已播报简报" }
                     } catch (e: Exception) {
-                        appendResult("[system] 简报失败，改为原文播报: ${e.message ?: "unknown"}")
+                        appendResult("[系统] 简报失败，改为原文播报: ${e.message ?: "未知错误"}")
                         speak(pending.request.originalRaw, force = true)
-                        runOnUiThread { statusText.text = "Original spoken" }
+                        runOnUiThread { statusText.text = "已播报原文" }
                     }
                 }.start()
             }
 
             LongReplyChoice.ORIGINAL -> {
                 clearPendingLongReply()
-                appendResult("[system] 接线员：已选择原文播报")
+                appendResult("[系统] 接线员：已选择原文播报")
                 speak(pending.request.originalRaw, force = true)
-                runOnUiThread { statusText.text = "Original spoken" }
+                runOnUiThread { statusText.text = "已播报原文" }
             }
 
             LongReplyChoice.OTHER -> Unit
@@ -808,16 +808,16 @@ class MainActivity : AppCompatActivity() {
         pendingLongReply = pending
         setLongReplyChoiceButtonsVisible(true)
 
-        appendResult("[system] 内容较长，请在30秒内说“简报”或“原文”")
+        appendResult("[系统] 内容较长，请在30秒内说“简报”或“原文”")
         speak("这条回复内容较长。请在三十秒内说简报或原文。", force = true)
-        runOnUiThread { statusText.text = "Waiting long-reply choice..." }
+        runOnUiThread { statusText.text = "等待长回复选择..." }
 
         val timeoutTask = Runnable {
             val active = pendingLongReply
             if (active == null || active.request.id != pending.request.id) return@Runnable
             clearPendingLongReply()
-            appendResult("[system] 30秒未选择，已略过该条语音播报")
-            runOnUiThread { statusText.text = "Long reply skipped" }
+            appendResult("[系统] 30秒未选择，已略过该条语音播报")
+            runOnUiThread { statusText.text = "已跳过长回复播报" }
         }
         pendingLongReplyTimeoutTask = timeoutTask
         val delay = (request.deadlineAtMs - System.currentTimeMillis()).coerceAtLeast(1000L)
@@ -848,12 +848,12 @@ class MainActivity : AppCompatActivity() {
         if (input.isBlank()) return
         textInput.setText("")
         savePrefs()
-        appendResult("[user] $input")
+        appendResult("[用户] $input")
         val endpoint = resolveBridgeEndpoint(allowNetworkProbe = true)
         val sessionId = sessionIdInput.text?.toString()?.trim().orEmpty().ifBlank { "voice-bridge-session" }
         val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
         runOnUiThread {
-            statusText.text = "Sending (${endpoint.mode}, wifi=${endpoint.wifiSsid ?: "N/A"})"
+            statusText.text = "发送中（${endpoint.mode}，WiFi=${endpoint.wifiSsid ?: "无"}）"
             refreshRouteInfo()
         }
         conversationEngine.submitText(
@@ -883,13 +883,13 @@ class MainActivity : AppCompatActivity() {
             val ret = SparkChain.getInst().init(applicationContext, config)
             sparkInitialized = ret == 0
             if (!sparkInitialized) {
-                appendResult("[system] SparkChain init failed: $ret")
-                statusText.text = "STT init failed: $ret"
+                appendResult("[系统] SparkChain 初始化失败: $ret")
+                statusText.text = "语音识别初始化失败: $ret"
             }
             sparkInitialized
         } catch (e: Exception) {
-            appendResult("[system] SparkChain init exception: ${e.message ?: "unknown"}")
-            statusText.text = "STT init exception"
+            appendResult("[系统] SparkChain 初始化异常: ${e.message ?: "未知错误"}")
+            statusText.text = "语音识别初始化异常"
             false
         }
     }
@@ -914,10 +914,10 @@ class MainActivity : AppCompatActivity() {
         }
         sttListening = false
         runOnUiThread {
-            sttButton.text = "Speak To Text"
-            statusText.text = "STT error: $msg"
+            sttButton.text = "语音输入"
+            statusText.text = "语音识别异常: $msg"
         }
-        appendResult("[system] STT $stage exception: $msg")
+        appendResult("[系统] 语音识别异常($stage): $msg")
     }
 
     private fun startSpeechToText(purpose: SpeechPurpose) {
@@ -951,8 +951,8 @@ class MainActivity : AppCompatActivity() {
                 if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                     scheduleLongReplyDecisionListening(delayMs = 700)
                 } else {
-                    appendResult("[system] STT start failed: $ret")
-                    statusText.text = "STT start failed: $ret"
+                    appendResult("[系统] 语音识别启动失败: $ret")
+                    statusText.text = "语音识别启动失败: $ret"
                 }
                 return
             }
@@ -964,18 +964,18 @@ class MainActivity : AppCompatActivity() {
                 if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                     scheduleLongReplyDecisionListening(delayMs = 700)
                 } else {
-                    appendResult("[system] microphone unavailable")
-                    statusText.text = "Microphone unavailable"
+                    appendResult("[系统] 麦克风不可用")
+                    statusText.text = "麦克风不可用"
                 }
                 return
             }
 
             sttListening = true
-            sttButton.text = "Stop Listening"
+            sttButton.text = "停止"
             statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
-                "Listening choice..."
+                "正在听取选择..."
             } else {
-                "Listening..."
+                "正在聆听..."
             }
         } catch (err: Throwable) {
             handleSttException("start", err, purpose)
@@ -986,8 +986,8 @@ class MainActivity : AppCompatActivity() {
         try {
             if (!sttListening) return
             sttListening = false
-            sttButton.text = "Speak To Text"
-            statusText.text = "Processing..."
+            sttButton.text = "语音输入"
+            statusText.text = "处理中..."
 
             // Disable STT forwarder and stop unified capture if not in meeting mode
             sttForwarderConsumer?.enabled = false
@@ -1002,8 +1002,8 @@ class MainActivity : AppCompatActivity() {
                 } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                     scheduleLongReplyDecisionListening(delayMs = 700)
                 } else {
-                    appendResult("[system] STT stop failed: $ret")
-                    statusText.text = "STT stop failed: $ret"
+                    appendResult("[系统] 语音识别停止失败: $ret")
+                    statusText.text = "语音识别停止失败: $ret"
                 }
             }
         } catch (err: Throwable) {
@@ -1016,12 +1016,12 @@ class MainActivity : AppCompatActivity() {
         val spoken = text.trim()
         if (spoken.isBlank()) {
             if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
-                runOnUiThread { statusText.text = "Waiting your choice..." }
+                runOnUiThread { statusText.text = "等待你的选择..." }
                 scheduleLongReplyDecisionListening(delayMs = 700)
                 return
             }
-            appendResult("[system] no valid speech text")
-            runOnUiThread { statusText.text = "No speech result" }
+            appendResult("[系统] 未识别到有效语音文本")
+            runOnUiThread { statusText.text = "无语音结果" }
             return
         }
 
@@ -1032,7 +1032,7 @@ class MainActivity : AppCompatActivity() {
 
         runOnUiThread {
             textInput.setText(spoken)
-            statusText.text = "Speech recognized"
+            statusText.text = "语音识别完成"
         }
         sendTextToBridge(spoken)
     }
@@ -1041,7 +1041,7 @@ class MainActivity : AppCompatActivity() {
         val pending = pendingLongReply
         if (pending == null || System.currentTimeMillis() >= pending.request.deadlineAtMs) {
             clearPendingLongReply()
-            runOnUiThread { statusText.text = "Speech recognized" }
+            runOnUiThread { statusText.text = "语音识别完成" }
             sendTextToBridge(spoken)
             return
         }
@@ -1059,7 +1059,7 @@ class MainActivity : AppCompatActivity() {
                 clearPendingLongReply()
                 runOnUiThread {
                     textInput.setText(spoken)
-                    statusText.text = "Speech recognized"
+                    statusText.text = "语音识别完成"
                 }
                 sendTextToBridge(spoken)
             }
@@ -1167,9 +1167,9 @@ class MainActivity : AppCompatActivity() {
                         audioWriting.set(false)
                         sttListening = false
                         runOnUiThread {
-                            sttButton.text = "Speak To Text"
-                            statusText.text = "STT write failed: $ret"
-                            appendResult("[system] STT write failed: $ret")
+                            sttButton.text = "语音输入"
+                            statusText.text = "语音识别写入失败: $ret"
+                            appendResult("[系统] 语音识别写入失败: $ret")
                         }
                         try {
                             asrClient.stop(true)
@@ -1182,8 +1182,8 @@ class MainActivity : AppCompatActivity() {
             } catch (e: Exception) {
                 Log.e(TAG, "Audio capture failed", e)
                 runOnUiThread {
-                    appendResult("[system] audio capture failed: ${e.message ?: "unknown"}")
-                    statusText.text = "Audio capture failed"
+                    appendResult("[系统] 音频采集失败: ${e.message ?: "未知错误"}")
+                    statusText.text = "音频采集失败"
                 }
             } finally {
                 try {
@@ -1236,7 +1236,7 @@ class MainActivity : AppCompatActivity() {
         tts = TextToSpeech(this) { status ->
             if (status != TextToSpeech.SUCCESS) {
                 Log.e(TAG, "TTS init failed: status=$status")
-                runOnUiThread { appendResult("[system] TTS init failed: $status") }
+                runOnUiThread { appendResult("[系统] TTS 初始化失败: $status") }
                 return@TextToSpeech
             }
             val zhResult = tts?.setLanguage(Locale.SIMPLIFIED_CHINESE) ?: TextToSpeech.LANG_NOT_SUPPORTED
@@ -1244,7 +1244,7 @@ class MainActivity : AppCompatActivity() {
                 val fallback = tts?.setLanguage(Locale.CHINESE) ?: TextToSpeech.LANG_NOT_SUPPORTED
                 if (fallback == TextToSpeech.LANG_MISSING_DATA || fallback == TextToSpeech.LANG_NOT_SUPPORTED) {
                     Log.w(TAG, "TTS language unsupported: zhResult=$zhResult fallback=$fallback")
-                    runOnUiThread { appendResult("[system] TTS Chinese voice unavailable on device") }
+                    runOnUiThread { appendResult("[系统] 设备不支持中文TTS音色") }
                 }
             }
             ttsReady = true
@@ -1258,7 +1258,7 @@ class MainActivity : AppCompatActivity() {
         if (!meetingManager.initialize()) {
             Log.e(TAG, "Failed to initialize MeetingManager")
             meetingModeSwitch.isEnabled = false
-            meetingStatusText.text = "Storage error"
+            meetingStatusText.text = "存储异常"
             publishMeetingUiSnapshot()
         }
 
@@ -1290,10 +1290,10 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 when (task.status) {
                     ImageUploadManager.ImageTask.Status.UPLOADED -> {
-                        appendResult("[image] Photo ${task.seq} uploaded")
+                        appendResult("[图片] 第${task.seq}张上传成功")
                     }
                     ImageUploadManager.ImageTask.Status.FAILED -> {
-                        appendResult("[image] Photo ${task.seq} failed: ${task.lastError}")
+                        appendResult("[图片] 第${task.seq}张上传失败: ${task.lastError}")
                     }
                     else -> {}
                 }
@@ -1303,7 +1303,7 @@ class MainActivity : AppCompatActivity() {
         
         imageUploadManager.onQueueProgress = { pending, uploaded, failed ->
             runOnUiThread {
-                imageUploadStatusText.text = "Images: $uploaded uploaded, $pending pending"
+                imageUploadStatusText.text = "图片: 已上传$uploaded, 待上传$pending"
             }
         }
         
@@ -1325,10 +1325,10 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 when (task.status) {
                     UploadQueueManager.UploadTask.Status.UPLOADED -> {
-                        appendResult("[upload] Segment ${task.seq} uploaded")
+                        appendResult("[上传] 分段${task.seq}上传成功")
                     }
                     UploadQueueManager.UploadTask.Status.FAILED -> {
-                        appendResult("[upload] Segment ${task.seq} failed: ${task.lastError}")
+                        appendResult("[上传] 分段${task.seq}上传失败: ${task.lastError}")
                     }
                     else -> {}
                 }
@@ -1338,7 +1338,7 @@ class MainActivity : AppCompatActivity() {
         
         uploadQueueManager.onQueueProgress = { pending, uploaded, failed ->
             runOnUiThread {
-                meetingInfoText.text = "Upload: $uploaded done, $pending pending, $failed failed"
+                meetingInfoText.text = "上传: 已完成$uploaded, 待上传$pending, 失败$failed"
                 publishMeetingUiSnapshot()
             }
         }
@@ -1349,8 +1349,8 @@ class MainActivity : AppCompatActivity() {
                 val failed = uploadQueueManager.failedCount
                 if (failed > 0) {
                     runOnUiThread {
-                        appendResult("[upload] Completed with $failed failed segments, keep local data for retry")
-                        meetingInfoText.text = "Upload failed: $failed segments"
+                        appendResult("[上传] 完成但有${failed}个分段失败，已保留本地数据供重试")
+                        meetingInfoText.text = "上传失败: $failed 个分段"
                         publishMeetingUiSnapshot()
                         updateMeetingStatusUI()
                     }
@@ -1361,8 +1361,8 @@ class MainActivity : AppCompatActivity() {
                     }
                 } else {
                     runOnUiThread {
-                        appendResult("[upload] All segments uploaded")
-                        meetingInfoText.text = "All uploads complete"
+                        appendResult("[上传] 所有分段已上传")
+                        meetingInfoText.text = "上传已完成"
                         publishMeetingUiSnapshot()
                     }
                     val marked = meetingManager.markMeetingUploaded(uploadedMeetingId)
@@ -1370,7 +1370,7 @@ class MainActivity : AppCompatActivity() {
                     Log.i(TAG, "Upload complete for $uploadedMeetingId, marked=$marked, cleaned=$deleted")
                     if (deleted > 0) {
                         runOnUiThread {
-                            appendResult("[cleanup] Deleted $deleted uploaded meetings (retention=7 days)")
+                            appendResult("[清理] 已删除${deleted}个已上传会议（保留7天）")
                             updateMeetingStatusUI()
                         }
                     }
@@ -1410,9 +1410,9 @@ class MainActivity : AppCompatActivity() {
 
         // Wire wake word detection
         kwsConsumer.onWakeWordDetected = {
-            Log.i(TAG, "Wake word detected!")
+            Log.i(TAG, "检测到唤醒词！")
             runOnUiThread {
-                Toast.makeText(this, "Wake word detected!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "检测到唤醒词！", Toast.LENGTH_SHORT).show()
             }
             wakeWordController.onWakeWordDetected()
             
@@ -1453,7 +1453,7 @@ class MainActivity : AppCompatActivity() {
         meetingManager.onMeetingStarted = { meetingId ->
             Log.i(TAG, "Meeting started: $meetingId")
             runOnUiThread {
-                appendResult("[meeting] Started: $meetingId")
+                appendResult("[会议] 已开始: $meetingId")
                 updateMeetingStatusUI()
                 showImageUploadUI()
             }
@@ -1462,7 +1462,7 @@ class MainActivity : AppCompatActivity() {
         meetingManager.onMeetingEnded = { meetingId ->
             Log.i(TAG, "Meeting ended: $meetingId")
             runOnUiThread {
-                appendResult("[meeting] Ended: $meetingId")
+                appendResult("[会议] 已结束: $meetingId")
                 updateMeetingStatusUI()
                 hideImageUploadUI()
             }
@@ -1496,7 +1496,7 @@ class MainActivity : AppCompatActivity() {
                         pendingUploadMeetingId = meetingId
                     } else {
                         runOnUiThread {
-                            appendResult("[upload] No valid segment files found, keep local data for investigation")
+                            appendResult("[上传] 未找到有效分段文件，已保留本地数据用于排查")
                         }
                         Log.w(TAG, "No valid segment files to enqueue for meeting $meetingId")
                         pendingUploadMeetingId = null
@@ -1514,7 +1514,7 @@ class MainActivity : AppCompatActivity() {
                 }
             } else {
                 runOnUiThread {
-                    appendResult("[upload] No manifest found, skip upload and keep local data")
+                    appendResult("[上传] 未找到清单，跳过上传并保留本地数据")
                 }
                 Log.w(TAG, "No upload manifest found for meeting $meetingId")
                 pendingUploadMeetingId = null
@@ -1526,7 +1526,7 @@ class MainActivity : AppCompatActivity() {
         meetingManager.onSegmentSealed = { segmentId, seq, file ->
             Log.d(TAG, "Segment sealed: $segmentId, size=${file.length()}")
             runOnUiThread {
-                meetingInfoText.text = "Segment $seq saved: ${file.length() / 1024}KB"
+                meetingInfoText.text = "分段${seq}已保存: ${file.length() / 1024}KB"
                 publishMeetingUiSnapshot()
             }
         }
@@ -1534,7 +1534,7 @@ class MainActivity : AppCompatActivity() {
         meetingManager.onError = { message ->
             Log.e(TAG, "MeetingManager error: $message")
             runOnUiThread {
-                Toast.makeText(this, "Meeting error: $message", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "会议错误: $message", Toast.LENGTH_SHORT).show()
             }
         }
 
@@ -1646,7 +1646,7 @@ class MainActivity : AppCompatActivity() {
             httpClient.newCall(request).execute().use { response ->
                 val payload = response.body?.string().orEmpty()
                 if (response.isSuccessful) {
-                    runOnUiThread { appendResult("[transcription] queued for meeting $meetingId") }
+                    runOnUiThread { appendResult("[转写] 已入队: $meetingId") }
                 } else {
                     val json = try {
                         JSONObject(payload.ifBlank { "{}" })
@@ -1655,16 +1655,16 @@ class MainActivity : AppCompatActivity() {
                     }
                     val err = json.optString("error", "unknown")
                     if (response.code == 409 && err == "job_in_progress") {
-                        runOnUiThread { appendResult("[transcription] already in progress for $meetingId") }
+                        runOnUiThread { appendResult("[转写] 任务进行中: $meetingId") }
                     } else {
                         Log.w(TAG, "Transcription trigger failed: code=${response.code}, payload=$payload")
-                        runOnUiThread { appendResult("[transcription] trigger failed: $err") }
+                        runOnUiThread { appendResult("[转写] 触发失败: $err") }
                     }
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Transcription trigger exception: ${e.message}")
-            runOnUiThread { appendResult("[transcription] trigger exception: ${e.message}") }
+            runOnUiThread { appendResult("[转写] 触发异常: ${e.message}") }
         }
     }
 
@@ -1673,10 +1673,10 @@ class MainActivity : AppCompatActivity() {
         Thread {
             val modeOffOk = setRemoteMeetingMode(baseUrl, meetingId, enabled = false)
             if (!modeOffOk) {
-                runOnUiThread { appendResult("[meeting] remote mode off failed: $meetingId") }
+                runOnUiThread { appendResult("[会议] 关闭远端模式失败: $meetingId") }
                 return@Thread
             }
-            runOnUiThread { appendResult("[meeting] remote ended: $meetingId") }
+            runOnUiThread { appendResult("[会议] 远端会议已结束: $meetingId") }
             if (triggerTranscription) {
                 triggerRemoteTranscription(baseUrl, meetingId)
             }
@@ -1711,7 +1711,7 @@ class MainActivity : AppCompatActivity() {
 
             val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
             meetingModeSwitch.isEnabled = false
-            meetingStatusText.text = "Starting meeting..."
+            meetingStatusText.text = "正在开始会议..."
             publishMeetingUiSnapshot()
 
             Thread {
@@ -1723,10 +1723,10 @@ class MainActivity : AppCompatActivity() {
 
                 runOnUiThread {
                     if (remoteMeetingId == null) {
-                        appendResult("[meeting] Failed to create remote meeting")
+                        appendResult("[会议] 创建远端会议失败")
                         activeMeetingBaseUrl = null
                         setMeetingSwitchChecked(false)
-                        meetingStatusText.text = "Failed to start"
+                        meetingStatusText.text = "启动失败"
                         publishMeetingUiSnapshot()
                         meetingModeSwitch.isEnabled = true
                         meetingToggleInFlight.set(false)
@@ -1740,7 +1740,7 @@ class MainActivity : AppCompatActivity() {
                         diskWriterConsumer.enabled = true
                         kwsConsumer.enabled = true
                         if (!startMeetingAudioCapture()) {
-                            appendResult("[meeting] Audio capture start failed")
+                            appendResult("[会议] 音频采集启动失败")
                             meetingManager.endMeeting()
                             wakeWordController.onMeetingModeChanged(false)
                             diskWriterConsumer.enabled = false
@@ -1748,19 +1748,19 @@ class MainActivity : AppCompatActivity() {
                             kwsConsumer.flush()
                             stopMeetingAudioCapture()
                             setMeetingSwitchChecked(false)
-                            meetingStatusText.text = "Failed to start audio"
+                            meetingStatusText.text = "音频启动失败"
                             publishMeetingUiSnapshot()
                             activeMeetingBaseUrl = null
                             Thread {
                                 setRemoteMeetingMode(baseUrl, remoteMeetingId, enabled = false)
                             }.start()
                         } else {
-                            appendResult("[meeting] Remote meeting ready: $meetingId")
+                            appendResult("[会议] 远端会议就绪: $meetingId")
                         }
                     } else {
-                        appendResult("[meeting] Failed to start local meeting")
+                        appendResult("[会议] 本地会议启动失败")
                         setMeetingSwitchChecked(false)
-                        meetingStatusText.text = "Failed to start"
+                        meetingStatusText.text = "启动失败"
                         publishMeetingUiSnapshot()
                         activeMeetingBaseUrl = null
                         Thread {
@@ -1778,7 +1778,7 @@ class MainActivity : AppCompatActivity() {
 
         // Stop meeting locally first; remote finalization happens after upload completion.
         meetingModeSwitch.isEnabled = false
-        meetingStatusText.text = "Ending meeting..."
+        meetingStatusText.text = "正在结束会议..."
         publishMeetingUiSnapshot()
         meetingManager.endMeeting()
         wakeWordController.onMeetingModeChanged(false)
@@ -1819,35 +1819,35 @@ class MainActivity : AppCompatActivity() {
         val stats = meetingManager.getStorageStats()
         val detail = StringBuilder()
         val quickStatus = if (meetingManager.isActive) {
-            val meetingId = meetingManager.meetingId ?: "unknown"
-            detail.append("Meeting: $meetingId\n")
-            detail.append("Wake word: ${wakeWordStateMachine.getStateDescription()}\n")
+            val meetingId = meetingManager.meetingId ?: "未知"
+            detail.append("会议ID: $meetingId\n")
+            detail.append("唤醒词: ${wakeWordStateMachine.getStateDescription()}\n")
             val activeConsumers = pcmBus.getActiveConsumerNames()
             if (activeConsumers.isNotEmpty()) {
-                detail.append("Audio: ${activeConsumers.joinToString(", ")}\n")
+                detail.append("音频链路: ${activeConsumers.joinToString(", ")}\n")
             }
-            "Active | ${meetingId.take(14)}"
+            "会议中 | ${meetingId.take(14)}"
         } else {
             if (sttListening) {
-                detail.append("STT: Listening...\n")
+                detail.append("语音识别: 聆听中...\n")
             }
             if (pcmBus.isRunning) {
                 val activeConsumers = pcmBus.getActiveConsumerNames()
                 if (activeConsumers.isNotEmpty()) {
-                    detail.append("Audio: ${activeConsumers.joinToString(", ")}\n")
+                    detail.append("音频链路: ${activeConsumers.joinToString(", ")}\n")
                 }
             }
             if (::uploadQueueManager.isInitialized && uploadQueueManager.isQueueActive) {
                 detail.append(
-                    "Upload: ${uploadQueueManager.uploadedCount}/" +
+                    "上传进度: ${uploadQueueManager.uploadedCount}/" +
                         "${uploadQueueManager.pendingCount + uploadQueueManager.uploadedCount + uploadQueueManager.failedCount}\n",
                 )
             }
-            if (detail.isEmpty()) "Idle" else "Idle | background active"
+            if (detail.isEmpty()) "空闲" else "空闲 | 后台运行"
         }
 
         detail.append(
-            "Storage: %.1f MB, %d meetings, oldest: %d min".format(
+            "存储: %.1f MB, %d 场会议, 最早: %d 分钟".format(
                 stats.totalMb,
                 stats.totalMeetings,
                 stats.oldestMeetingAgeMs / 60000,
@@ -1898,7 +1898,7 @@ class MainActivity : AppCompatActivity() {
             if (meetingId.isBlank()) return@mapNotNull null
             LocalMeetingHistoryRecord(
                 meetingId = meetingId,
-                status = meeting.optString("status", "unknown"),
+                status = meeting.optString("status", "未知"),
                 createdAt = meeting.optString("created_at", ""),
                 totalSegments = meeting.optInt("total_segments", 0),
             )
@@ -1926,9 +1926,9 @@ class MainActivity : AppCompatActivity() {
             val source = if (remote != null) "LR" else "L "
             val createdAt = formatHistoryTime(local.createdAt).ifBlank {
                 formatHistoryTime(remote?.createdAt.orEmpty())
-            }.ifBlank { "n/a" }
-            val remoteStatus = remote?.let { " | R:${it.status}" }.orEmpty()
-            renderedLines += "$index. [$source] $createdAt | L:${local.status} seg=${local.totalSegments}$remoteStatus | ${local.meetingId.take(18)}"
+            }.ifBlank { "无" }
+            val remoteStatus = remote?.let { " | 远端:${it.status}" }.orEmpty()
+            renderedLines += "$index. [$source] $createdAt | 本地:${local.status} 分段=${local.totalSegments}$remoteStatus | ${local.meetingId.take(18)}"
             index += 1
         }
 
@@ -1936,34 +1936,34 @@ class MainActivity : AppCompatActivity() {
             .filter { remote -> localRecords.none { it.meetingId == remote.meetingId } }
             .take(10)
             .forEach { remote ->
-                val createdAt = formatHistoryTime(remote.createdAt).ifBlank { "n/a" }
-                renderedLines += "$index. [ R] $createdAt | R:${remote.status} | ${remote.meetingId.take(18)}"
+                val createdAt = formatHistoryTime(remote.createdAt).ifBlank { "无" }
+                renderedLines += "$index. [ 远] $createdAt | 远端:${remote.status} | ${remote.meetingId.take(18)}"
                 index += 1
             }
 
         if (renderedLines.isEmpty()) {
-            renderedLines += "(no local/server meeting history)"
+            renderedLines += "(暂无本地/服务端会议历史)"
         }
 
         val remoteState = when {
             remoteError != null -> {
                 val host = remoteBaseUrl?.trimEnd('/').orEmpty()
                 if (host.isBlank()) {
-                    "server: failed (${remoteError.take(80)})"
+                    "服务端: 拉取失败 (${remoteError.take(80)})"
                 } else {
-                    "server: failed @ $host (${remoteError.take(80)})"
+                    "服务端: 拉取失败 @ $host (${remoteError.take(80)})"
                 }
             }
             remoteFetchedAt > 0L -> {
                 val ageSec = ((System.currentTimeMillis() - remoteFetchedAt).coerceAtLeast(0L)) / 1000L
                 val host = remoteBaseUrl?.trimEnd('/').orEmpty()
                 if (host.isBlank()) {
-                    "server: synced ${remoteSnapshot.size} items (${ageSec}s ago)"
+                    "服务端: 已同步 ${remoteSnapshot.size} 条（${ageSec}秒前）"
                 } else {
-                    "server: synced ${remoteSnapshot.size} items from $host (${ageSec}s ago)"
+                    "服务端: 已从 $host 同步 ${remoteSnapshot.size} 条（${ageSec}秒前）"
                 }
             }
-            else -> "server: not fetched yet"
+            else -> "服务端: 尚未拉取"
         }
         renderedLines += ""
         renderedLines += remoteState
@@ -2048,7 +2048,7 @@ class MainActivity : AppCompatActivity() {
                                 if (meetingId.isBlank()) continue
                                 items += RemoteMeetingHistoryRecord(
                                     meetingId = meetingId,
-                                    status = obj.optString("status", "unknown"),
+                                    status = obj.optString("status", "未知"),
                                     createdAt = obj.optString("created_at", ""),
                                 )
                             }
@@ -2057,7 +2057,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) {
-                fetchError = e.message ?: "request_failed"
+                fetchError = e.message ?: "请求失败"
             } finally {
                 synchronized(remoteHistoryLock) {
                     remoteHistoryBaseUrl = baseUrl
@@ -2088,7 +2088,7 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "TTS speak requested, force=$force, length=${speakText.length}")
         if (!ttsReady || tts == null) {
             Log.w(TAG, "TTS not ready, reinitializing")
-            appendResult("[system] TTS not ready, reinitializing")
+            appendResult("[系统] TTS未就绪，正在重试")
             initTts()
             return
         }
@@ -2124,7 +2124,7 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "TTS speak return code=$ret")
         if (ret != TextToSpeech.SUCCESS) {
             Log.e(TAG, "TTS speak failed: ret=$ret")
-            appendResult("[system] TTS speak failed: $ret")
+            appendResult("[系统] TTS播报失败: $ret")
             ttsReady = false
             initTts()
         }
@@ -2176,7 +2176,7 @@ class MainActivity : AppCompatActivity() {
             refreshRouteInfo()
         }
         if (requestCode == REQ_RECORD_AUDIO && hasRecordAudioPermission()) {
-            statusText.text = "Microphone permission granted"
+            statusText.text = "麦克风权限已授予"
             if (isPendingLongReplyActive() && !sttListening) {
                 scheduleLongReplyDecisionListening(delayMs = 400)
             }
@@ -2209,7 +2209,7 @@ class MainActivity : AppCompatActivity() {
             takePictureIntent.putExtra(MediaStore.EXTRA_OUTPUT, pendingCameraImageUri)
             startActivityForResult(takePictureIntent, REQ_CAMERA)
         } else {
-            Toast.makeText(this, "No camera app available", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "未找到可用相机应用", Toast.LENGTH_SHORT).show()
         }
     }
     
@@ -2228,7 +2228,7 @@ class MainActivity : AppCompatActivity() {
                     handleCapturedImage(pendingCameraImageUri!!)
                     pendingCameraImageUri = null
                 } else {
-                    Toast.makeText(this, "Photo capture cancelled", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this, "已取消拍照", Toast.LENGTH_SHORT).show()
                 }
             }
             REQ_GALLERY -> {
@@ -2242,7 +2242,7 @@ class MainActivity : AppCompatActivity() {
     private fun handleCapturedImage(uri: Uri) {
         val meetingId = meetingManager.meetingId
         if (meetingId == null) {
-            Toast.makeText(this, "No active meeting", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "当前无进行中的会议", Toast.LENGTH_SHORT).show()
             return
         }
         
@@ -2250,7 +2250,7 @@ class MainActivity : AppCompatActivity() {
             // Copy image to app storage
             val inputStream = contentResolver.openInputStream(uri)
             if (inputStream == null) {
-                Toast.makeText(this, "Could not read image", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "无法读取图片", Toast.LENGTH_SHORT).show()
                 return
             }
             
@@ -2271,18 +2271,18 @@ class MainActivity : AppCompatActivity() {
             val task = imageUploadManager.addImage(imageFile, meetingId, imageFile.name)
             imageUploadManager.processQueue()
             
-            Toast.makeText(this, "Photo added to upload queue", Toast.LENGTH_SHORT).show()
-            appendResult("[image] Photo queued for upload: ${task.imageId}")
+            Toast.makeText(this, "图片已加入上传队列", Toast.LENGTH_SHORT).show()
+            appendResult("[图片] 已加入上传队列: ${task.imageId}")
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to handle captured image", e)
-            Toast.makeText(this, "Failed to process image: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "图片处理失败: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
     
     private fun updateImageUploadStatus() {
         val stats = imageUploadManager.getStats()
-        imageUploadStatusText.text = "Images: ${stats.uploaded} uploaded, ${stats.pending} pending, ${stats.failed} failed"
+        imageUploadStatusText.text = "图片: 已上传${stats.uploaded}, 待上传${stats.pending}, 失败${stats.failed}"
     }
     
     private fun showImageUploadUI() {
@@ -2318,3 +2318,4 @@ class MainActivity : AppCompatActivity() {
         imageUploadStatusText.visibility = View.GONE
     }
 }
+
