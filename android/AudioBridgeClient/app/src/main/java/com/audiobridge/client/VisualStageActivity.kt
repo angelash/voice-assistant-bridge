@@ -1,4 +1,4 @@
-package com.audiobridge.client
+﻿package com.audiobridge.client
 
 import android.Manifest
 import android.content.Context
@@ -18,13 +18,16 @@ import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.view.KeyEvent
+import android.view.View
 import android.widget.Button
 import android.widget.EditText
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.audiobridge.client.conversation.BridgeEndpointInfo
+import com.audiobridge.client.conversation.ConversationUiState
 import com.audiobridge.client.conversation.ConversationState
 import com.audiobridge.client.conversation.ConversationSubmitRequest
 import com.audiobridge.client.conversation.LongReplyDecisionRequired
@@ -47,6 +50,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class VisualStageActivity : AppCompatActivity() {
     private companion object {
         private const val TAG = "VisualStageActivity"
+        private const val VIEW_ID = ConversationUiState.VIEW_VISUAL
         private const val PREFS_NAME = "audiobridge"
         private const val LAN_BASE_URL = "http://10.3.91.22:8765"
         private const val PUBLIC_BASE_URL = "http://voice-bridge.iepose.cn"
@@ -92,6 +96,9 @@ class VisualStageActivity : AppCompatActivity() {
     private lateinit var inputText: EditText
     private lateinit var sendButton: Button
     private lateinit var sttButton: Button
+    private lateinit var longReplyChoiceContainer: LinearLayout
+    private lateinit var longReplySummaryButton: Button
+    private lateinit var longReplyOriginalButton: Button
     private lateinit var closeButton: Button
 
     private var tts: TextToSpeech? = null
@@ -132,6 +139,8 @@ class VisualStageActivity : AppCompatActivity() {
 
     private val conversationListener = object : com.audiobridge.client.conversation.BridgeConversationEngine.Listener {
         override fun onStateChanged(state: ConversationState) {
+            ConversationUiState.updateState(state)
+            if (!ConversationUiState.isActiveView(VIEW_ID)) return
             runOnUiThread {
                 currentConversationState = state
                 updateStatus(
@@ -150,7 +159,10 @@ class VisualStageActivity : AppCompatActivity() {
         }
 
         override fun onRoleMessage(message: RoleMessage) {
+            ConversationUiState.pushRoleMessage(message)
+            if (!ConversationUiState.isActiveView(VIEW_ID)) return
             runOnUiThread {
+                if (!ConversationUiState.isActiveView(VIEW_ID)) return@runOnUiThread
                 if (message.source == RoleSource.LOCAL_OPERATOR) {
                     pushRoleLine(localMessages, message.textDisplay)
                     renderRoleMessages()
@@ -170,6 +182,7 @@ class VisualStageActivity : AppCompatActivity() {
         }
 
         override fun onSystemNotice(notice: com.audiobridge.client.conversation.SystemNotice) {
+            if (!ConversationUiState.isActiveView(VIEW_ID)) return
             runOnUiThread {
                 updateStatus(notice.text, isError = notice.isError)
                 if (notice.isError) {
@@ -181,7 +194,9 @@ class VisualStageActivity : AppCompatActivity() {
         }
 
         override fun onLongReplyDecisionRequired(request: LongReplyDecisionRequired) {
+            if (!ConversationUiState.isActiveView(VIEW_ID)) return
             runOnUiThread {
+                if (!ConversationUiState.isActiveView(VIEW_ID)) return@runOnUiThread
                 beginLongReplyDecision(request)
             }
         }
@@ -202,7 +217,7 @@ class VisualStageActivity : AppCompatActivity() {
                     sttListening = false
                     stopAudioCapture()
                     runOnUiThread {
-                        sttButton.text = "语音"
+                        sttButton.text = "璇煶"
                         updateStatus(if (purpose == SpeechPurpose.LONG_REPLY_DECISION) "Choice recognized" else "Speech recognized")
                     }
                     emitSpeechResult(textRaw.ifBlank { lastAsrText }, purpose)
@@ -215,7 +230,7 @@ class VisualStageActivity : AppCompatActivity() {
             val purpose = currentSpeechPurpose
             sttListening = false
             stopAudioCapture()
-            runOnUiThread { sttButton.text = "语音" }
+            runOnUiThread { sttButton.text = "璇煶" }
 
             if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                 sttFinished.set(true)
@@ -240,13 +255,17 @@ class VisualStageActivity : AppCompatActivity() {
         inputText = findViewById(R.id.visualInputText)
         sendButton = findViewById(R.id.visualSendButton)
         sttButton = findViewById(R.id.visualSttButton)
+        longReplyChoiceContainer = findViewById(R.id.visualLongReplyChoiceContainer)
+        longReplySummaryButton = findViewById(R.id.visualLongReplySummaryButton)
+        longReplyOriginalButton = findViewById(R.id.visualLongReplyOriginalButton)
+        longReplySummaryButton.text = "\u7b80\u62a5"
+        longReplyOriginalButton.text = "\u539f\u6587"
         closeButton = findViewById(R.id.closeVisualButton)
 
         initTts()
         loadSessionClient()
         eyeAvatarView.setEmotion(EyeAvatarView.Emotion.NEUTRAL)
-        renderRoleMessages()
-        refreshEyeMode()
+        restoreFromSharedState()
 
         conversationEngine.addListener(conversationListener)
 
@@ -259,7 +278,15 @@ class VisualStageActivity : AppCompatActivity() {
         sttButton.setOnClickListener {
             if (sttListening) stopSpeechToText() else startSpeechToText(SpeechPurpose.USER_MESSAGE)
         }
+        longReplySummaryButton.setOnClickListener {
+            handleLongReplyDecisionButton(LongReplyChoice.SUMMARY)
+        }
+        longReplyOriginalButton.setOnClickListener {
+            handleLongReplyDecisionButton(LongReplyChoice.ORIGINAL)
+        }
+        setLongReplyChoiceButtonsVisible(false)
         closeButton.setOnClickListener {
+            ConversationUiState.setActiveView(ConversationUiState.VIEW_MAIN)
             finish()
         }
         bindEnterToSend(inputText) {
@@ -272,6 +299,13 @@ class VisualStageActivity : AppCompatActivity() {
         if (!hasRecordAudioPermission()) {
             requestRecordAudioPermission()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ConversationUiState.setActiveView(VIEW_ID)
+        setLongReplyChoiceButtonsVisible(isPendingLongReplyActive())
+        restoreFromSharedState()
     }
 
     override fun onDestroy() {
@@ -335,6 +369,21 @@ class VisualStageActivity : AppCompatActivity() {
         )
     }
 
+    private fun restoreFromSharedState() {
+        val snapshot = ConversationUiState.snapshot()
+        currentConversationState = snapshot.state
+        localMessages.clear()
+        openclawMessages.clear()
+        snapshot.localLines.forEach { line ->
+            pushRoleLine(localMessages, line)
+        }
+        snapshot.openclawLines.forEach { line ->
+            pushRoleLine(openclawMessages, line)
+        }
+        renderRoleMessages()
+        refreshEyeMode()
+    }
+
     private fun bindEnterToSend(
         input: EditText,
         onSend: () -> Unit,
@@ -365,8 +414,8 @@ class VisualStageActivity : AppCompatActivity() {
     }
 
     private fun renderRoleMessages() {
-        localSubtitleText.text = if (localMessages.isEmpty()) "(暂无)" else localMessages.joinToString("\n")
-        openclawSubtitleText.text = if (openclawMessages.isEmpty()) "(暂无)" else openclawMessages.joinToString("\n")
+        localSubtitleText.text = if (localMessages.isEmpty()) "(鏆傛棤)" else localMessages.joinToString("\n")
+        openclawSubtitleText.text = if (openclawMessages.isEmpty()) "(鏆傛棤)" else openclawMessages.joinToString("\n")
     }
 
     private fun updateStatus(text: String, isError: Boolean = false) {
@@ -476,6 +525,10 @@ class VisualStageActivity : AppCompatActivity() {
     }
 
     private fun speak(text: String, force: Boolean = false) {
+        if (!ConversationUiState.isActiveView(VIEW_ID)) {
+            Log.i(TAG, "Skip TTS speak: inactive view")
+            return
+        }
         val speakText = normalizeForSpeech(text)
         if (speakText.isBlank()) return
         if (!force && speakText.isBlank()) return
@@ -520,21 +573,30 @@ class VisualStageActivity : AppCompatActivity() {
         }
     }
 
-    private fun normalizedLength(text: String): Int {
-        return normalizeForDisplay(text).replace(Regex("""\s+"""), "").length
-    }
-
     private fun classifyLongReplyChoice(spoken: String): LongReplyChoice {
         val normalized = normalizeForDisplay(spoken)
             .lowercase(Locale.getDefault())
             .replace(Regex("""\s+"""), "")
-        val originalKeywords = listOf("原文", "全文", "照读", "不简报", "不要简报", "不简化", "完整")
-        val summaryKeywords = listOf("简报", "摘要", "总结", "概括", "简化", "简短", "要点", "简版")
+        val originalKeywords = listOf(
+            "\u539f\u6587",
+            "\u5168\u6587",
+            "\u7167\u8bfb",
+            "\u5b8c\u6574",
+            "original",
+            "full",
+        )
+        val summaryKeywords = listOf(
+            "\u7b80\u62a5",
+            "\u6458\u8981",
+            "\u603b\u7ed3",
+            "\u6982\u62ec",
+            "summary",
+            "brief",
+        )
         if (originalKeywords.any { normalized.contains(it) }) return LongReplyChoice.ORIGINAL
         if (summaryKeywords.any { normalized.contains(it) }) return LongReplyChoice.SUMMARY
         return LongReplyChoice.OTHER
     }
-
     private fun isPendingLongReplyActive(): Boolean {
         val pending = pendingLongReply ?: return false
         return System.currentTimeMillis() < pending.request.deadlineAtMs
@@ -546,28 +608,79 @@ class VisualStageActivity : AppCompatActivity() {
         pendingLongReplyTimeoutTask = null
         pendingLongReplyListenTask?.let { mainHandler.removeCallbacks(it) }
         pendingLongReplyListenTask = null
+        setLongReplyChoiceButtonsVisible(false)
     }
 
+    private fun setLongReplyChoiceButtonsVisible(visible: Boolean) {
+        longReplyChoiceContainer.visibility = if (visible && ConversationUiState.isActiveView(VIEW_ID)) {
+            View.VISIBLE
+        } else {
+            View.GONE
+        }
+    }
+
+    private fun handleLongReplyDecisionButton(choice: LongReplyChoice) {
+        val pending = pendingLongReply
+        if (pending == null || System.currentTimeMillis() >= pending.request.deadlineAtMs) {
+            clearPendingLongReply()
+            updateStatus("Long-reply choice expired", isError = true)
+            return
+        }
+        applyLongReplyChoice(pending, choice)
+    }
+
+    private fun applyLongReplyChoice(
+        pending: PendingLongReply,
+        choice: LongReplyChoice,
+    ) {
+        when (choice) {
+            LongReplyChoice.SUMMARY -> {
+                clearPendingLongReply()
+                updateStatus("Summarizing...")
+                Thread {
+                    try {
+                        val summary = conversationEngine.requestLocalSummary(
+                            pending.request,
+                            maxChars = LONG_REPLY_SUMMARY_MAX_CHARS,
+                        )
+                        val spokenSummary = summary.ifBlank { pending.request.originalDisplay }
+                        speak(spokenSummary, force = true)
+                        runOnUiThread { updateStatus("Brief spoken") }
+                    } catch (_: Exception) {
+                        speak(pending.request.originalRaw, force = true)
+                        runOnUiThread { updateStatus("Summary failed, original spoken", isError = true) }
+                    }
+                }.start()
+            }
+
+            LongReplyChoice.ORIGINAL -> {
+                clearPendingLongReply()
+                speak(pending.request.originalRaw, force = true)
+                updateStatus("Original spoken")
+            }
+
+            LongReplyChoice.OTHER -> Unit
+        }
+    }
     private fun beginLongReplyDecision(request: LongReplyDecisionRequired) {
-        if (normalizedLength(request.originalRaw) <= 30) return
         clearPendingLongReply()
         val pending = PendingLongReply(request = request)
         pendingLongReply = pending
-        updateStatus("内容较长，请在30秒内说“简报”或“原文”")
-        speak("这条回复内容较长。请在三十秒内说简报或原文。", force = true)
+        setLongReplyChoiceButtonsVisible(true)
+        updateStatus("\u5185\u5bb9\u8f83\u957f\uff0c30\u79d2\u5185\u8bf7\u9009\u62e9\u201c\u7b80\u62a5\u201d\u6216\u201c\u539f\u6587\u201d")
+        speak("\u8fd9\u6761\u56de\u590d\u5185\u5bb9\u8f83\u957f\u3002\u8bf7\u5728\u4e09\u5341\u79d2\u5185\u8bf4\u7b80\u62a5\u6216\u539f\u6587\u3002", force = true)
 
         val timeoutTask = Runnable {
             val active = pendingLongReply
             if (active == null || active.request.id != pending.request.id) return@Runnable
             clearPendingLongReply()
-            updateStatus("30秒未选择，已略过该条语音播报", isError = true)
+            updateStatus("30\u79d2\u672a\u9009\u62e9\uff0c\u5df2\u7565\u8fc7\u8be5\u6761\u8bed\u97f3\u64ad\u62a5", isError = true)
         }
         pendingLongReplyTimeoutTask = timeoutTask
         val delay = (request.deadlineAtMs - System.currentTimeMillis()).coerceAtLeast(1000L)
         mainHandler.postDelayed(timeoutTask, delay)
         scheduleLongReplyDecisionListening(delayMs = 900)
     }
-
     private fun scheduleLongReplyDecisionListening(delayMs: Long) {
         val pending = pendingLongReply ?: return
         if (System.currentTimeMillis() >= pending.request.deadlineAtMs) return
@@ -594,28 +707,11 @@ class VisualStageActivity : AppCompatActivity() {
         }
         when (classifyLongReplyChoice(spoken)) {
             LongReplyChoice.SUMMARY -> {
-                clearPendingLongReply()
-                updateStatus("Summarizing...")
-                Thread {
-                    try {
-                        val summary = conversationEngine.requestLocalSummary(
-                            pending.request,
-                            maxChars = LONG_REPLY_SUMMARY_MAX_CHARS,
-                        )
-                        val spokenSummary = summary.ifBlank { pending.request.originalDisplay }
-                        speak(spokenSummary, force = true)
-                        runOnUiThread { updateStatus("Brief spoken") }
-                    } catch (_: Exception) {
-                        speak(pending.request.originalRaw, force = true)
-                        runOnUiThread { updateStatus("Summary failed, original spoken", isError = true) }
-                    }
-                }.start()
+                applyLongReplyChoice(pending, LongReplyChoice.SUMMARY)
             }
 
             LongReplyChoice.ORIGINAL -> {
-                clearPendingLongReply()
-                speak(pending.request.originalRaw, force = true)
-                updateStatus("Original spoken")
+                applyLongReplyChoice(pending, LongReplyChoice.ORIGINAL)
             }
 
             LongReplyChoice.OTHER -> {
@@ -624,7 +720,6 @@ class VisualStageActivity : AppCompatActivity() {
             }
         }
     }
-
     private fun ensureSparkInitialized(): Boolean {
         if (sparkInitialized) return true
         return try {
@@ -694,14 +789,14 @@ class VisualStageActivity : AppCompatActivity() {
         }
 
         sttListening = true
-        sttButton.text = "停止"
+        sttButton.text = "鍋滄"
         updateStatus(if (purpose == SpeechPurpose.LONG_REPLY_DECISION) "Listening choice..." else "Listening...")
     }
 
     private fun stopSpeechToText() {
         if (!sttListening) return
         sttListening = false
-        sttButton.text = "语音"
+        sttButton.text = "璇煶"
         updateStatus("Processing...")
         stopAudioCapture()
 
@@ -776,7 +871,7 @@ class VisualStageActivity : AppCompatActivity() {
                         audioWriting.set(false)
                         sttListening = false
                         runOnUiThread {
-                            sttButton.text = "语音"
+                            sttButton.text = "璇煶"
                             updateStatus("STT write failed: $ret", isError = true)
                         }
                         try {
@@ -961,3 +1056,5 @@ class VisualStageActivity : AppCompatActivity() {
         }
     }
 }
+
+

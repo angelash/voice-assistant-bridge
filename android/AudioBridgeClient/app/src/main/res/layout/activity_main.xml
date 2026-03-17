@@ -188,6 +188,30 @@
                 android:text="Speak To Text" />
         </LinearLayout>
 
+        <LinearLayout
+            android:id="@+id/longReplyChoiceContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal"
+            android:visibility="gone">
+
+            <Button
+                android:id="@+id/longReplySummaryButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="简报" />
+
+            <Button
+                android:id="@+id/longReplyOriginalButton"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_weight="1"
+                android:text="原文" />
+        </LinearLayout>
+
         <Button
             android:id="@+id/visualModeButton"
             android:layout_width="match_parent"

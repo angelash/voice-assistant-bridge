@@ -69,6 +69,12 @@ class BridgeConversationEngine(
     private val longReplyDecisionTimeoutMs: Long = 30_000L,
     private val nowMs: () -> Long = { System.currentTimeMillis() },
 ) {
+    private companion object {
+        private val ENGLISH_WORD_REGEX = Regex("""\b[A-Za-z]+(?:['’-][A-Za-z]+)*\b""")
+        private val CJK_CHAR_REGEX = Regex("""[\p{IsHan}]""")
+        private val OTHER_TOKEN_REGEX = Regex("""[\p{L}\p{N}]+""")
+    }
+
     interface Listener {
         fun onStateChanged(state: ConversationState) {}
         fun onRoleMessage(message: RoleMessage) {}
@@ -288,12 +294,19 @@ class BridgeConversationEngine(
             .trim()
     }
 
-    private fun normalizedLength(text: String): Int {
-        return normalizeForDisplay(text).replace(Regex("""\s+"""), "").length
+    private fun longReplyUnits(text: String): Int {
+        val normalized = normalizeForDisplay(text)
+        if (normalized.isBlank()) return 0
+
+        val englishWords = ENGLISH_WORD_REGEX.findAll(normalized).count()
+        val cjkChars = CJK_CHAR_REGEX.findAll(normalized).count()
+        val stripped = CJK_CHAR_REGEX.replace(ENGLISH_WORD_REGEX.replace(normalized, " "), " ")
+        val otherTokens = OTHER_TOKEN_REGEX.findAll(stripped).count()
+        return englishWords + cjkChars + otherTokens
     }
 
     private fun isLongOpenClawReply(textRaw: String): Boolean {
-        return normalizedLength(textRaw) > longReplyLimit
+        return longReplyUnits(textRaw) > longReplyLimit
     }
 
     private fun emitState(state: ConversationState) {

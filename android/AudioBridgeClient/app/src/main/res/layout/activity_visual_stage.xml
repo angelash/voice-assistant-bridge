@@ -35,6 +35,35 @@
             android:textColor="#F4F5F7" />
     </LinearLayout>
 
+    <LinearLayout
+        android:id="@+id/visualLongReplyChoiceContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:visibility="gone">
+
+        <Button
+            android:id="@+id/visualLongReplySummaryButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:backgroundTint="#2E5CB8"
+            android:text="Summary"
+            android:textColor="#FFFFFF" />
+
+        <Button
+            android:id="@+id/visualLongReplyOriginalButton"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:layout_weight="1"
+            android:backgroundTint="#2E2F35"
+            android:text="Original"
+            android:textColor="#F4F5F7" />
+    </LinearLayout>
+
     <com.audiobridge.client.ui.EyeAvatarView
         android:id="@+id/eyeAvatarView"
         android:layout_width="match_parent"
