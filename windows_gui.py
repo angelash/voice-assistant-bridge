@@ -48,9 +48,12 @@ try:
         QSpinBox,
         QTabWidget,
         QTextEdit,
+        QListWidget,
+        QListWidgetItem,
         QVBoxLayout,
         QWidget,
     )
+    from PySide6.QtCore import QTimer
     from qasync import QEventLoop, asyncSlot
 except ImportError:
     print("Missing GUI dependencies. Install with: pip install PySide6 qasync")
@@ -274,6 +277,7 @@ class MainWindow(QMainWindow):
         self._apply_voice_mode(self.settings.get("voice_input_mode", VOICE_MODE_HOLD))
         self._refresh_controls()
         self._log("GUI ready.")
+        QTimer.singleShot(300, lambda: asyncio.create_task(self._refresh_meeting_history()))
 
     @staticmethod
     def _normalize_settings(cfg: dict) -> dict:
@@ -341,14 +345,22 @@ class MainWindow(QMainWindow):
 
         # Meeting Mode Control Panel
         meeting_box = QGroupBox("会议模式")
-        meeting_layout = QHBoxLayout(meeting_box)
+        meeting_layout = QVBoxLayout(meeting_box)
+        meeting_top = QHBoxLayout()
         self.meeting_mode_btn = QPushButton("开始会议")
+        self.meeting_refresh_btn = QPushButton("刷新历史")
         self.meeting_status_label = QLabel("空闲")
         self.meeting_info_label = QLabel("")
-        meeting_layout.addWidget(self.meeting_mode_btn)
-        meeting_layout.addWidget(self.meeting_status_label)
-        meeting_layout.addWidget(self.meeting_info_label, 1)
+        meeting_top.addWidget(self.meeting_mode_btn)
+        meeting_top.addWidget(self.meeting_refresh_btn)
+        meeting_top.addWidget(self.meeting_status_label)
+        meeting_top.addWidget(self.meeting_info_label, 1)
+        meeting_layout.addLayout(meeting_top)
+        self.meeting_history_list = QListWidget()
+        self.meeting_history_list.setMaximumHeight(120)
+        meeting_layout.addWidget(self.meeting_history_list)
         self.meeting_mode_btn.clicked.connect(self.on_meeting_toggle)
+        self.meeting_refresh_btn.clicked.connect(self.on_refresh_meeting_history)
 
         outer.addLayout(top)
         outer.addWidget(meeting_box)
@@ -396,6 +408,7 @@ class MainWindow(QMainWindow):
         self.input_edit.setEnabled((not self._busy) and (not recording))
         self.voice_btn.setEnabled(not self._busy)
         self.meeting_mode_btn.setEnabled(not self._busy)
+        self.meeting_refresh_btn.setEnabled(not self._busy)
 
         if self._busy:
             self.voice_btn.setText("处理中...")
@@ -746,6 +759,57 @@ class MainWindow(QMainWindow):
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    async def _get_v2_json(self, path: str) -> dict:
+        url = f"{self._v2_base_url()}{path}"
+        headers = self._v2_headers()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    try:
+                        data = await resp.json(content_type=None)
+                    except Exception:
+                        data = {"ok": False, "error": (await resp.text()).strip() or f"http_{resp.status}"}
+                    if resp.status >= 400 and data.get("ok") is True:
+                        data["ok"] = False
+                    return data
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def _refresh_meeting_history(self):
+        result = await self._get_v2_json("/v2/meetings?limit=20")
+        self.meeting_history_list.clear()
+        if not result.get("ok"):
+            err = (result.get("error") or "unknown").strip()
+            self.meeting_info_label.setText(f"历史加载失败: {err[:60]}")
+            return
+
+        meetings = result.get("meetings", []) or []
+        if not meetings:
+            self.meeting_info_label.setText("暂无历史会议")
+            return
+
+        for row in meetings:
+            meeting_id = (row.get("meeting_id") or "").strip()
+            created_at = (row.get("created_at") or "")[:19].replace("T", " ")
+            status = (row.get("status") or "unknown").strip()
+            if not meeting_id:
+                continue
+            item = QListWidgetItem(f"{created_at} | {status} | {meeting_id[:18]}...")
+            item.setData(256, meeting_id)  # Qt.UserRole
+            self.meeting_history_list.addItem(item)
+
+        self.meeting_info_label.setText(f"历史会议: {len(meetings)} 条")
+
+    @asyncSlot()
+    async def on_refresh_meeting_history(self):
+        if self._busy or self._recorder.is_recording:
+            return
+        await self._refresh_meeting_history()
+
     @asyncSlot()
     async def on_meeting_toggle(self):
         """Toggle meeting mode on/off."""
@@ -789,6 +853,7 @@ class MainWindow(QMainWindow):
         self.meeting_status_label.setText("会议中")
         self.meeting_info_label.setText(f"ID: {meeting_id[:16]}...")
         self._log(f"[会议] 会议开始: {meeting_id}")
+        await self._refresh_meeting_history()
 
     async def _end_meeting(self):
         """End the current meeting session on server."""
@@ -810,6 +875,7 @@ class MainWindow(QMainWindow):
         self.meeting_status_label.setText("空闲")
         self.meeting_info_label.setText("")
         self._log(f"[会议] 会议结束: {meeting_id}")
+        await self._refresh_meeting_history()
 
     def closeEvent(self, event):
         try:

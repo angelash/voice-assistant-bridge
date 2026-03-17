@@ -24,6 +24,7 @@ import android.view.View
 import android.widget.Button
 import android.widget.EditText
 import android.widget.LinearLayout
+import android.widget.Switch
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -36,6 +37,8 @@ import com.audiobridge.client.conversation.LongReplyDecisionRequired
 import com.audiobridge.client.conversation.RoleMessage
 import com.audiobridge.client.conversation.RoleSource
 import com.audiobridge.client.conversation.SharedConversationEngine
+import com.audiobridge.client.meeting.MeetingControlBus
+import com.audiobridge.client.meeting.MeetingUiState
 import com.audiobridge.client.ui.EyeAvatarView
 import com.iflytek.sparkchain.core.LogLvl
 import com.iflytek.sparkchain.core.SparkChain
@@ -68,6 +71,7 @@ class VisualStageActivity : AppCompatActivity() {
         private const val STT_ENCODING = AudioFormat.ENCODING_PCM_16BIT
         private const val LONG_REPLY_MAX_LISTEN_ATTEMPTS = 5
         private const val LONG_REPLY_SUMMARY_MAX_CHARS = 90
+        private const val MEETING_UI_POLL_MS = 1200L
 
         // iFlytek SparkChain credentials (as requested to hardcode)
         private const val XFYUN_APP_ID = "5dd63117"
@@ -92,6 +96,9 @@ class VisualStageActivity : AppCompatActivity() {
     )
 
     private lateinit var statusText: TextView
+    private lateinit var visualMeetingModeSwitch: Switch
+    private lateinit var visualMeetingStatusText: TextView
+    private lateinit var visualMeetingInfoText: TextView
     private lateinit var eyeAvatarView: EyeAvatarView
     private lateinit var subtitleRowContainer: LinearLayout
     private lateinit var localSubtitleCardContainer: LinearLayout
@@ -111,6 +118,7 @@ class VisualStageActivity : AppCompatActivity() {
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var ttsSpeaking = false
+    private var suppressVisualMeetingSwitchCallback = false
 
     private var sessionId: String = "voice-bridge-session"
     private var clientId: String = "android-client"
@@ -140,6 +148,12 @@ class VisualStageActivity : AppCompatActivity() {
     private var pendingLongReply: PendingLongReply? = null
     private var pendingLongReplyTimeoutTask: Runnable? = null
     private var pendingLongReplyListenTask: Runnable? = null
+    private val meetingUiSyncTask = object : Runnable {
+        override fun run() {
+            syncMeetingSnapshot()
+            mainHandler.postDelayed(this, MEETING_UI_POLL_MS)
+        }
+    }
 
     private val routeProbeClient = OkHttpClient.Builder()
         .connectTimeout(1200, TimeUnit.MILLISECONDS)
@@ -258,6 +272,9 @@ class VisualStageActivity : AppCompatActivity() {
         setContentView(R.layout.activity_visual_stage)
 
         statusText = findViewById(R.id.visualStatusText)
+        visualMeetingModeSwitch = findViewById(R.id.visualMeetingModeSwitch)
+        visualMeetingStatusText = findViewById(R.id.visualMeetingStatusText)
+        visualMeetingInfoText = findViewById(R.id.visualMeetingInfoText)
         eyeAvatarView = findViewById(R.id.eyeAvatarView)
         subtitleRowContainer = findViewById(R.id.subtitleRowContainer)
         localSubtitleCardContainer = findViewById(R.id.localSubtitleCardContainer)
@@ -311,6 +328,16 @@ class VisualStageActivity : AppCompatActivity() {
             handleLongReplyDecisionButton(LongReplyChoice.ORIGINAL)
         }
         setLongReplyChoiceButtonsVisible(false)
+        visualMeetingModeSwitch.setOnCheckedChangeListener { _, isChecked ->
+            if (suppressVisualMeetingSwitchCallback) {
+                return@setOnCheckedChangeListener
+            }
+            val accepted = MeetingControlBus.requestToggle(isChecked)
+            if (!accepted) {
+                updateStatus("Meeting controller unavailable, back to main to control", isError = true)
+                syncMeetingSnapshot()
+            }
+        }
         closeButton.setOnClickListener {
             ConversationUiState.setActiveView(ConversationUiState.VIEW_MAIN)
             finish()
@@ -325,6 +352,7 @@ class VisualStageActivity : AppCompatActivity() {
         if (!hasRecordAudioPermission()) {
             requestRecordAudioPermission()
         }
+        syncMeetingSnapshot()
         applySubtitleExpansionStates()
     }
 
@@ -333,11 +361,19 @@ class VisualStageActivity : AppCompatActivity() {
         ConversationUiState.setActiveView(VIEW_ID)
         setLongReplyChoiceButtonsVisible(isPendingLongReplyActive())
         restoreFromSharedState()
+        syncMeetingSnapshot()
+        mainHandler.post(meetingUiSyncTask)
         applySubtitleExpansionStates()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        mainHandler.removeCallbacks(meetingUiSyncTask)
     }
 
     override fun onDestroy() {
         super.onDestroy()
+        mainHandler.removeCallbacks(meetingUiSyncTask)
         conversationEngine.removeListener(conversationListener)
         clearPendingLongReply()
         stopSpeechToText()
@@ -516,6 +552,19 @@ class VisualStageActivity : AppCompatActivity() {
     private fun updateStatus(text: String, isError: Boolean = false) {
         statusText.text = text
         statusText.setTextColor(if (isError) 0xFFFFB4B4.toInt() else 0xFFE9EAED.toInt())
+    }
+
+    private fun syncMeetingSnapshot() {
+        val snapshot = MeetingUiState.snapshot()
+        setVisualMeetingSwitchChecked(snapshot.active)
+        visualMeetingStatusText.text = snapshot.statusText.ifBlank { "Idle" }
+        visualMeetingInfoText.text = snapshot.infoText.ifBlank { "No meeting info" }
+    }
+
+    private fun setVisualMeetingSwitchChecked(checked: Boolean) {
+        suppressVisualMeetingSwitchCallback = true
+        visualMeetingModeSwitch.isChecked = checked
+        suppressVisualMeetingSwitchCallback = false
     }
 
     private fun refreshEyeMode() {

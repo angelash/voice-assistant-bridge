@@ -121,6 +121,39 @@
             android:textColor="#2E7D32"
             android:textSize="11sp" />
 
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Meeting History (Local)"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <Button
+                android:id="@+id/refreshMeetingHistoryButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Refresh" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/meetingHistoryText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="#ECEFF1"
+            android:fontFamily="monospace"
+            android:padding="8dp"
+            android:text="(no meeting history)"
+            android:textColor="#37474F"
+            android:textSize="11sp" />
+
         <!-- Image Upload Section (M5) -->
         <TextView
             android:id="@+id/imageSectionTitle"

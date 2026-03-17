@@ -46,7 +46,9 @@ import com.audiobridge.client.conversation.ConversationSubmitRequest
 import com.audiobridge.client.conversation.LongReplyDecisionRequired
 import com.audiobridge.client.conversation.RoleSource
 import com.audiobridge.client.conversation.SharedConversationEngine
+import com.audiobridge.client.meeting.MeetingControlBus
 import com.audiobridge.client.meeting.MeetingManager
+import com.audiobridge.client.meeting.MeetingUiState
 import com.audiobridge.client.upload.ImageUploadManager
 import com.audiobridge.client.upload.UploadQueueManager
 import com.audiobridge.client.upload.UploadStatus
@@ -140,6 +142,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var meetingModeSwitch: Switch
     private lateinit var meetingStatusText: TextView
     private lateinit var meetingInfoText: TextView
+    private lateinit var refreshMeetingHistoryButton: Button
+    private lateinit var meetingHistoryText: TextView
     private lateinit var imageSectionTitle: TextView
     private lateinit var imageButtonContainer: LinearLayout
     private lateinit var captureImageButton: Button
@@ -167,6 +171,24 @@ class MainActivity : AppCompatActivity() {
     private var activeMeetingBaseUrl: String? = null
     private var suppressMeetingSwitchCallback = false
     private val meetingToggleInFlight = AtomicBoolean(false)
+    private var lastMeetingHistoryRefreshMs = 0L
+
+    private val meetingControlDelegate = object : MeetingControlBus.Delegate {
+        override fun onMeetingToggleRequested(enabled: Boolean) {
+            runOnUiThread {
+                if (meetingToggleInFlight.get()) {
+                    return@runOnUiThread
+                }
+                if (meetingManager.isActive == enabled) {
+                    setMeetingSwitchChecked(enabled)
+                    updateMeetingStatusUI()
+                    return@runOnUiThread
+                }
+                setMeetingSwitchChecked(enabled)
+                onMeetingModeToggled(enabled)
+            }
+        }
+    }
 
     private var sparkInitialized = false
     private var asr: ASR? = null
@@ -325,6 +347,8 @@ class MainActivity : AppCompatActivity() {
         meetingModeSwitch = findViewById(R.id.meetingModeSwitch)
         meetingStatusText = findViewById(R.id.meetingStatusText)
         meetingInfoText = findViewById(R.id.meetingInfoText)
+        refreshMeetingHistoryButton = findViewById(R.id.refreshMeetingHistoryButton)
+        meetingHistoryText = findViewById(R.id.meetingHistoryText)
         
         // M5: Image capture UI elements
         imageSectionTitle = findViewById(R.id.imageSectionTitle)
@@ -335,6 +359,7 @@ class MainActivity : AppCompatActivity() {
 
         // Initialize meeting mode components
         initMeetingMode()
+        MeetingControlBus.bind(meetingControlDelegate)
         conversationEngine.addListener(conversationListener)
 
         initTts()
@@ -343,6 +368,9 @@ class MainActivity : AppCompatActivity() {
         speakSwitch.setOnCheckedChangeListener { _, isChecked ->
             savePrefs()
             appendResult("[system] TTS ${if (isChecked) "enabled" else "disabled"}")
+        }
+        refreshMeetingHistoryButton.setOnClickListener {
+            refreshMeetingHistoryUI(force = true)
         }
 
         sendTextButton.setOnClickListener {
@@ -407,6 +435,7 @@ class MainActivity : AppCompatActivity() {
         ConversationUiState.setActiveView(VIEW_ID)
         setLongReplyChoiceButtonsVisible(isPendingLongReplyActive())
         refreshRouteInfo()
+        updateMeetingStatusUI()
     }
 
     override fun onStop() {
@@ -416,6 +445,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        MeetingControlBus.unbind(meetingControlDelegate)
         conversationEngine.removeListener(conversationListener)
         clearPendingLongReply()
         stopUnifiedAudioCapture()
@@ -1159,6 +1189,7 @@ class MainActivity : AppCompatActivity() {
             Log.e(TAG, "Failed to initialize MeetingManager")
             meetingModeSwitch.isEnabled = false
             meetingStatusText.text = "Storage error"
+            publishMeetingUiSnapshot()
         }
 
         // Initialize PCM Distribution Bus
@@ -1238,6 +1269,7 @@ class MainActivity : AppCompatActivity() {
         uploadQueueManager.onQueueProgress = { pending, uploaded, failed ->
             runOnUiThread {
                 meetingInfoText.text = "Upload: $uploaded done, $pending pending, $failed failed"
+                publishMeetingUiSnapshot()
             }
         }
         
@@ -1249,6 +1281,7 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         appendResult("[upload] Completed with $failed failed segments, keep local data for retry")
                         meetingInfoText.text = "Upload failed: $failed segments"
+                        publishMeetingUiSnapshot()
                         updateMeetingStatusUI()
                     }
                     pendingUploadMeetingId = null
@@ -1260,6 +1293,7 @@ class MainActivity : AppCompatActivity() {
                     runOnUiThread {
                         appendResult("[upload] All segments uploaded")
                         meetingInfoText.text = "All uploads complete"
+                        publishMeetingUiSnapshot()
                     }
                     val marked = meetingManager.markMeetingUploaded(uploadedMeetingId)
                     val deleted = meetingManager.cleanupUploadedMeetings(7)
@@ -1423,6 +1457,7 @@ class MainActivity : AppCompatActivity() {
             Log.d(TAG, "Segment sealed: $segmentId, size=${file.length()}")
             runOnUiThread {
                 meetingInfoText.text = "Segment $seq saved: ${file.length() / 1024}KB"
+                publishMeetingUiSnapshot()
             }
         }
 
@@ -1607,6 +1642,7 @@ class MainActivity : AppCompatActivity() {
             val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
             meetingModeSwitch.isEnabled = false
             meetingStatusText.text = "Starting meeting..."
+            publishMeetingUiSnapshot()
 
             Thread {
                 val endpoint = resolveBridgeEndpoint(allowNetworkProbe = true)
@@ -1621,6 +1657,7 @@ class MainActivity : AppCompatActivity() {
                         activeMeetingBaseUrl = null
                         setMeetingSwitchChecked(false)
                         meetingStatusText.text = "Failed to start"
+                        publishMeetingUiSnapshot()
                         meetingModeSwitch.isEnabled = true
                         meetingToggleInFlight.set(false)
                         updateMeetingStatusUI()
@@ -1642,6 +1679,7 @@ class MainActivity : AppCompatActivity() {
                             stopMeetingAudioCapture()
                             setMeetingSwitchChecked(false)
                             meetingStatusText.text = "Failed to start audio"
+                            publishMeetingUiSnapshot()
                             activeMeetingBaseUrl = null
                             Thread {
                                 setRemoteMeetingMode(baseUrl, remoteMeetingId, enabled = false)
@@ -1653,6 +1691,7 @@ class MainActivity : AppCompatActivity() {
                         appendResult("[meeting] Failed to start local meeting")
                         setMeetingSwitchChecked(false)
                         meetingStatusText.text = "Failed to start"
+                        publishMeetingUiSnapshot()
                         activeMeetingBaseUrl = null
                         Thread {
                             setRemoteMeetingMode(baseUrl, remoteMeetingId, enabled = false)
@@ -1749,6 +1788,40 @@ class MainActivity : AppCompatActivity() {
             stats.totalMeetings,
             stats.oldestMeetingAgeMs / 60000
         )
+        publishMeetingUiSnapshot()
+        refreshMeetingHistoryUI(force = false)
+    }
+
+    private fun publishMeetingUiSnapshot() {
+        MeetingUiState.update(
+            active = meetingManager.isActive,
+            meetingId = meetingManager.meetingId,
+            statusText = meetingStatusText.text?.toString().orEmpty(),
+            infoText = meetingInfoText.text?.toString().orEmpty(),
+        )
+    }
+
+    private fun refreshMeetingHistoryUI(force: Boolean) {
+        if (!::meetingManager.isInitialized) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastMeetingHistoryRefreshMs < 2000L) {
+            return
+        }
+        lastMeetingHistoryRefreshMs = now
+        val meetings = meetingManager.listLocalMeetings()
+        if (meetings.isEmpty()) {
+            meetingHistoryText.text = "(no local meetings)"
+            return
+        }
+
+        val lines = meetings.take(10).mapIndexed { index, meeting ->
+            val meetingId = meeting.optString("meeting_id", "unknown")
+            val status = meeting.optString("status", "unknown")
+            val createdAt = meeting.optString("created_at", "").replace("T", " ").take(19)
+            val segments = meeting.optInt("total_segments", 0)
+            "${index + 1}. ${createdAt.ifBlank { "n/a" }} | ${status} | seg=${segments} | ${meetingId.take(18)}"
+        }
+        meetingHistoryText.text = lines.joinToString("\n")
     }
 
     private fun speak(text: String, force: Boolean = false) {
