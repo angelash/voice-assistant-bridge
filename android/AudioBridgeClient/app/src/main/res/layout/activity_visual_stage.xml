@@ -284,7 +284,7 @@
                     android:minWidth="0dp"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp"
-                    android:text="&#x25BC;"
+                    android:text="&#x25B2;"
                     android:textAllCaps="false"
                     android:textColor="#DFFDF5"
                     android:textSize="13sp" />
@@ -337,7 +337,7 @@
                     android:minWidth="0dp"
                     android:paddingStart="8dp"
                     android:paddingEnd="8dp"
-                    android:text="&#x25BC;"
+                    android:text="&#x25B2;"
                     android:textAllCaps="false"
                     android:textColor="#E6EEFF"
                     android:textSize="13sp" />

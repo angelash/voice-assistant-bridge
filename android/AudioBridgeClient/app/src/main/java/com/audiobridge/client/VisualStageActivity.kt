@@ -620,14 +620,14 @@ class VisualStageActivity : AppCompatActivity() {
             params.weight = 1f
             textView.maxLines = Int.MAX_VALUE
             textView.ellipsize = null
-            toggleButton.text = "▲"
+            toggleButton.text = "▼"
             toggleButton.contentDescription = "折叠字幕"
         } else {
             params.height = LinearLayout.LayoutParams.WRAP_CONTENT
             params.weight = 0f
             textView.maxLines = 1
             textView.ellipsize = TextUtils.TruncateAt.END
-            toggleButton.text = "▼"
+            toggleButton.text = "▲"
             toggleButton.contentDescription = "展开字幕"
         }
         textView.layoutParams = params
