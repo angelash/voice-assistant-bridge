@@ -17,6 +17,7 @@ import json
 import sys
 import threading
 import time
+import wave
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -53,7 +54,7 @@ try:
         QVBoxLayout,
         QWidget,
     )
-    from PySide6.QtCore import QTimer
+    from PySide6.QtCore import Qt, QTimer
     from qasync import QEventLoop, asyncSlot
 except ImportError:
     print("Missing GUI dependencies. Install with: pip install PySide6 qasync")
@@ -269,6 +270,8 @@ class MainWindow(QMainWindow):
         self._printed_by_message: dict[str, set[tuple[str, str]]] = {}
         self._meeting_active = False
         self._meeting_id: Optional[str] = None
+        self._audio_play_thread: Optional[threading.Thread] = None
+        self._audio_play_stop = threading.Event()
 
         self.setWindowTitle("Voice Assistant Bridge")
         self.resize(930, 670)
@@ -358,6 +361,7 @@ class MainWindow(QMainWindow):
         meeting_layout.addLayout(meeting_top)
         self.meeting_history_list = QListWidget()
         self.meeting_history_list.setMaximumHeight(120)
+        self.meeting_history_list.itemDoubleClicked.connect(self.on_meeting_history_item_double_clicked)
         meeting_layout.addWidget(self.meeting_history_list)
         self.meeting_mode_btn.clicked.connect(self.on_meeting_toggle)
         self.meeting_refresh_btn.clicked.connect(self.on_refresh_meeting_history)
@@ -738,7 +742,26 @@ class MainWindow(QMainWindow):
             return {}
         return {"Authorization": f"Bearer {token}"}
 
+    async def _ensure_v2_service_ready(self) -> Optional[str]:
+        """Ensure local service is up before calling V2 meeting APIs."""
+        conn = self._active_connection()
+        if conn.get("mode") != MODE_LOCAL:
+            return None
+
+        probe_client = self._build_client()
+        try:
+            await self._prepare_client(probe_client)
+            return None
+        except Exception as e:
+            return str(e)
+        finally:
+            probe_client.close()
+
     async def _post_v2_json(self, path: str, payload: dict) -> dict:
+        prepare_err = await self._ensure_v2_service_ready()
+        if prepare_err:
+            return {"ok": False, "error": f"service prepare failed: {prepare_err}"}
+
         url = f"{self._v2_base_url()}{path}"
         headers = self._v2_headers()
         try:
@@ -760,6 +783,10 @@ class MainWindow(QMainWindow):
             return {"ok": False, "error": str(e)}
 
     async def _get_v2_json(self, path: str) -> dict:
+        prepare_err = await self._ensure_v2_service_ready()
+        if prepare_err:
+            return {"ok": False, "error": f"service prepare failed: {prepare_err}"}
+
         url = f"{self._v2_base_url()}{path}"
         headers = self._v2_headers()
         try:
@@ -778,6 +805,344 @@ class MainWindow(QMainWindow):
                     return data
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    async def _patch_v2_json(self, path: str, payload: dict) -> dict:
+        prepare_err = await self._ensure_v2_service_ready()
+        if prepare_err:
+            return {"ok": False, "error": f"service prepare failed: {prepare_err}"}
+
+        url = f"{self._v2_base_url()}{path}"
+        headers = self._v2_headers()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.patch(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=20),
+                ) as resp:
+                    try:
+                        data = await resp.json(content_type=None)
+                    except Exception:
+                        data = {"ok": False, "error": (await resp.text()).strip() or f"http_{resp.status}"}
+                    if resp.status >= 400 and data.get("ok") is True:
+                        data["ok"] = False
+                    return data
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    @staticmethod
+    def _parse_meta_json(raw_meta: object) -> dict:
+        if not isinstance(raw_meta, str) or not raw_meta.strip():
+            return {}
+        try:
+            parsed = json.loads(raw_meta)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _extract_model_text(data: object) -> str:
+        if isinstance(data, dict):
+            for key in ("response", "text", "content", "reply_text", "answer"):
+                val = data.get(key)
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            msg = data.get("message")
+            if isinstance(msg, dict):
+                val = msg.get("content")
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+        if isinstance(data, str):
+            return data.strip()
+        return ""
+
+    async def _generate_meeting_title(self, transcript_text: str) -> str:
+        text = (transcript_text or "").strip()
+        if not text:
+            return "未命名会议"
+
+        endpoint = (self.settings.get("ollama_endpoint") or "http://127.0.0.1:11434/api/generate").strip()
+        model = (self.settings.get("ollama_model") or "qwen2.5:7b").strip()
+        prompt = (
+            "请基于以下会议转写内容生成一个简短会议标题。\n"
+            "要求：仅输出标题本身，不要解释；不超过16个汉字；避免标点。\n"
+            f"转写内容：\n{text[:4000]}"
+        )
+        payload = {"model": model, "prompt": prompt, "stream": False}
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    endpoint,
+                    json=payload,
+                    timeout=aiohttp.ClientTimeout(total=25),
+                ) as resp:
+                    if resp.status != 200:
+                        raise RuntimeError(f"http {resp.status}")
+                    data = await resp.json(content_type=None)
+            title = self._extract_model_text(data).replace("\n", " ").strip()
+            title = title.strip("。；;,.，:：\"'`")
+            if len(title) > 24:
+                title = title[:24].rstrip("。；;,.，:：\"'`")
+            return title or self._fallback_title(text)
+        except Exception:
+            return self._fallback_title(text)
+
+    @staticmethod
+    def _fallback_title(text: str) -> str:
+        cleaned = " ".join((text or "").split())
+        if not cleaned:
+            return "未命名会议"
+        return cleaned[:16].strip() or "未命名会议"
+
+    @staticmethod
+    def _build_refined_transcript(segments: list[dict]) -> str:
+        if not segments:
+            return ""
+        lines: list[str] = []
+        for seg in segments:
+            speaker = (seg.get("speaker_name") or seg.get("speaker_cluster_id") or "speaker").strip()
+            text = (seg.get("text") or "").strip()
+            if not text:
+                continue
+            start_ts = float(seg.get("start_ts") or 0.0)
+            mins = int(start_ts // 60)
+            secs = int(start_ts % 60)
+            lines.append(f"[{mins:02d}:{secs:02d}] {speaker}: {text}")
+        return "\n".join(lines)
+
+    def _resolve_audio_path(self, segment: dict, meeting_id: str) -> Optional[Path]:
+        local_path = (segment.get("local_path") or "").strip()
+        if local_path:
+            p = Path(local_path)
+            if not p.is_absolute():
+                p = Path(__file__).resolve().parent / p
+            if p.exists():
+                return p
+
+        seg_id = (segment.get("segment_id") or "").strip()
+        if seg_id:
+            p2 = Path(__file__).resolve().parent / "artifacts" / "meetings" / meeting_id / "audio" / "raw" / f"{seg_id}.wav"
+            if p2.exists():
+                return p2
+        return None
+
+    def _ui_log_from_worker(self, message: str):
+        QTimer.singleShot(0, lambda: self._log(message))
+
+    def _stop_audio_playback(self):
+        self._audio_play_stop.set()
+        if self._audio_play_thread and self._audio_play_thread.is_alive():
+            self._audio_play_thread.join(timeout=1.0)
+        self._audio_play_thread = None
+
+    def _play_audio_file(self, file_path: Path, sample_rate: int = 48000, channels: int = 1):
+        self._stop_audio_playback()
+        self._audio_play_stop.clear()
+
+        def _run():
+            p = pyaudio.PyAudio()
+            stream = None
+            try:
+                with open(file_path, "rb") as f:
+                    head = f.read(12)
+                is_wav = head.startswith(b"RIFF") and b"WAVE" in head
+                if is_wav:
+                    with wave.open(str(file_path), "rb") as wf:
+                        stream = p.open(
+                            format=p.get_format_from_width(wf.getsampwidth()),
+                            channels=wf.getnchannels(),
+                            rate=wf.getframerate(),
+                            output=True,
+                        )
+                        chunk = 4096
+                        while not self._audio_play_stop.is_set():
+                            data = wf.readframes(chunk)
+                            if not data:
+                                break
+                            stream.write(data)
+                else:
+                    with open(file_path, "rb") as rf:
+                        stream = p.open(
+                            format=pyaudio.paInt16,
+                            channels=channels,
+                            rate=sample_rate,
+                            output=True,
+                        )
+                        chunk = 4096
+                        while not self._audio_play_stop.is_set():
+                            data = rf.read(chunk)
+                            if not data:
+                                break
+                            stream.write(data)
+            except Exception as exc:
+                self._ui_log_from_worker(f"[会议] 音频播放失败: {exc}")
+            finally:
+                try:
+                    if stream is not None:
+                        stream.stop_stream()
+                        stream.close()
+                except Exception:
+                    pass
+                p.terminate()
+
+        self._audio_play_thread = threading.Thread(target=_run, daemon=True)
+        self._audio_play_thread.start()
+
+    @asyncSlot(QListWidgetItem)
+    async def on_meeting_history_item_double_clicked(self, item: QListWidgetItem):
+        meeting_id = (item.data(Qt.UserRole) or "").strip()
+        if not meeting_id:
+            return
+        await self._open_meeting_detail_dialog(meeting_id)
+
+    async def _open_meeting_detail_dialog(self, meeting_id: str):
+        meeting_resp = await self._get_v2_json(f"/v2/meetings/{meeting_id}")
+        if not meeting_resp.get("ok"):
+            QMessageBox.warning(self, "错误", f"读取会议详情失败: {meeting_resp.get('error')}")
+            return
+
+        refined_resp = await self._get_v2_json(f"/v2/meetings/{meeting_id}/refined")
+        jobs_resp = await self._get_v2_json(f"/v2/meetings/{meeting_id}/transcription")
+
+        meeting = meeting_resp.get("meeting", {}) or {}
+        audio_segments = meeting_resp.get("audio_segments", []) or []
+        refined_segments = refined_resp.get("segments", []) if refined_resp.get("ok") else []
+        jobs = jobs_resp.get("jobs", []) if jobs_resp.get("ok") else []
+
+        meta = self._parse_meta_json(meeting.get("meta_json"))
+        transcript_text = (meta.get("transcript_text") or "").strip()
+        if not transcript_text:
+            transcript_text = self._build_refined_transcript(refined_segments)
+
+        meeting_name = (meta.get("meeting_name") or "").strip()
+        if not meeting_name and transcript_text:
+            meeting_name = await self._generate_meeting_title(transcript_text)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"会议详情 - {meeting_id[:20]}...")
+        dialog.resize(980, 700)
+        layout = QVBoxLayout(dialog)
+
+        form = QFormLayout()
+        meeting_id_edit = QLineEdit(meeting_id)
+        meeting_id_edit.setReadOnly(True)
+        meeting_name_edit = QLineEdit(meeting_name)
+        form.addRow("会议ID", meeting_id_edit)
+        form.addRow("会议名称", meeting_name_edit)
+        layout.addLayout(form)
+
+        gen_title_btn = QPushButton("基于文本生成标题")
+        layout.addWidget(gen_title_btn)
+
+        summary_lines = [
+            f"status: {meeting.get('status', 'unknown')}",
+            f"client_id: {meeting.get('client_id', 'unknown')}",
+            f"created_at: {meeting.get('created_at', '')}",
+            f"started_at: {meeting.get('started_at', '')}",
+            f"ended_at: {meeting.get('ended_at', '')}",
+            f"audio_segments: {len(audio_segments)}",
+            f"transcription_jobs: {len(jobs)}",
+            f"refined_segments: {len(refined_segments)}",
+        ]
+        summary_view = QTextEdit()
+        summary_view.setReadOnly(True)
+        summary_view.setMaximumHeight(130)
+        summary_view.setPlainText("\n".join(summary_lines))
+        layout.addWidget(summary_view)
+
+        transcript_edit = QTextEdit()
+        transcript_edit.setPlainText(transcript_text)
+        transcript_edit.setPlaceholderText("会议转写文本（可人工修改）")
+        layout.addWidget(transcript_edit, 2)
+
+        audio_box = QGroupBox("语音文件")
+        audio_layout = QVBoxLayout(audio_box)
+        audio_list = QListWidget()
+        for seg in sorted(audio_segments, key=lambda x: int(x.get("seq") or 0)):
+            seq = seg.get("seq")
+            st = seg.get("upload_status", "unknown")
+            size_kb = int((seg.get("size_bytes") or 0) / 1024)
+            dur_ms = int(seg.get("duration_ms") or 0)
+            dur = f"{dur_ms / 1000:.1f}s" if dur_ms > 0 else "n/a"
+            path = (seg.get("local_path") or "").strip()
+            file_name = Path(path).name if path else "(no-path)"
+            txt = f"#{seq} | {st} | {size_kb}KB | {dur} | {file_name}"
+            row = QListWidgetItem(txt)
+            row.setData(Qt.UserRole, seg)
+            audio_list.addItem(row)
+        audio_layout.addWidget(audio_list)
+
+        audio_btn_row = QHBoxLayout()
+        play_btn = QPushButton("播放选中")
+        stop_btn = QPushButton("停止播放")
+        audio_btn_row.addWidget(play_btn)
+        audio_btn_row.addWidget(stop_btn)
+        audio_layout.addLayout(audio_btn_row)
+        layout.addWidget(audio_box, 1)
+
+        status_label = QLabel("")
+        layout.addWidget(status_label)
+
+        button_row = QHBoxLayout()
+        save_btn = QPushButton("保存修改")
+        close_btn = QPushButton("关闭")
+        button_row.addWidget(save_btn)
+        button_row.addWidget(close_btn)
+        layout.addLayout(button_row)
+
+        def _play_selected():
+            current = audio_list.currentItem()
+            if current is None:
+                status_label.setText("请选择一段音频")
+                return
+            seg = current.data(Qt.UserRole) or {}
+            fp = self._resolve_audio_path(seg, meeting_id)
+            if not fp:
+                status_label.setText("音频文件不存在或路径不可用")
+                return
+            self._play_audio_file(fp)
+            status_label.setText(f"播放中: {fp.name}")
+
+        def _stop_play():
+            self._stop_audio_playback()
+            status_label.setText("已停止播放")
+
+        async def _regen_title():
+            src = transcript_edit.toPlainText().strip()
+            if not src:
+                status_label.setText("转写文本为空，无法生成标题")
+                return
+            gen_title_btn.setEnabled(False)
+            title = await self._generate_meeting_title(src)
+            meeting_name_edit.setText(title)
+            status_label.setText("已生成标题，可继续人工修改")
+            gen_title_btn.setEnabled(True)
+
+        async def _save_changes():
+            save_btn.setEnabled(False)
+            payload = {
+                "meeting_name": meeting_name_edit.text().strip(),
+                "transcript_text": transcript_edit.toPlainText().strip(),
+            }
+            result = await self._patch_v2_json(f"/v2/meetings/{meeting_id}", payload)
+            if result.get("ok"):
+                status_label.setText("保存成功")
+                self._log(f"[会议] 已保存详情: {meeting_id}")
+                await self._refresh_meeting_history()
+            else:
+                status_label.setText(f"保存失败: {result.get('error')}")
+            save_btn.setEnabled(True)
+
+        play_btn.clicked.connect(_play_selected)
+        stop_btn.clicked.connect(_stop_play)
+        gen_title_btn.clicked.connect(lambda: asyncio.create_task(_regen_title()))
+        save_btn.clicked.connect(lambda: asyncio.create_task(_save_changes()))
+        close_btn.clicked.connect(dialog.accept)
+        audio_list.itemDoubleClicked.connect(lambda _: _play_selected())
+
+        dialog.exec()
+        self._stop_audio_playback()
 
     async def _refresh_meeting_history(self):
         result = await self._get_v2_json("/v2/meetings?limit=20")
@@ -798,8 +1163,11 @@ class MainWindow(QMainWindow):
             status = (row.get("status") or "unknown").strip()
             if not meeting_id:
                 continue
-            item = QListWidgetItem(f"{created_at} | {status} | {meeting_id[:18]}...")
-            item.setData(256, meeting_id)  # Qt.UserRole
+            meta = self._parse_meta_json(row.get("meta_json"))
+            meeting_name = (meta.get("meeting_name") or "").strip()
+            prefix = f"{meeting_name} | " if meeting_name else ""
+            item = QListWidgetItem(f"{created_at} | {status} | {prefix}{meeting_id[:18]}...")
+            item.setData(Qt.UserRole, meeting_id)
             self.meeting_history_list.addItem(item)
 
         self.meeting_info_label.setText(f"历史会议: {len(meetings)} 条")
@@ -879,6 +1247,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         try:
+            self._stop_audio_playback()
             if self._recorder.is_recording:
                 self._recorder.stop()
             for task in list(self._watch_tasks):

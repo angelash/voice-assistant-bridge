@@ -336,6 +336,66 @@ class V2MeetingAPI:
             "audio_segments": segments,
         })
 
+    async def handle_patch_meeting(self, request: web.Request) -> web.Response:
+        """PATCH /v2/meetings/{meeting_id} - Update meeting metadata.
+
+        Supported fields:
+        - meeting_name: str
+        - transcript_text: str
+        - meta: object (merged into meta_json)
+        """
+        meeting_id = request.match_info.get("meeting_id", "").strip()
+        if not meeting_id:
+            return web.json_response({"ok": False, "error": "meeting_id required"}, status=400)
+
+        meeting = self.store.get_meeting(meeting_id)
+        if not meeting:
+            return web.json_response({"ok": False, "error": "meeting_not_found"}, status=404)
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid_json"}, status=400)
+
+        if not isinstance(data, dict):
+            return web.json_response({"ok": False, "error": "invalid_payload"}, status=400)
+
+        raw_meta = meeting.get("meta_json")
+        current_meta: dict[str, Any] = {}
+        if isinstance(raw_meta, str) and raw_meta.strip():
+            try:
+                parsed = json.loads(raw_meta)
+                if isinstance(parsed, dict):
+                    current_meta = parsed
+            except Exception:
+                current_meta = {}
+
+        incoming_meta = data.get("meta")
+        if incoming_meta is not None and not isinstance(incoming_meta, dict):
+            return web.json_response({"ok": False, "error": "meta must be object"}, status=400)
+
+        updates = incoming_meta or {}
+        if "meeting_name" in data:
+            updates["meeting_name"] = (data.get("meeting_name") or "").strip()
+        if "transcript_text" in data:
+            updates["transcript_text"] = (data.get("transcript_text") or "").strip()
+
+        if not updates:
+            return web.json_response({"ok": False, "error": "no_fields_to_update"}, status=400)
+
+        current_meta.update(updates)
+        self.store.update_meeting(
+            meeting_id,
+            meta_json=json.dumps(current_meta, ensure_ascii=False),
+        )
+        updated = self.store.get_meeting(meeting_id)
+
+        return web.json_response({
+            "ok": True,
+            "meeting_id": meeting_id,
+            "meeting": updated,
+        })
+
     async def handle_get_timeline(self, request: web.Request) -> web.Response:
         """GET /v2/meetings/{meeting_id}/timeline - Get meeting event timeline."""
         meeting_id = request.match_info.get("meeting_id", "").strip()
@@ -1360,6 +1420,7 @@ class V2MeetingAPI:
         app.router.add_post("/v2/meetings/{meeting_id}/mode", self.handle_meeting_mode)
         app.router.add_get("/v2/meetings", self.handle_list_meetings)
         app.router.add_get("/v2/meetings/{meeting_id}", self.handle_get_meeting)
+        app.router.add_patch("/v2/meetings/{meeting_id}", self.handle_patch_meeting)
         app.router.add_get("/v2/meetings/{meeting_id}/timeline", self.handle_get_timeline)
         app.router.add_post("/v2/meetings/{meeting_id}/events:batch", self.handle_events_batch)
         # M2 routes - Audio upload and manifest

@@ -98,6 +98,7 @@ class MainActivity : AppCompatActivity() {
         private const val LONG_REPLY_MAX_LISTEN_ATTEMPTS = 5
         private const val LONG_REPLY_SUMMARY_MAX_CHARS = 90
         private const val LAN_ROUTE_IPV4_PREFIX_BYTES = 3
+        private const val REMOTE_HISTORY_REFRESH_MS = 15_000L
     }
 
     private enum class LinkMode { LAN, TUNNEL }
@@ -124,6 +125,19 @@ class MainActivity : AppCompatActivity() {
     private data class PendingLongReply(
         val request: LongReplyDecisionRequired,
         var decisionListenAttempts: Int = 0,
+    )
+
+    private data class LocalMeetingHistoryRecord(
+        val meetingId: String,
+        val status: String,
+        val createdAt: String,
+        val totalSegments: Int,
+    )
+
+    private data class RemoteMeetingHistoryRecord(
+        val meetingId: String,
+        val status: String,
+        val createdAt: String,
     )
 
     private lateinit var statusText: TextView
@@ -172,6 +186,12 @@ class MainActivity : AppCompatActivity() {
     private var suppressMeetingSwitchCallback = false
     private val meetingToggleInFlight = AtomicBoolean(false)
     private var lastMeetingHistoryRefreshMs = 0L
+    private val remoteHistoryInFlight = AtomicBoolean(false)
+    private val remoteHistoryLock = Any()
+    private var remoteMeetingHistory = emptyList<RemoteMeetingHistoryRecord>()
+    private var remoteHistoryLastFetchMs = 0L
+    private var remoteHistoryLastError: String? = null
+    private var remoteHistoryBaseUrl: String? = null
 
     private val meetingControlDelegate = object : MeetingControlBus.Delegate {
         override fun onMeetingToggleRequested(enabled: Boolean) {
@@ -1808,20 +1828,168 @@ class MainActivity : AppCompatActivity() {
             return
         }
         lastMeetingHistoryRefreshMs = now
+        val localRecords = buildLocalMeetingHistoryRecords()
+        renderMeetingHistoryText(localRecords)
+
+        val needRemoteFetch = synchronized(remoteHistoryLock) {
+            force ||
+                remoteMeetingHistory.isEmpty() ||
+                now - remoteHistoryLastFetchMs > REMOTE_HISTORY_REFRESH_MS
+        }
+        if (needRemoteFetch) {
+            fetchRemoteMeetingHistoryAsync(forceNetworkProbe = force)
+        }
+    }
+
+    private fun buildLocalMeetingHistoryRecords(): List<LocalMeetingHistoryRecord> {
         val meetings = meetingManager.listLocalMeetings()
-        if (meetings.isEmpty()) {
-            meetingHistoryText.text = "(no local meetings)"
-            return
+        if (meetings.isEmpty()) return emptyList()
+        return meetings.mapNotNull { meeting ->
+            val meetingId = meeting.optString("meeting_id", "").trim()
+            if (meetingId.isBlank()) return@mapNotNull null
+            LocalMeetingHistoryRecord(
+                meetingId = meetingId,
+                status = meeting.optString("status", "unknown"),
+                createdAt = meeting.optString("created_at", ""),
+                totalSegments = meeting.optInt("total_segments", 0),
+            )
+        }
+    }
+
+    private fun renderMeetingHistoryText(localRecords: List<LocalMeetingHistoryRecord>) {
+        val remoteSnapshot: List<RemoteMeetingHistoryRecord>
+        val remoteError: String?
+        val remoteFetchedAt: Long
+        val remoteBaseUrl: String?
+        synchronized(remoteHistoryLock) {
+            remoteSnapshot = remoteMeetingHistory
+            remoteError = remoteHistoryLastError
+            remoteFetchedAt = remoteHistoryLastFetchMs
+            remoteBaseUrl = remoteHistoryBaseUrl
         }
 
-        val lines = meetings.take(10).mapIndexed { index, meeting ->
-            val meetingId = meeting.optString("meeting_id", "unknown")
-            val status = meeting.optString("status", "unknown")
-            val createdAt = meeting.optString("created_at", "").replace("T", " ").take(19)
-            val segments = meeting.optInt("total_segments", 0)
-            "${index + 1}. ${createdAt.ifBlank { "n/a" }} | ${status} | seg=${segments} | ${meetingId.take(18)}"
+        val remoteById = remoteSnapshot.associateBy { it.meetingId }
+        val renderedLines = mutableListOf<String>()
+        var index = 1
+
+        localRecords.take(10).forEach { local ->
+            val remote = remoteById[local.meetingId]
+            val source = if (remote != null) "LR" else "L "
+            val createdAt = formatHistoryTime(local.createdAt).ifBlank {
+                formatHistoryTime(remote?.createdAt.orEmpty())
+            }.ifBlank { "n/a" }
+            val remoteStatus = remote?.let { " | R:${it.status}" }.orEmpty()
+            renderedLines += "$index. [$source] $createdAt | L:${local.status} seg=${local.totalSegments}$remoteStatus | ${local.meetingId.take(18)}"
+            index += 1
         }
-        meetingHistoryText.text = lines.joinToString("\n")
+
+        remoteSnapshot
+            .filter { remote -> localRecords.none { it.meetingId == remote.meetingId } }
+            .take(10)
+            .forEach { remote ->
+                val createdAt = formatHistoryTime(remote.createdAt).ifBlank { "n/a" }
+                renderedLines += "$index. [ R] $createdAt | R:${remote.status} | ${remote.meetingId.take(18)}"
+                index += 1
+            }
+
+        if (renderedLines.isEmpty()) {
+            renderedLines += "(no local/server meeting history)"
+        }
+
+        val remoteState = when {
+            remoteError != null -> {
+                val host = remoteBaseUrl?.trimEnd('/').orEmpty()
+                if (host.isBlank()) {
+                    "server: failed (${remoteError.take(80)})"
+                } else {
+                    "server: failed @ $host (${remoteError.take(80)})"
+                }
+            }
+            remoteFetchedAt > 0L -> {
+                val ageSec = ((System.currentTimeMillis() - remoteFetchedAt).coerceAtLeast(0L)) / 1000L
+                val host = remoteBaseUrl?.trimEnd('/').orEmpty()
+                if (host.isBlank()) {
+                    "server: synced ${remoteSnapshot.size} items (${ageSec}s ago)"
+                } else {
+                    "server: synced ${remoteSnapshot.size} items from $host (${ageSec}s ago)"
+                }
+            }
+            else -> "server: not fetched yet"
+        }
+        renderedLines += ""
+        renderedLines += remoteState
+        meetingHistoryText.text = renderedLines.joinToString("\n")
+    }
+
+    private fun formatHistoryTime(raw: String): String {
+        return raw.trim()
+            .replace("T", " ")
+            .replace("Z", "")
+            .take(19)
+    }
+
+    private fun fetchRemoteMeetingHistoryAsync(forceNetworkProbe: Boolean) {
+        if (remoteHistoryInFlight.getAndSet(true)) {
+            return
+        }
+        Thread {
+            val route = resolveBridgeEndpoint(allowNetworkProbe = forceNetworkProbe)
+            val baseUrl = (activeMeetingBaseUrl ?: route.baseUrl).trimEnd('/')
+            var parsed = emptyList<RemoteMeetingHistoryRecord>()
+            var fetchError: String? = null
+            try {
+                val request = Request.Builder()
+                    .url("$baseUrl/v2/meetings?limit=20")
+                    .get()
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    val payload = response.body?.string().orEmpty()
+                    val json = try {
+                        JSONObject(payload.ifBlank { "{}" })
+                    } catch (_: Exception) {
+                        JSONObject()
+                    }
+                    if (!response.isSuccessful || !json.optBoolean("ok", false)) {
+                        fetchError = json.optString("error").ifBlank {
+                            "http_${response.code}"
+                        }
+                    } else {
+                        val meetings = json.optJSONArray("meetings")
+                        val items = mutableListOf<RemoteMeetingHistoryRecord>()
+                        if (meetings != null) {
+                            for (i in 0 until meetings.length()) {
+                                val obj = meetings.optJSONObject(i) ?: continue
+                                val meetingId = obj.optString("meeting_id", "").trim()
+                                if (meetingId.isBlank()) continue
+                                items += RemoteMeetingHistoryRecord(
+                                    meetingId = meetingId,
+                                    status = obj.optString("status", "unknown"),
+                                    createdAt = obj.optString("created_at", ""),
+                                )
+                            }
+                        }
+                        parsed = items
+                    }
+                }
+            } catch (e: Exception) {
+                fetchError = e.message ?: "request_failed"
+            } finally {
+                synchronized(remoteHistoryLock) {
+                    remoteHistoryBaseUrl = baseUrl
+                    if (fetchError == null) {
+                        remoteMeetingHistory = parsed
+                        remoteHistoryLastFetchMs = System.currentTimeMillis()
+                        remoteHistoryLastError = null
+                    } else {
+                        remoteHistoryLastError = fetchError
+                    }
+                }
+                remoteHistoryInFlight.set(false)
+                runOnUiThread {
+                    renderMeetingHistoryText(buildLocalMeetingHistoryRecords())
+                }
+            }
+        }.start()
     }
 
     private fun speak(text: String, force: Boolean = false) {
