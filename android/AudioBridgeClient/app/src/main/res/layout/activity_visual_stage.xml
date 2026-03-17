@@ -44,29 +44,64 @@
 
         <Switch
             android:id="@+id/visualMeetingModeSwitch"
-            android:layout_width="wrap_content"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
+            android:layout_weight="1"
             android:text="&#x4F1A;&#x8BAE;&#x6A21;&#x5F0F;"
             android:textColor="#D7DADF" />
 
-        <TextView
-            android:id="@+id/visualMeetingStatusText"
-            android:layout_width="0dp"
+        <Button
+            android:id="@+id/visualMeetingActionButton"
+            android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginStart="10dp"
-            android:layout_weight="1"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:text="Idle"
-            android:textColor="#C2C7D1"
+            android:backgroundTint="#2966CC"
+            android:text="&#x5F00;&#x59CB;&#x4F1A;&#x8BAE;"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp" />
+
+        <Button
+            android:id="@+id/visualMeetingRefreshButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="8dp"
+            android:backgroundTint="#2E2F35"
+            android:text="&#x5237;&#x65B0;"
+            android:textColor="#E9EAED"
             android:textSize="12sp" />
     </LinearLayout>
+
+    <TextView
+        android:id="@+id/visualMeetingStatusText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="6dp"
+        android:background="#10141A"
+        android:ellipsize="end"
+        android:maxLines="3"
+        android:padding="8dp"
+        android:text="Idle"
+        android:textColor="#C2C7D1"
+        android:textSize="12sp" />
+
+    <TextView
+        android:id="@+id/visualMeetingIdText"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:background="#0E1116"
+        android:ellipsize="middle"
+        android:maxLines="1"
+        android:padding="8dp"
+        android:text="Meeting ID: (none)"
+        android:textColor="#A4B0C3"
+        android:textSize="11sp" />
 
     <TextView
         android:id="@+id/visualMeetingInfoText"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
+        android:layout_marginTop="4dp"
         android:background="#13161B"
         android:ellipsize="end"
         android:maxLines="2"

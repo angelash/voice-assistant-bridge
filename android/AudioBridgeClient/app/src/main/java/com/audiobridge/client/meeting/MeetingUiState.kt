@@ -2,6 +2,7 @@ package com.audiobridge.client.meeting
 
 data class MeetingUiSnapshot(
     val active: Boolean,
+    val busy: Boolean,
     val meetingId: String?,
     val statusText: String,
     val infoText: String,
@@ -13,6 +14,7 @@ object MeetingUiState {
 
     private var snapshot = MeetingUiSnapshot(
         active = false,
+        busy = false,
         meetingId = null,
         statusText = "Idle",
         infoText = "",
@@ -21,6 +23,7 @@ object MeetingUiState {
 
     fun update(
         active: Boolean,
+        busy: Boolean,
         meetingId: String?,
         statusText: String,
         infoText: String,
@@ -28,6 +31,7 @@ object MeetingUiState {
         synchronized(lock) {
             snapshot = MeetingUiSnapshot(
                 active = active,
+                busy = busy,
                 meetingId = meetingId,
                 statusText = statusText,
                 infoText = infoText,
@@ -42,4 +46,3 @@ object MeetingUiState {
         }
     }
 }
-

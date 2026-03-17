@@ -208,6 +208,13 @@ class MainActivity : AppCompatActivity() {
                 onMeetingModeToggled(enabled)
             }
         }
+
+        override fun onMeetingRefreshRequested() {
+            runOnUiThread {
+                updateMeetingStatusUI()
+                refreshMeetingHistoryUI(force = true)
+            }
+        }
     }
 
     private var sparkInitialized = false
@@ -1727,6 +1734,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Stop meeting locally first; remote finalization happens after upload completion.
+        meetingModeSwitch.isEnabled = false
+        meetingStatusText.text = "Ending meeting..."
+        publishMeetingUiSnapshot()
         meetingManager.endMeeting()
         wakeWordController.onMeetingModeChanged(false)
         diskWriterConsumer.enabled = false
@@ -1734,6 +1744,7 @@ class MainActivity : AppCompatActivity() {
         kwsConsumer.flush()
         stopMeetingAudioCapture()
         meetingToggleInFlight.set(false)
+        meetingModeSwitch.isEnabled = true
         updateMeetingStatusUI()
     }
 
@@ -1815,6 +1826,7 @@ class MainActivity : AppCompatActivity() {
     private fun publishMeetingUiSnapshot() {
         MeetingUiState.update(
             active = meetingManager.isActive,
+            busy = meetingToggleInFlight.get(),
             meetingId = meetingManager.meetingId,
             statusText = meetingStatusText.text?.toString().orEmpty(),
             infoText = meetingInfoText.text?.toString().orEmpty(),

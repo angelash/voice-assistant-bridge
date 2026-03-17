@@ -97,7 +97,10 @@ class VisualStageActivity : AppCompatActivity() {
 
     private lateinit var statusText: TextView
     private lateinit var visualMeetingModeSwitch: Switch
+    private lateinit var visualMeetingActionButton: Button
+    private lateinit var visualMeetingRefreshButton: Button
     private lateinit var visualMeetingStatusText: TextView
+    private lateinit var visualMeetingIdText: TextView
     private lateinit var visualMeetingInfoText: TextView
     private lateinit var eyeAvatarView: EyeAvatarView
     private lateinit var subtitleRowContainer: LinearLayout
@@ -273,7 +276,10 @@ class VisualStageActivity : AppCompatActivity() {
 
         statusText = findViewById(R.id.visualStatusText)
         visualMeetingModeSwitch = findViewById(R.id.visualMeetingModeSwitch)
+        visualMeetingActionButton = findViewById(R.id.visualMeetingActionButton)
+        visualMeetingRefreshButton = findViewById(R.id.visualMeetingRefreshButton)
         visualMeetingStatusText = findViewById(R.id.visualMeetingStatusText)
+        visualMeetingIdText = findViewById(R.id.visualMeetingIdText)
         visualMeetingInfoText = findViewById(R.id.visualMeetingInfoText)
         eyeAvatarView = findViewById(R.id.eyeAvatarView)
         subtitleRowContainer = findViewById(R.id.subtitleRowContainer)
@@ -332,11 +338,25 @@ class VisualStageActivity : AppCompatActivity() {
             if (suppressVisualMeetingSwitchCallback) {
                 return@setOnCheckedChangeListener
             }
-            val accepted = MeetingControlBus.requestToggle(isChecked)
+            requestMeetingToggle(isChecked, source = "switch")
+        }
+        visualMeetingActionButton.setOnClickListener {
+            val snapshot = MeetingUiState.snapshot()
+            if (snapshot.busy) {
+                updateStatus("Meeting action in progress...")
+                return@setOnClickListener
+            }
+            requestMeetingToggle(!snapshot.active, source = "button")
+        }
+        visualMeetingRefreshButton.setOnClickListener {
+            val accepted = MeetingControlBus.requestRefreshStatus()
             if (!accepted) {
                 updateStatus("Meeting controller unavailable, back to main to control", isError = true)
                 syncMeetingSnapshot()
+                return@setOnClickListener
             }
+            updateStatus("Refreshing meeting status...")
+            syncMeetingSnapshot()
         }
         closeButton.setOnClickListener {
             ConversationUiState.setActiveView(ConversationUiState.VIEW_MAIN)
@@ -554,10 +574,51 @@ class VisualStageActivity : AppCompatActivity() {
         statusText.setTextColor(if (isError) 0xFFFFB4B4.toInt() else 0xFFE9EAED.toInt())
     }
 
+    private fun requestMeetingToggle(targetEnabled: Boolean, source: String) {
+        val snapshot = MeetingUiState.snapshot()
+        if (snapshot.busy) {
+            updateStatus("Meeting action in progress...")
+            syncMeetingSnapshot()
+            return
+        }
+        val accepted = MeetingControlBus.requestToggle(targetEnabled)
+        if (!accepted) {
+            updateStatus("Meeting controller unavailable, back to main to control", isError = true)
+            syncMeetingSnapshot()
+            return
+        }
+        val actionText = if (targetEnabled) "Starting meeting..." else "Ending meeting..."
+        updateStatus(actionText)
+        Log.i(TAG, "Meeting toggle requested from $source: targetEnabled=$targetEnabled")
+    }
+
     private fun syncMeetingSnapshot() {
         val snapshot = MeetingUiState.snapshot()
+        val controllerBound = MeetingControlBus.isBound()
         setVisualMeetingSwitchChecked(snapshot.active)
-        visualMeetingStatusText.text = snapshot.statusText.ifBlank { "Idle" }
+        val controlsEnabled = controllerBound && !snapshot.busy
+        visualMeetingModeSwitch.isEnabled = controlsEnabled
+        visualMeetingActionButton.isEnabled = controlsEnabled
+        visualMeetingRefreshButton.isEnabled = controllerBound
+
+        visualMeetingActionButton.text = when {
+            snapshot.busy -> "\u5904\u7406\u4E2D..."
+            snapshot.active -> "\u7ED3\u675F\u4F1A\u8BAE"
+            else -> "\u5F00\u59CB\u4F1A\u8BAE"
+        }
+
+        val statusBase = snapshot.statusText.ifBlank { "Idle" }
+        visualMeetingStatusText.text = when {
+            snapshot.busy -> "$statusBase\n(\u5904\u7406\u4E2D)"
+            !controllerBound -> "$statusBase\n(\u672A\u7ED1\u5B9A\u4E3B\u63A7\u9875)"
+            else -> statusBase
+        }
+        val mid = snapshot.meetingId?.trim().orEmpty()
+        visualMeetingIdText.text = if (mid.isBlank()) {
+            "Meeting ID: (none)"
+        } else {
+            "Meeting ID: $mid"
+        }
         visualMeetingInfoText.text = snapshot.infoText.ifBlank { "No meeting info" }
     }
 

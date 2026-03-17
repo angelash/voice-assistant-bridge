@@ -3,6 +3,7 @@ package com.audiobridge.client.meeting
 object MeetingControlBus {
     interface Delegate {
         fun onMeetingToggleRequested(enabled: Boolean)
+        fun onMeetingRefreshRequested()
     }
 
     private val lock = Any()
@@ -27,5 +28,14 @@ object MeetingControlBus {
         target?.onMeetingToggleRequested(enabled)
         return target != null
     }
-}
 
+    fun requestRefreshStatus(): Boolean {
+        val target = synchronized(lock) { delegate }
+        target?.onMeetingRefreshRequested()
+        return target != null
+    }
+
+    fun isBound(): Boolean {
+        return synchronized(lock) { delegate != null }
+    }
+}
