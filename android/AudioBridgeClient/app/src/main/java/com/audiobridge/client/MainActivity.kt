@@ -476,6 +476,7 @@ class MainActivity : AppCompatActivity() {
         if (!hasRecordAudioPermission()) {
             requestRecordAudioPermission()
         }
+        focusMainInputCursor()
     }
 
     override fun onResume() {
@@ -485,6 +486,7 @@ class MainActivity : AppCompatActivity() {
         refreshRouteInfo()
         applyMainPanelExpansionStates()
         updateMeetingStatusUI()
+        focusMainInputCursor()
     }
 
     override fun onStop() {
@@ -2316,6 +2318,13 @@ class MainActivity : AppCompatActivity() {
         imageSectionTitle.visibility = View.GONE
         imageButtonContainer.visibility = View.GONE
         imageUploadStatusText.visibility = View.GONE
+    }
+
+    private fun focusMainInputCursor() {
+        textInput.post {
+            textInput.requestFocus()
+            textInput.setSelection(textInput.text?.length ?: 0)
+        }
     }
 }
 

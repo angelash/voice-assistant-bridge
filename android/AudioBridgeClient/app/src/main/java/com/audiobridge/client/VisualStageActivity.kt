@@ -398,6 +398,7 @@ class VisualStageActivity : AppCompatActivity() {
         refreshRouteInfo(allowNetworkProbe = false)
         applyTopPanelExpansionStates()
         applySubtitleExpansionStates()
+        focusVisualInputCursor()
     }
 
     override fun onResume() {
@@ -410,6 +411,7 @@ class VisualStageActivity : AppCompatActivity() {
         mainHandler.post(meetingUiSyncTask)
         applyTopPanelExpansionStates()
         applySubtitleExpansionStates()
+        focusVisualInputCursor()
     }
 
     override fun onPause() {
@@ -1350,6 +1352,13 @@ class VisualStageActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == REQ_RECORD_AUDIO && hasRecordAudioPermission()) {
             updateStatus("麦克风权限已授予")
+        }
+    }
+
+    private fun focusVisualInputCursor() {
+        inputText.post {
+            inputText.requestFocus()
+            inputText.setSelection(inputText.text?.length ?: 0)
         }
     }
 }
