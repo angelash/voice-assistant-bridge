@@ -66,7 +66,10 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
+import java.net.ConnectException
 import java.net.Inet4Address
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
@@ -101,6 +104,7 @@ class MainActivity : AppCompatActivity() {
         private const val LONG_REPLY_SUMMARY_MAX_CHARS = 90
         private const val LAN_ROUTE_IPV4_PREFIX_BYTES = 3
         private const val REMOTE_HISTORY_REFRESH_MS = 15_000L
+        private const val MEETING_START_FAILURE_KEEP_MS = 10 * 60 * 1000L
     }
 
     private enum class LinkMode { LAN, TUNNEL }
@@ -127,6 +131,12 @@ class MainActivity : AppCompatActivity() {
     private data class PendingLongReply(
         val request: LongReplyDecisionRequired,
         var decisionListenAttempts: Int = 0,
+    )
+
+    private data class RemoteMeetingStartResult(
+        val meetingId: String? = null,
+        val errorSummary: String? = null,
+        val errorDetail: String? = null,
     )
 
     private data class LocalMeetingHistoryRecord(
@@ -200,6 +210,12 @@ class MainActivity : AppCompatActivity() {
     private var remoteHistoryLastFetchMs = 0L
     private var remoteHistoryLastError: String? = null
     private var remoteHistoryBaseUrl: String? = null
+    @Volatile
+    private var lastMeetingStartFailureSummary: String? = null
+    @Volatile
+    private var lastMeetingStartFailureDetail: String? = null
+    @Volatile
+    private var lastMeetingStartFailureAtMs = 0L
 
     private val meetingControlDelegate = object : MeetingControlBus.Delegate {
         override fun onMeetingToggleRequested(enabled: Boolean) {
@@ -1563,8 +1579,33 @@ class MainActivity : AppCompatActivity() {
         imageUploadManager.setBaseUrl(baseUrl)
     }
 
-    private fun createRemoteMeetingOnServer(baseUrl: String, clientId: String): String? {
-        val normalizedBase = baseUrl.trimEnd('/')
+    private fun buildRemoteMeetingStartError(
+        endpoint: BridgeEndpoint,
+        normalizedBase: String,
+        e: Exception,
+    ): RemoteMeetingStartResult {
+        val summary = when (e) {
+            is SocketTimeoutException -> "远端服务超时"
+            is ConnectException -> "无法连接远端服务"
+            is UnknownHostException -> "无法解析服务地址"
+            else -> "远端请求异常"
+        }
+        val detail = buildString {
+            append("链路=${endpoint.mode}")
+            append(", 地址=$normalizedBase/v2/meetings")
+            append(", 异常=${e::class.java.simpleName}")
+            e.message?.takeIf { it.isNotBlank() }?.let { msg ->
+                append(": $msg")
+            }
+        }
+        return RemoteMeetingStartResult(
+            errorSummary = summary,
+            errorDetail = detail,
+        )
+    }
+
+    private fun createRemoteMeetingOnServer(endpoint: BridgeEndpoint, clientId: String): RemoteMeetingStartResult {
+        val normalizedBase = endpoint.baseUrl.trimEnd('/')
         val jsonType = "application/json; charset=utf-8".toMediaType()
         val createBody = JSONObject().put("client_id", clientId)
         val createRequest = Request.Builder()
@@ -1590,20 +1631,26 @@ class MainActivity : AppCompatActivity() {
 
                 if (meetingId.isBlank()) {
                     Log.e(TAG, "Create remote meeting failed: code=${response.code}, payload=$payload")
-                    return null
+                    return RemoteMeetingStartResult(
+                        errorSummary = "远端会议创建失败(HTTP ${response.code})",
+                        errorDetail = "链路=${endpoint.mode}, 地址=$normalizedBase/v2/meetings, 响应=${payload.take(200)}",
+                    )
                 }
 
                 val modeOnOk = setRemoteMeetingMode(normalizedBase, meetingId, enabled = true)
                 if (!modeOnOk) {
                     Log.e(TAG, "Failed to enable remote meeting mode for $meetingId")
-                    return null
+                    return RemoteMeetingStartResult(
+                        errorSummary = "远端会议开启失败",
+                        errorDetail = "链路=${endpoint.mode}, 地址=$normalizedBase/v2/meetings/$meetingId/mode",
+                    )
                 }
 
-                return meetingId
+                return RemoteMeetingStartResult(meetingId = meetingId)
             }
         } catch (e: Exception) {
             Log.e(TAG, "Create remote meeting exception: ${e.message}", e)
-            return null
+            return buildRemoteMeetingStartError(endpoint, normalizedBase, e)
         }
     }
 
@@ -1711,6 +1758,7 @@ class MainActivity : AppCompatActivity() {
                 return
             }
 
+            clearMeetingStartFailure()
             val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
             meetingModeSwitch.isEnabled = false
             meetingStatusText.text = "正在开始会议..."
@@ -1721,11 +1769,22 @@ class MainActivity : AppCompatActivity() {
                 val baseUrl = endpoint.baseUrl
                 activeMeetingBaseUrl = baseUrl
                 updateMeetingNetworkTargets(baseUrl)
-                val remoteMeetingId = createRemoteMeetingOnServer(baseUrl, clientId)
+                runOnUiThread {
+                    meetingInfoText.text = "链路: ${endpoint.mode} | 服务: $baseUrl"
+                    publishMeetingUiSnapshot()
+                }
+                val remoteStartResult = createRemoteMeetingOnServer(endpoint, clientId)
 
                 runOnUiThread {
-                    if (remoteMeetingId == null) {
-                        appendResult("[会议] 创建远端会议失败")
+                    val remoteMeetingId = remoteStartResult.meetingId
+                    if (remoteMeetingId.isNullOrBlank()) {
+                        val summary = remoteStartResult.errorSummary ?: "创建远端会议失败"
+                        val detail = remoteStartResult.errorDetail
+                        appendResult("[会议] $summary")
+                        if (!detail.isNullOrBlank()) {
+                            appendResult("[会议] 诊断: $detail")
+                        }
+                        recordMeetingStartFailure(summary, detail)
                         activeMeetingBaseUrl = null
                         setMeetingSwitchChecked(false)
                         meetingStatusText.text = "启动失败"
@@ -1750,6 +1809,10 @@ class MainActivity : AppCompatActivity() {
                             kwsConsumer.flush()
                             stopMeetingAudioCapture()
                             setMeetingSwitchChecked(false)
+                            recordMeetingStartFailure(
+                                "音频采集启动失败",
+                                "链路=${endpoint.mode}, 服务=$baseUrl",
+                            )
                             meetingStatusText.text = "音频启动失败"
                             publishMeetingUiSnapshot()
                             activeMeetingBaseUrl = null
@@ -1757,11 +1820,16 @@ class MainActivity : AppCompatActivity() {
                                 setRemoteMeetingMode(baseUrl, remoteMeetingId, enabled = false)
                             }.start()
                         } else {
+                            clearMeetingStartFailure()
                             appendResult("[会议] 远端会议就绪: $meetingId")
                         }
                     } else {
                         appendResult("[会议] 本地会议启动失败")
                         setMeetingSwitchChecked(false)
+                        recordMeetingStartFailure(
+                            "本地会议启动失败",
+                            "链路=${endpoint.mode}, 服务=$baseUrl, 远端会议=$remoteMeetingId",
+                        )
                         meetingStatusText.text = "启动失败"
                         publishMeetingUiSnapshot()
                         activeMeetingBaseUrl = null
@@ -1817,10 +1885,41 @@ class MainActivity : AppCompatActivity() {
         audioCapture = null
     }
 
+    private fun clearMeetingStartFailure() {
+        lastMeetingStartFailureSummary = null
+        lastMeetingStartFailureDetail = null
+        lastMeetingStartFailureAtMs = 0L
+    }
+
+    private fun recordMeetingStartFailure(summary: String, detail: String? = null) {
+        lastMeetingStartFailureSummary = summary.trim()
+        lastMeetingStartFailureDetail = detail?.trim()?.takeIf { it.isNotBlank() }
+        lastMeetingStartFailureAtMs = System.currentTimeMillis()
+    }
+
+    private fun appendRecentMeetingStartFailure(detail: StringBuilder): Boolean {
+        val summary = lastMeetingStartFailureSummary?.trim().orEmpty()
+        if (summary.isBlank()) return false
+
+        val now = System.currentTimeMillis()
+        val ageMs = now - lastMeetingStartFailureAtMs
+        if (ageMs > MEETING_START_FAILURE_KEEP_MS) {
+            clearMeetingStartFailure()
+            return false
+        }
+
+        val ageSeconds = (ageMs / 1000).coerceAtLeast(0L)
+        detail.append("最近启动失败(${ageSeconds}s内): $summary\n")
+        lastMeetingStartFailureDetail
+            ?.takeIf { it.isNotBlank() }
+            ?.let { detail.append("诊断: $it\n") }
+        return true
+    }
+
     private fun updateMeetingStatusUI() {
         val stats = meetingManager.getStorageStats()
         val detail = StringBuilder()
-        val quickStatus = if (meetingManager.isActive) {
+        var quickStatus = if (meetingManager.isActive) {
             val meetingId = meetingManager.meetingId ?: "未知"
             detail.append("会议ID: $meetingId\n")
             detail.append("唤醒词: ${wakeWordStateMachine.getStateDescription()}\n")
@@ -1846,6 +1945,12 @@ class MainActivity : AppCompatActivity() {
                 )
             }
             if (detail.isEmpty()) "空闲" else "空闲 | 后台运行"
+        }
+
+        if (!meetingManager.isActive && !meetingToggleInFlight.get()) {
+            if (appendRecentMeetingStartFailure(detail)) {
+                quickStatus = "启动失败"
+            }
         }
 
         detail.append(

@@ -66,3 +66,16 @@ run_windows_client_local.bat --text "你好"
 - `F:\workspace\voice-assistant-bridge\android\AudioBridgeClient`
 
 约束：实现方案与原基线工程保持一致，但后续开发仅在本仓库内进行。
+
+## Environment Smoke Check (V2 Meetings)
+
+Use this before Android/Windows meeting tests to ensure local service readiness and verify V2 meeting APIs end-to-end.
+
+```powershell
+python scripts/meeting_env_check.py --base-url http://127.0.0.1:8765
+```
+
+Optional flags:
+
+- `--no-auto-start` disable local auto-start when health check fails
+- `--stop-started-server` stop server when the script exits
