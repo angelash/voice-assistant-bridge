@@ -23,6 +23,12 @@ from pathlib import Path
 from typing import Callable, Optional
 
 import aiohttp
+from friendly_errors import (
+    attach_friendly_message,
+    build_exception_result,
+    friendly_exception_message,
+    friendly_result_message,
+)
 
 try:
     import numpy as np
@@ -516,6 +522,10 @@ class MainWindow(QMainWindow):
             auto_start_local=conn["auto_start_local"],
             local_mode=local_mode,
         )
+        if local_mode:
+            health = await client.health(timeout_sec=2, log_error=False)
+            if not health:
+                raise RuntimeError(client.friendly_last_error("本地服务未就绪，请先启动 server.py 后重试。"))
 
     async def _render_messages(self, client: AudioBridgeClient, payload: dict, message_id: Optional[str] = None):
         messages = AudioBridgeClient._extract_messages(payload)
@@ -540,14 +550,15 @@ class MainWindow(QMainWindow):
             await self._prepare_client(client)
             status = await client.wait_v1_terminal(message_id, timeout_sec=180, poll_interval=1.0)
             if not status:
-                self._log(f"[系统] 消息 {message_id} 等待终答超时。")
+                self._log(f"[系统] {client.friendly_last_error('等待龙虾大脑最终回复超时，请稍后重试。')}")
                 return
             await self._render_messages(client, status, message_id=message_id)
             if (status.get("status") or "").upper() == "FAILED":
-                err = (status.get("last_error") or "openclaw_failed").strip()
-                self._log(f"[系统] 龙虾大脑回复失败：{err}")
+                self._log(
+                    f"[系统] {friendly_result_message({'error': status.get('last_error') or 'openclaw_failed'}, '龙虾大脑回复失败，请稍后重试。')}"
+                )
         except Exception as e:
-            self._log(f"[系统] 终答监听异常: {e}")
+            self._log(f"[系统] {friendly_exception_message(e, action='等待龙虾大脑回复')}")
         finally:
             client.close()
             self._printed_by_message.pop(message_id, None)
@@ -564,7 +575,7 @@ class MainWindow(QMainWindow):
     async def _chat_with_text(self, client: AudioBridgeClient, text: str):
         result = await client.send_text(text)
         if not result:
-            self._log("发送失败。")
+            self._log(f"[系统] {client.friendly_last_error('发送失败，请稍后重试。')}")
             return
 
         if result.get("protocol") == "v1":
@@ -574,8 +585,9 @@ class MainWindow(QMainWindow):
             if message_id and state not in {"DELIVERED", "FAILED"}:
                 self._spawn_watch_task(message_id)
             elif state == "FAILED":
-                err = (result.get("last_error") or "openclaw_failed").strip()
-                self._log(f"[系统] 龙虾大脑回复失败：{err}")
+                self._log(
+                    f"[系统] {friendly_result_message({'error': result.get('last_error') or 'openclaw_failed'}, '龙虾大脑回复失败，请稍后重试。')}"
+                )
             return
 
         reply = AudioBridgeClient._extract_reply_text(result)
@@ -648,7 +660,7 @@ class MainWindow(QMainWindow):
             finally:
                 client.close()
         except Exception as e:
-            self._log(f"语音输入异常: {e}")
+            self._log(f"[系统] {friendly_exception_message(e, action='处理语音输入')}")
         finally:
             self._set_busy(False)
 
@@ -695,9 +707,9 @@ class MainWindow(QMainWindow):
                 self._log("health ok")
                 self._log(json.dumps(result, ensure_ascii=False, indent=2))
             else:
-                self._log("health 失败")
+                self._log(f"[系统] {client.friendly_last_error('健康检查失败，请检查服务状态。')}")
         except Exception as e:
-            self._log(f"health 异常: {e}")
+            self._log(f"[系统] {friendly_exception_message(e, action='健康检查')}")
         finally:
             client.close()
             self._set_busy(False)
@@ -718,7 +730,7 @@ class MainWindow(QMainWindow):
             await self._prepare_client(client)
             await self._chat_with_text(client, text)
         except Exception as e:
-            self._log(f"发送异常: {e}")
+            self._log(f"[系统] {friendly_exception_message(e, action='发送消息')}")
         finally:
             client.close()
             self._set_busy(False)
@@ -789,83 +801,62 @@ class MainWindow(QMainWindow):
             await self._prepare_client(probe_client)
             return None
         except Exception as e:
-            return str(e)
+            return friendly_exception_message(e, action="准备本地服务")
         finally:
             probe_client.close()
 
-    async def _post_v2_json(self, path: str, payload: dict) -> dict:
+    async def _request_v2_json(self, method: str, path: str, payload: Optional[dict] = None, action: str = "请求服务") -> dict:
         prepare_err = await self._ensure_v2_service_ready()
         if prepare_err:
-            return {"ok": False, "error": f"service prepare failed: {prepare_err}"}
+            return {
+                "ok": False,
+                "error": "service_prepare_failed",
+                "message": prepare_err,
+            }
 
         url = f"{self._v2_base_url()}{path}"
         headers = self._v2_headers()
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(
+                async with session.request(
+                    method,
                     url,
                     json=payload,
                     headers=headers,
                     timeout=aiohttp.ClientTimeout(total=20),
                 ) as resp:
+                    text = await resp.text()
                     try:
-                        data = await resp.json(content_type=None)
+                        data = json.loads(text) if text.strip() else {}
                     except Exception:
-                        data = {"ok": False, "error": (await resp.text()).strip() or f"http_{resp.status}"}
+                        data = {
+                            "ok": False,
+                            "status": resp.status,
+                            "error": text.strip() or f"http_{resp.status}",
+                            "detail": text,
+                        }
+                    if not isinstance(data, dict):
+                        data = {"ok": resp.status < 400, "data": data}
                     if resp.status >= 400 and data.get("ok") is True:
                         data["ok"] = False
+                    if resp.status >= 400 or data.get("ok") is False:
+                        data.setdefault("ok", False)
+                        data.setdefault("status", resp.status)
+                        data.setdefault("detail", text)
+                        return attach_friendly_message(data, default=f"{action}失败，请稍后重试。")
+                    data.setdefault("ok", True)
                     return data
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return build_exception_result(e, action=action)
 
-    async def _get_v2_json(self, path: str) -> dict:
-        prepare_err = await self._ensure_v2_service_ready()
-        if prepare_err:
-            return {"ok": False, "error": f"service prepare failed: {prepare_err}"}
+    async def _post_v2_json(self, path: str, payload: dict, action: str = "请求服务") -> dict:
+        return await self._request_v2_json("POST", path, payload=payload, action=action)
 
-        url = f"{self._v2_base_url()}{path}"
-        headers = self._v2_headers()
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=20),
-                ) as resp:
-                    try:
-                        data = await resp.json(content_type=None)
-                    except Exception:
-                        data = {"ok": False, "error": (await resp.text()).strip() or f"http_{resp.status}"}
-                    if resp.status >= 400 and data.get("ok") is True:
-                        data["ok"] = False
-                    return data
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+    async def _get_v2_json(self, path: str, action: str = "读取数据") -> dict:
+        return await self._request_v2_json("GET", path, action=action)
 
-    async def _patch_v2_json(self, path: str, payload: dict) -> dict:
-        prepare_err = await self._ensure_v2_service_ready()
-        if prepare_err:
-            return {"ok": False, "error": f"service prepare failed: {prepare_err}"}
-
-        url = f"{self._v2_base_url()}{path}"
-        headers = self._v2_headers()
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.patch(
-                    url,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=20),
-                ) as resp:
-                    try:
-                        data = await resp.json(content_type=None)
-                    except Exception:
-                        data = {"ok": False, "error": (await resp.text()).strip() or f"http_{resp.status}"}
-                    if resp.status >= 400 and data.get("ok") is True:
-                        data["ok"] = False
-                    return data
-        except Exception as e:
-            return {"ok": False, "error": str(e)}
+    async def _patch_v2_json(self, path: str, payload: dict, action: str = "保存数据") -> dict:
+        return await self._request_v2_json("PATCH", path, payload=payload, action=action)
 
     @staticmethod
     def _parse_meta_json(raw_meta: object) -> dict:
@@ -1091,13 +1082,17 @@ class MainWindow(QMainWindow):
         await self._open_meeting_detail_dialog(meeting_id)
 
     async def _open_meeting_detail_dialog(self, meeting_id: str):
-        meeting_resp = await self._get_v2_json(f"/v2/meetings/{meeting_id}")
+        meeting_resp = await self._get_v2_json(f"/v2/meetings/{meeting_id}", action="读取会议详情")
         if not meeting_resp.get("ok"):
-            QMessageBox.warning(self, "错误", f"读取会议详情失败: {meeting_resp.get('error')}")
+            QMessageBox.warning(
+                self,
+                "错误",
+                friendly_result_message(meeting_resp, "读取会议详情失败，请稍后重试。"),
+            )
             return
 
-        refined_resp = await self._get_v2_json(f"/v2/meetings/{meeting_id}/refined")
-        jobs_resp = await self._get_v2_json(f"/v2/meetings/{meeting_id}/transcription")
+        refined_resp = await self._get_v2_json(f"/v2/meetings/{meeting_id}/refined", action="读取精修分段")
+        jobs_resp = await self._get_v2_json(f"/v2/meetings/{meeting_id}/transcription", action="读取转写任务")
 
         meeting = meeting_resp.get("meeting", {}) or {}
         audio_segments = meeting_resp.get("audio_segments", []) or []
@@ -1496,7 +1491,7 @@ class MainWindow(QMainWindow):
 
             refined_result = await self._get_v2_json(f"/v2/meetings/{meeting_id}/refined")
             if not refined_result.get("ok"):
-                status_label.setText(f"读取分段失败: {refined_result.get('error')}")
+                status_label.setText(friendly_result_message(refined_result, "读取分段失败，请稍后重试。"))
                 return
             segments = refined_result.get("segments", []) or []
             _set_refined_list(segments, keep_selected=keep_selected)
@@ -1520,9 +1515,11 @@ class MainWindow(QMainWindow):
         async def _refresh_transcription_jobs(refresh_refined: bool):
             if not _dialog_alive():
                 return
-            jobs_result = await self._get_v2_json(f"/v2/meetings/{meeting_id}/transcription")
+            jobs_result = await self._get_v2_json(f"/v2/meetings/{meeting_id}/transcription", action="读取转写任务")
             if not jobs_result.get("ok"):
-                transcription_status_label.setText(f"任务状态: 读取失败({jobs_result.get('error')})")
+                transcription_status_label.setText(
+                    f"任务状态: {friendly_result_message(jobs_result, '读取失败，请稍后重试。')}"
+                )
                 return
             current_jobs = jobs_result.get("jobs", []) or []
             _render_jobs(current_jobs)
@@ -1545,6 +1542,7 @@ class MainWindow(QMainWindow):
             result = await self._post_v2_json(
                 f"/v2/meetings/{meeting_id}/transcription:run",
                 {"model": model_name},
+                action=action_name,
             )
             if result.get("ok"):
                 jid = str(result.get("job_id") or "")
@@ -1557,7 +1555,7 @@ class MainWindow(QMainWindow):
                 elif err == "meeting_not_ended":
                     status_label.setText("会议未结束，不能启动手动STT。")
                 else:
-                    status_label.setText(f"{action_name}失败: {err}")
+                    status_label.setText(friendly_result_message(result, f"{action_name}失败，请稍后重试。"))
             await _refresh_transcription_jobs(refresh_refined=True)
 
         async def _cancel_latest_job():
@@ -1572,12 +1570,16 @@ class MainWindow(QMainWindow):
 
             cancel_stt_btn.setEnabled(False)
             status_label.setText(f"正在取消任务: {latest_id[:24]}...")
-            result = await self._post_v2_json(f"/v2/transcription/{latest_id}:cancel", {})
+            result = await self._post_v2_json(
+                f"/v2/transcription/{latest_id}:cancel",
+                {},
+                action="取消转写任务",
+            )
             if result.get("ok"):
                 status_label.setText(f"已取消任务: {latest_id[:24]}...")
                 self._log(f"[会议] 已取消STT任务: {latest_id}")
             else:
-                status_label.setText(f"取消失败: {result.get('error')}")
+                status_label.setText(friendly_result_message(result, "取消任务失败，请稍后重试。"))
             await _refresh_transcription_jobs(refresh_refined=False)
 
         async def _save_selected_segment_text():
@@ -1596,10 +1598,11 @@ class MainWindow(QMainWindow):
             result = await self._patch_v2_json(
                 f"/v2/meetings/{meeting_id}/refined/{seg_id}",
                 {"text": text},
+                action="保存分段文本",
             )
             save_segment_text_btn.setEnabled(True)
             if not result.get("ok"):
-                status_label.setText(f"保存分段文本失败: {result.get('error')}")
+                status_label.setText(friendly_result_message(result, "保存分段文本失败，请稍后重试。"))
                 return
 
             transcript_dirty = False
@@ -1628,15 +1631,17 @@ class MainWindow(QMainWindow):
                         "changed_by": "windows-gui",
                         "notes": f"segment_ref_id={seg_id}",
                     },
+                    action="保存说话人名称",
                 )
             else:
                 result = await self._patch_v2_json(
                     f"/v2/meetings/{meeting_id}/refined/{seg_id}",
                     {"speaker_name": new_name, "changed_by": "windows-gui"},
+                    action="保存说话人名称",
                 )
             save_segment_speaker_btn.setEnabled(True)
             if not result.get("ok"):
-                status_label.setText(f"保存说话人失败: {result.get('error')}")
+                status_label.setText(friendly_result_message(result, "保存说话人失败，请稍后重试。"))
                 return
 
             transcript_dirty = False
@@ -1741,13 +1746,13 @@ class MainWindow(QMainWindow):
                 "meeting_name": meeting_name_edit.text().strip(),
                 "transcript_text": transcript_edit.toPlainText().strip(),
             }
-            result = await self._patch_v2_json(f"/v2/meetings/{meeting_id}", payload)
+            result = await self._patch_v2_json(f"/v2/meetings/{meeting_id}", payload, action="保存会议详情")
             if result.get("ok"):
                 status_label.setText("保存成功")
                 self._log(f"[会议] 已保存详情: {meeting_id}")
                 await self._refresh_meeting_history()
             else:
-                status_label.setText(f"保存失败: {result.get('error')}")
+                status_label.setText(friendly_result_message(result, "保存失败，请稍后重试。"))
             save_btn.setEnabled(True)
 
         play_btn.clicked.connect(lambda: _play_selected())
@@ -1790,11 +1795,10 @@ class MainWindow(QMainWindow):
         self._stop_audio_playback()
 
     async def _refresh_meeting_history(self):
-        result = await self._get_v2_json("/v2/meetings?limit=20")
+        result = await self._get_v2_json("/v2/meetings?limit=20", action="读取会议历史")
         self.meeting_history_list.clear()
         if not result.get("ok"):
-            err = (result.get("error") or "unknown").strip()
-            self.meeting_info_label.setText(f"历史加载失败: {err[:60]}")
+            self.meeting_info_label.setText(friendly_result_message(result, "读取历史会议失败，请稍后重试。"))
             return
 
         meetings = result.get("meetings", []) or []
@@ -1842,22 +1846,30 @@ class MainWindow(QMainWindow):
         create_result = await self._post_v2_json(
             "/v2/meetings",
             {"client_id": "windows-gui", "meta": {"source": "windows_gui"}},
+            action="创建会议",
         )
         if not create_result.get("ok"):
-            self._log(f"[会议] 创建失败: {create_result.get('error')}")
+            self.meeting_status_label.setText("启动失败")
+            self.meeting_info_label.setText(friendly_result_message(create_result, "创建会议失败，请稍后重试。"))
+            self._log(f"[会议] {friendly_result_message(create_result, '创建会议失败，请稍后重试。')}")
             return
 
         meeting_id = (create_result.get("meeting_id") or "").strip()
         if not meeting_id:
-            self._log("[会议] 创建失败: meeting_id 为空")
+            self.meeting_status_label.setText("启动失败")
+            self.meeting_info_label.setText("创建会议失败，请稍后重试。")
+            self._log("[会议] 创建会议失败，服务未返回 meeting_id")
             return
 
         mode_result = await self._post_v2_json(
             f"/v2/meetings/{meeting_id}/mode",
             {"mode": "on"},
+            action="开启会议模式",
         )
         if not mode_result.get("ok"):
-            self._log(f"[会议] 开启失败: {mode_result.get('error')}")
+            self.meeting_status_label.setText("启动失败")
+            self.meeting_info_label.setText(friendly_result_message(mode_result, "开启会议失败，请稍后重试。"))
+            self._log(f"[会议] {friendly_result_message(mode_result, '开启会议失败，请稍后重试。')}")
             return
 
         self._meeting_id = meeting_id
@@ -1877,9 +1889,12 @@ class MainWindow(QMainWindow):
         mode_result = await self._post_v2_json(
             f"/v2/meetings/{meeting_id}/mode",
             {"mode": "off"},
+            action="结束会议",
         )
         if not mode_result.get("ok"):
-            self._log(f"[会议] 结束失败: {mode_result.get('error')}")
+            self.meeting_status_label.setText("结束失败")
+            self.meeting_info_label.setText(friendly_result_message(mode_result, "结束会议失败，请稍后重试。"))
+            self._log(f"[会议] {friendly_result_message(mode_result, '结束会议失败，请稍后重试。')}")
             return
 
         self._meeting_active = False

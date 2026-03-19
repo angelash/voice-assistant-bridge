@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from aiohttp import web
+from friendly_errors import attach_friendly_message
 
 # V2 Meeting Mode support
 from meeting import MeetingStore
@@ -126,6 +127,30 @@ def extract_reply_text(data: dict[str, Any]) -> str:
         if isinstance(val, str) and val.strip():
             return val.strip()
     return ""
+
+
+@web.middleware
+async def friendly_error_middleware(request: web.Request, handler):
+    response = await handler(request)
+    if not isinstance(response, web.Response):
+        return response
+    if response.content_type != "application/json":
+        return response
+
+    try:
+        payload = json.loads(response.text or "")
+    except Exception:
+        return response
+
+    if not isinstance(payload, dict):
+        return response
+    if payload.get("ok") is not False or payload.get("message"):
+        return response
+
+    return web.json_response(
+        attach_friendly_message(payload),
+        status=response.status,
+    )
 
 
 class Store:
@@ -1044,7 +1069,7 @@ class VoiceAssistantServer:
         self.meeting_store.close()
 
     def create_app(self) -> web.Application:
-        app = web.Application()
+        app = web.Application(middlewares=[friendly_error_middleware])
         # V1 routes
         app.router.add_post("/v1/messages", self.handle_v1_submit)
         app.router.add_get("/v1/messages/{message_id}", self.handle_v1_status)

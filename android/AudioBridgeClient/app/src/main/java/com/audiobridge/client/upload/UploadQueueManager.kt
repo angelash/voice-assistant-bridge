@@ -1,6 +1,7 @@
 package com.audiobridge.client.upload
 
 import android.util.Log
+import com.audiobridge.client.FriendlyErrors
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -285,10 +286,10 @@ class UploadQueueManager(
                     totalUploaded.incrementAndGet()
                     Log.i(TAG, "Upload successful: ${task.segmentId}")
                 } else {
-                    handleUploadFailure(task, "Upload returned failure")
+                    handleUploadFailure(task, "上传录音分段失败，请稍后重试。")
                 }
             } catch (e: Exception) {
-                handleUploadFailure(task, e.message ?: "Unknown error")
+                handleUploadFailure(task, FriendlyErrors.throwableMessage(e, action = "上传录音分段"))
             } finally {
                 activeUploads.decrementAndGet()
                 onTaskStatusChanged?.invoke(task)
@@ -339,14 +340,22 @@ class UploadQueueManager(
             .build()
         
         httpClient.newCall(request).execute().use { response ->
+            val body = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                Log.e(TAG, "Upload HTTP error: ${response.code}")
-                return false
+                throw IOException(
+                    FriendlyErrors.httpPayloadMessage(
+                        response.code,
+                        body,
+                        "上传录音分段失败，请稍后重试。",
+                    )
+                )
             }
-            
-            val body = response.body?.string()
-            val json = JSONObject(body ?: "{}")
-            return json.optBoolean("ok", false)
+
+            val json = JSONObject(body.ifBlank { "{}" })
+            if (!json.optBoolean("ok", false)) {
+                throw IOException(FriendlyErrors.jsonMessage(json, "上传录音分段失败，请稍后重试。"))
+            }
+            return true
         }
     }
 

@@ -34,6 +34,8 @@ except ImportError:
     print("请安装依赖: pip install pyaudio aiohttp")
     raise SystemExit(1)
 
+from friendly_errors import attach_friendly_message, friendly_exception_message
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -158,6 +160,19 @@ class AudioBridgeClient:
         self.health_path = health_path if health_path.startswith("/") else f"/{health_path}"
         self.p = pyaudio.PyAudio()
         self.is_running = False
+        self.last_error = ""
+        self.last_user_error = ""
+
+    def _clear_last_error(self) -> None:
+        self.last_error = ""
+        self.last_user_error = ""
+
+    def _set_last_error(self, user_message: str, detail: str = "") -> None:
+        self.last_user_error = (user_message or "").strip()
+        self.last_error = (detail or self.last_user_error).strip()
+
+    def friendly_last_error(self, default: str = "请求失败，请稍后重试。") -> str:
+        return self.last_user_error or default
 
     def _headers(self, json_body: bool = True) -> dict:
         headers = {}
@@ -180,6 +195,7 @@ class AudioBridgeClient:
         return self.p.open(**kwargs)
 
     async def health(self, timeout_sec: int = 30, log_error: bool = True) -> Optional[dict]:
+        self._clear_last_error()
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -189,16 +205,29 @@ class AudioBridgeClient:
                 ) as resp:
                     if resp.status == 200:
                         return await resp.json()
+                    text = await resp.text()
+                    payload = attach_friendly_message(
+                        {
+                            "ok": False,
+                            "status": resp.status,
+                            "error": text.strip() or f"http_{resp.status}",
+                            "detail": text,
+                        },
+                        default="健康检查失败，请检查服务状态。",
+                    )
+                    self._set_last_error(payload["message"], text)
                     if log_error:
-                        logger.error(f"健康检查失败: {resp.status} {await resp.text()}")
+                        logger.error(f"健康检查失败: {resp.status} {text}")
                     return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            self._set_last_error(friendly_exception_message(e, action="健康检查"), str(e))
             if log_error:
                 logger.error(f"连接失败: {e}")
             return None
 
     async def _post_json(self, path: str, payload: dict, timeout_sec: int = 120) -> tuple[int, Optional[dict], str]:
         path = path if path.startswith("/") else f"/{path}"
+        self._clear_last_error()
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -208,18 +237,37 @@ class AudioBridgeClient:
                     timeout=aiohttp.ClientTimeout(total=timeout_sec),
                 ) as resp:
                     text = await resp.text()
+                    parsed: Optional[dict]
                     if resp.status == 200:
                         try:
                             return resp.status, json.loads(text), text
                         except Exception:
                             return resp.status, None, text
-                    return resp.status, None, text
+                    try:
+                        parsed = json.loads(text)
+                        if not isinstance(parsed, dict):
+                            parsed = None
+                    except Exception:
+                        parsed = None
+                    payload_result = attach_friendly_message(
+                        parsed or {
+                            "ok": False,
+                            "status": resp.status,
+                            "error": text.strip() or f"http_{resp.status}",
+                            "detail": text,
+                        },
+                        default="请求服务失败，请稍后重试。",
+                    )
+                    self._set_last_error(payload_result["message"], text)
+                    return resp.status, parsed, text
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            self._set_last_error(friendly_exception_message(e, action="请求服务"), str(e))
             logger.error(f"连接失败: {e}")
             return 0, None, str(e)
 
     async def _get_json(self, path: str, timeout_sec: int = 30) -> tuple[int, Optional[dict], str]:
         path = path if path.startswith("/") else f"/{path}"
+        self._clear_last_error()
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(
@@ -228,13 +276,31 @@ class AudioBridgeClient:
                     timeout=aiohttp.ClientTimeout(total=timeout_sec),
                 ) as resp:
                     text = await resp.text()
+                    parsed: Optional[dict]
                     if resp.status == 200:
                         try:
                             return resp.status, json.loads(text), text
                         except Exception:
                             return resp.status, None, text
-                    return resp.status, None, text
+                    try:
+                        parsed = json.loads(text)
+                        if not isinstance(parsed, dict):
+                            parsed = None
+                    except Exception:
+                        parsed = None
+                    payload_result = attach_friendly_message(
+                        parsed or {
+                            "ok": False,
+                            "status": resp.status,
+                            "error": text.strip() or f"http_{resp.status}",
+                            "detail": text,
+                        },
+                        default="读取服务数据失败，请稍后重试。",
+                    )
+                    self._set_last_error(payload_result["message"], text)
+                    return resp.status, parsed, text
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            self._set_last_error(friendly_exception_message(e, action="读取服务数据"), str(e))
             logger.error(f"连接失败: {e}")
             return 0, None, str(e)
 
@@ -271,6 +337,7 @@ class AudioBridgeClient:
         source: str = "windows",
         message_id: Optional[str] = None,
     ) -> Optional[dict]:
+        self._clear_last_error()
         payload = {
             "text": text,
             "client_id": client_id,
@@ -282,6 +349,12 @@ class AudioBridgeClient:
         if status == 200 and data:
             return {"protocol": "v1", **data}
         if status not in {404, 405}:
+            payload_result = attach_friendly_message(
+                data or {"ok": False, "status": status, "error": body},
+                default="发送消息失败，请稍后重试。",
+            )
+            self._set_last_error(payload_result["message"], body)
+        if status not in {404, 405}:
             logger.error(f"V1 提交失败: {status} {body}")
         return None
 
@@ -289,6 +362,12 @@ class AudioBridgeClient:
         status, data, body = await self._get_json(f"{DEFAULT_V1_MESSAGES_PATH}/{message_id}", timeout_sec=30)
         if status == 200 and data:
             return data
+        if status not in {404, 405}:
+            payload_result = attach_friendly_message(
+                data or {"ok": False, "status": status, "error": body},
+                default="读取消息状态失败，请稍后重试。",
+            )
+            self._set_last_error(payload_result["message"], body)
         if status not in {404, 405}:
             logger.error(f"V1 查询失败: {status} {body}")
         return None
@@ -308,6 +387,10 @@ class AudioBridgeClient:
                 if state in {"DELIVERED", "FAILED"}:
                     return status
             if asyncio.get_running_loop().time() - started >= timeout_sec:
+                self._set_last_error(
+                    "等待龙虾大脑最终回复超时，请检查网络或稍后重试。",
+                    f"message_id={message_id}",
+                )
                 return status
             await asyncio.sleep(poll_interval)
 
@@ -321,6 +404,11 @@ class AudioBridgeClient:
         status, data, body = await self._post_json(self.chat_path, {"text": text}, timeout_sec=120)
         if status == 200 and data:
             return {"protocol": "legacy", **data}
+        payload_result = attach_friendly_message(
+            data or {"ok": False, "status": status, "error": body},
+            default="发送消息失败，请稍后重试。",
+        )
+        self._set_last_error(payload_result["message"], body)
         logger.error(f"服务器错误: {status} {body}")
         return None
 
@@ -594,10 +682,13 @@ $s.Speak($text)
                         if source != "local-operator":
                             await asyncio.to_thread(self._speak_text_windows, text)
                     if (terminal.get("status") or "").upper() == "FAILED":
-                        err = (terminal.get("last_error") or "openclaw_failed").strip()
-                        print(f"[系统] 龙虾大脑回复失败：{err}")
+                        payload = attach_friendly_message(
+                            {"ok": False, "error": terminal.get("last_error") or "openclaw_failed"},
+                            default="龙虾大脑回复失败，请稍后重试。",
+                        )
+                        print(f"[系统] {payload['message']}")
                 else:
-                    print("[系统] 终答等待超时，稍后可重试查询。")
+                    print(f"[系统] {self.friendly_last_error('终答等待超时，稍后可重试查询。')}")
             return
 
         if not printed:
@@ -717,6 +808,8 @@ async def main():
             result = await client.health()
             if result:
                 print(json.dumps(result, ensure_ascii=False, indent=2))
+            else:
+                print(client.friendly_last_error("健康检查失败，请检查服务状态。"))
         elif args.text:
             result = await client.submit_text_v1(
                 args.text,
@@ -728,6 +821,8 @@ async def main():
                 result = await client.send_text(args.text)
             if result:
                 await client.print_and_speak_reply(result)
+            else:
+                print(client.friendly_last_error("发送失败，请稍后重试。"))
         elif args.record:
             await client.record_and_send(args.record)
         elif args.continuous:
@@ -743,6 +838,8 @@ async def main():
                     result = await client.health()
                     if result:
                         print(json.dumps(result, ensure_ascii=False, indent=2))
+                    else:
+                        print(client.friendly_last_error("健康检查失败，请检查服务状态。"))
                 elif cmd == 't':
                     text = input("输入文字: ").strip()
                     if text:
@@ -756,6 +853,8 @@ async def main():
                             result = await client.send_text(text)
                         if result:
                             await client.print_and_speak_reply(result)
+                        else:
+                            print(client.friendly_last_error("发送失败，请稍后重试。"))
                 elif cmd == 'r':
                     duration = float(input("录音时长（秒）: ") or "5")
                     await client.record_and_send(duration)

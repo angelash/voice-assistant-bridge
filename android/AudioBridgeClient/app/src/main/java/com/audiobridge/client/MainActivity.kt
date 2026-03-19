@@ -66,10 +66,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.File
-import java.net.ConnectException
 import java.net.Inet4Address
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
@@ -281,7 +278,7 @@ class MainActivity : AppCompatActivity() {
                     ConversationState.WAITING_OPENCLAW -> "等待龙虾大脑..."
                     ConversationState.RETRYING -> "重试中..."
                     ConversationState.DELIVERED -> "发送完成"
-                    ConversationState.FAILED -> "发送失败"
+                    ConversationState.FAILED -> "请求失败"
                 }
             }
         }
@@ -303,7 +300,7 @@ class MainActivity : AppCompatActivity() {
             appendResult("[系统] ${notice.text}")
             if (!ConversationUiState.isActiveView(VIEW_ID)) return
             if (notice.isError) {
-                runOnUiThread { statusText.text = "发送失败" }
+                runOnUiThread { statusText.text = notice.text }
             }
         }
 
@@ -1311,7 +1308,7 @@ class MainActivity : AppCompatActivity() {
                         appendResult("[图片] 第${task.seq}张上传成功")
                     }
                     ImageUploadManager.ImageTask.Status.FAILED -> {
-                        appendResult("[图片] 第${task.seq}张上传失败: ${task.lastError}")
+                        appendResult("[图片] 第${task.seq}张上传失败: ${task.lastError ?: "请稍后重试"}")
                     }
                     else -> {}
                 }
@@ -1321,7 +1318,7 @@ class MainActivity : AppCompatActivity() {
         
         imageUploadManager.onQueueProgress = { pending, uploaded, failed ->
             runOnUiThread {
-                imageUploadStatusText.text = "图片: 已上传$uploaded, 待上传$pending"
+                imageUploadStatusText.text = "图片: 已上传$uploaded, 待上传$pending, 失败$failed"
             }
         }
         
@@ -1346,7 +1343,7 @@ class MainActivity : AppCompatActivity() {
                         appendResult("[上传] 分段${task.seq}上传成功")
                     }
                     UploadQueueManager.UploadTask.Status.FAILED -> {
-                        appendResult("[上传] 分段${task.seq}上传失败: ${task.lastError}")
+                        appendResult("[上传] 分段${task.seq}上传失败: ${task.lastError ?: "请稍后重试"}")
                     }
                     else -> {}
                 }
@@ -1584,12 +1581,7 @@ class MainActivity : AppCompatActivity() {
         normalizedBase: String,
         e: Exception,
     ): RemoteMeetingStartResult {
-        val summary = when (e) {
-            is SocketTimeoutException -> "远端服务超时"
-            is ConnectException -> "无法连接远端服务"
-            is UnknownHostException -> "无法解析服务地址"
-            else -> "远端请求异常"
-        }
+        val summary = FriendlyErrors.throwableMessage(e, action = "创建远端会议")
         val detail = buildString {
             append("链路=${endpoint.mode}")
             append(", 地址=$normalizedBase/v2/meetings")
@@ -1631,8 +1623,13 @@ class MainActivity : AppCompatActivity() {
 
                 if (meetingId.isBlank()) {
                     Log.e(TAG, "Create remote meeting failed: code=${response.code}, payload=$payload")
+                    val friendlyMessage = FriendlyErrors.httpPayloadMessage(
+                        response.code,
+                        payload,
+                        "创建会议失败，请稍后重试。",
+                    )
                     return RemoteMeetingStartResult(
-                        errorSummary = "远端会议创建失败(HTTP ${response.code})",
+                        errorSummary = friendlyMessage,
                         errorDetail = "链路=${endpoint.mode}, 地址=$normalizedBase/v2/meetings, 响应=${payload.take(200)}",
                     )
                 }
@@ -1641,7 +1638,7 @@ class MainActivity : AppCompatActivity() {
                 if (!modeOnOk) {
                     Log.e(TAG, "Failed to enable remote meeting mode for $meetingId")
                     return RemoteMeetingStartResult(
-                        errorSummary = "远端会议开启失败",
+                        errorSummary = "开启会议模式失败，请稍后重试。",
                         errorDetail = "链路=${endpoint.mode}, 地址=$normalizedBase/v2/meetings/$meetingId/mode",
                     )
                 }
@@ -1673,12 +1670,15 @@ class MainActivity : AppCompatActivity() {
                 }
                 val ok = response.isSuccessful && json.optBoolean("ok", false)
                 if (!ok) {
-                    Log.e(TAG, "Set remote mode failed: code=${response.code}, payload=$payload")
+                    Log.e(
+                        TAG,
+                        "Set remote mode failed: ${FriendlyErrors.httpPayloadMessage(response.code, payload, "设置会议状态失败，请稍后重试。")} | code=${response.code}, payload=$payload"
+                    )
                 }
                 ok
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Set remote mode exception: ${e.message}", e)
+            Log.e(TAG, "Set remote mode exception: ${FriendlyErrors.throwableMessage(e, action = "设置会议状态")}", e)
             false
         }
     }
@@ -1707,13 +1707,25 @@ class MainActivity : AppCompatActivity() {
                         runOnUiThread { appendResult("[转写] 任务进行中: $meetingId") }
                     } else {
                         Log.w(TAG, "Transcription trigger failed: code=${response.code}, payload=$payload")
-                        runOnUiThread { appendResult("[转写] 触发失败: $err") }
+                        runOnUiThread {
+                            appendResult(
+                                "[转写] ${
+                                    FriendlyErrors.httpPayloadMessage(
+                                        response.code,
+                                        payload,
+                                        "触发转写失败，请稍后重试。",
+                                    )
+                                }"
+                            )
+                        }
                     }
                 }
             }
         } catch (e: Exception) {
             Log.w(TAG, "Transcription trigger exception: ${e.message}")
-            runOnUiThread { appendResult("[转写] 触发异常: ${e.message}") }
+            runOnUiThread {
+                appendResult("[转写] ${FriendlyErrors.throwableMessage(e, action = "触发转写")}")
+            }
         }
     }
 
@@ -2142,9 +2154,11 @@ class MainActivity : AppCompatActivity() {
                         JSONObject()
                     }
                     if (!response.isSuccessful || !json.optBoolean("ok", false)) {
-                        fetchError = json.optString("error").ifBlank {
-                            "http_${response.code}"
-                        }
+                        fetchError = FriendlyErrors.httpPayloadMessage(
+                            response.code,
+                            payload,
+                            "读取会议历史失败，请稍后重试。",
+                        )
                     } else {
                         val meetings = json.optJSONArray("meetings")
                         val items = mutableListOf<RemoteMeetingHistoryRecord>()
@@ -2164,7 +2178,7 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             } catch (e: Exception) {
-                fetchError = e.message ?: "请求失败"
+                fetchError = FriendlyErrors.throwableMessage(e, action = "读取会议历史")
             } finally {
                 synchronized(remoteHistoryLock) {
                     remoteHistoryBaseUrl = baseUrl
@@ -2383,7 +2397,7 @@ class MainActivity : AppCompatActivity() {
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to handle captured image", e)
-            Toast.makeText(this, "图片处理失败: ${e.message}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "图片处理失败，请检查图片文件后重试。", Toast.LENGTH_SHORT).show()
         }
     }
     

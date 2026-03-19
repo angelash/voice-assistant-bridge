@@ -3,6 +3,7 @@ package com.audiobridge.client.upload
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.Log
+import com.audiobridge.client.FriendlyErrors
 import okhttp3.*
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.asRequestBody
@@ -182,7 +183,7 @@ class ImageUploadManager(
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to upload image ${task.imageId}", e)
                     task.status = ImageTask.Status.FAILED
-                    task.lastError = e.message
+                    task.lastError = FriendlyErrors.throwableMessage(e, action = "上传图片")
                     totalFailed.incrementAndGet()
                 }
                 
@@ -231,9 +232,9 @@ class ImageUploadManager(
             
             try {
                 httpClient.newCall(request).execute().use { response ->
+                    val body = response.body?.string().orEmpty()
                     if (response.isSuccessful) {
-                        val body = response.body?.string()
-                        val json = JSONObject(body ?: "{}")
+                        val json = JSONObject(body.ifBlank { "{}" })
                         
                         if (json.optBoolean("ok", false)) {
                             task.status = ImageTask.Status.UPLOADED
@@ -241,10 +242,16 @@ class ImageUploadManager(
                             Log.i(TAG, "Image uploaded: ${task.imageId}")
                             return
                         } else {
-                            throw IOException("Upload failed: ${json.optString("error", "unknown")}")
+                            throw IOException(FriendlyErrors.jsonMessage(json, "上传图片失败，请稍后重试。"))
                         }
                     } else {
-                        throw IOException("HTTP ${response.code}: ${response.message}")
+                        throw IOException(
+                            FriendlyErrors.httpPayloadMessage(
+                                response.code,
+                                body,
+                                "上传图片失败，请稍后重试。",
+                            )
+                        )
                     }
                 }
             } catch (e: Exception) {

@@ -68,7 +68,7 @@ class MeetingManager(private val context: Context) {
             true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize meetings directory", e)
-            onError?.invoke("Failed to initialize storage: ${e.message}")
+            onError?.invoke("初始化会议存储失败，请检查应用存储权限或剩余空间。")
             false
         }
     }
@@ -105,7 +105,7 @@ class MeetingManager(private val context: Context) {
             return meetingId
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start meeting", e)
-            onError?.invoke("Failed to start meeting: ${e.message}")
+            onError?.invoke("启动本地会议失败，请稍后重试。")
             return null
         }
     }
@@ -138,7 +138,7 @@ class MeetingManager(private val context: Context) {
             return true
         } catch (e: Exception) {
             Log.e(TAG, "Failed to end meeting", e)
-            onError?.invoke("Failed to end meeting: ${e.message}")
+            onError?.invoke("结束本地会议失败，请稍后重试。")
             return false
         }
     }
@@ -173,7 +173,7 @@ class MeetingManager(private val context: Context) {
             return false
         } catch (e: Exception) {
             Log.e(TAG, "Failed to write PCM data", e)
-            onError?.invoke("Failed to write audio: ${e.message}")
+            onError?.invoke("录音写入失败，请检查存储空间后重试。")
             return false
         }
     }

@@ -128,6 +128,7 @@ class VisualStageActivity : AppCompatActivity() {
     private var ttsReady = false
     private var ttsSpeaking = false
     private var suppressVisualMeetingSwitchCallback = false
+    private var pendingMeetingToggleTarget: Boolean? = null
 
     private var sessionId: String = "voice-bridge-session"
     private var clientId: String = "android-client"
@@ -184,7 +185,7 @@ class VisualStageActivity : AppCompatActivity() {
                         ConversationState.WAITING_OPENCLAW -> "等待龙虾大脑..."
                         ConversationState.RETRYING -> "重试中..."
                         ConversationState.DELIVERED -> "已送达"
-                        ConversationState.FAILED -> "失败"
+                        ConversationState.FAILED -> "请求失败"
                     },
                     isError = state == ConversationState.FAILED,
                 )
@@ -643,16 +644,19 @@ class VisualStageActivity : AppCompatActivity() {
     private fun requestMeetingToggle(targetEnabled: Boolean, source: String) {
         val snapshot = MeetingUiState.snapshot()
         if (snapshot.busy) {
+            pendingMeetingToggleTarget = null
             updateStatus("会议操作处理中...")
             syncMeetingSnapshot()
             return
         }
         val accepted = MeetingControlBus.requestToggle(targetEnabled)
         if (!accepted) {
+            pendingMeetingToggleTarget = null
             updateStatus("会议控制器不可用，请回基础页操作", isError = true)
             syncMeetingSnapshot()
             return
         }
+        pendingMeetingToggleTarget = targetEnabled
         val actionText = if (targetEnabled) "正在开始会议..." else "正在结束会议..."
         updateStatus(actionText)
         Log.i(TAG, "Meeting toggle requested from $source: targetEnabled=$targetEnabled")
@@ -687,6 +691,33 @@ class VisualStageActivity : AppCompatActivity() {
         }
         visualMeetingInfoText.text = snapshot.infoText.ifBlank { "暂无会议信息" }
         updateMeetingPanelToggleText(snapshot)
+        syncMeetingActionStatus(snapshot, controllerBound)
+    }
+
+    private fun syncMeetingActionStatus(snapshot: MeetingUiSnapshot, controllerBound: Boolean) {
+        val requestedTarget = pendingMeetingToggleTarget ?: return
+        if (snapshot.busy) return
+
+        pendingMeetingToggleTarget = null
+        if (!controllerBound) {
+            updateStatus("会议控制器不可用，请回基础页操作", isError = true)
+            return
+        }
+
+        if (requestedTarget) {
+            if (snapshot.active) {
+                updateStatus("会议已开始")
+            } else {
+                updateStatus(snapshot.statusText.ifBlank { "会议启动失败" }, isError = true)
+            }
+            return
+        }
+
+        if (!snapshot.active) {
+            updateStatus("会议已结束")
+        } else {
+            updateStatus("会议结束失败", isError = true)
+        }
     }
 
     private fun setVisualMeetingSwitchChecked(checked: Boolean) {

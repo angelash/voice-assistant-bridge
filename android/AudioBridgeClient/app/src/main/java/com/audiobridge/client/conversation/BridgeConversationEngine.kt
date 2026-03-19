@@ -1,5 +1,6 @@
 package com.audiobridge.client.conversation
 
+import com.audiobridge.client.FriendlyErrors
 import org.json.JSONObject
 import java.util.Locale
 import java.util.UUID
@@ -99,7 +100,10 @@ class BridgeConversationEngine(
         Thread {
             runCatching { submitTextSync(submitRequest) }.onFailure { err ->
                 emitState(ConversationState.FAILED)
-                emitSystemNotice("send failed: ${err.message ?: "unknown"}", isError = true)
+                emitSystemNotice(
+                    FriendlyErrors.throwableMessage(err, action = "发送消息"),
+                    isError = true,
+                )
             }
         }.start()
     }
@@ -161,7 +165,7 @@ class BridgeConversationEngine(
 
         if (terminalPayload == null) {
             setState(ConversationState.FAILED)
-            emitSystemNotice("timeout waiting final reply", isError = true)
+            emitSystemNotice("等待龙虾大脑回复超时，请检查网络或稍后重试。", isError = true)
             return
         }
 
@@ -179,7 +183,9 @@ class BridgeConversationEngine(
             .put("max_chars", maxChars)
         val resp = transport.postJson(request.endpoint.baseUrl, "/v1/operator/summarize", body)
         if (!resp.optBoolean("ok", false)) {
-            throw IllegalStateException(resp.optString("error").ifBlank { "summary_failed" })
+            throw IllegalStateException(
+                FriendlyErrors.jsonMessage(resp, "生成简报失败，请稍后重试。")
+            )
         }
         return resp.optString("summary").trim()
     }
@@ -272,7 +278,10 @@ class BridgeConversationEngine(
         val state = payload.optString("status").uppercase(Locale.getDefault())
         if (state == "FAILED") {
             val err = payload.optString("last_error").ifBlank { "openclaw_failed" }
-            emitSystemNotice("openclaw failed: $err", isError = true)
+            emitSystemNotice(
+                FriendlyErrors.backendMessage(err, "龙虾大脑回复失败，请稍后重试。"),
+                isError = true,
+            )
         }
     }
 

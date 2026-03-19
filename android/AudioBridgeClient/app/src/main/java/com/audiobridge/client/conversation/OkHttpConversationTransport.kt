@@ -1,10 +1,13 @@
 package com.audiobridge.client.conversation
 
+import com.audiobridge.client.FriendlyErrors
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import org.json.JSONException
 import org.json.JSONObject
+import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 class OkHttpConversationTransport(
@@ -18,8 +21,20 @@ class OkHttpConversationTransport(
             .build()
         httpClient.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: $text")
-            return JSONObject(text)
+            if (!resp.isSuccessful) {
+                throw IOException(
+                    FriendlyErrors.httpPayloadMessage(
+                        resp.code,
+                        text,
+                        "发送消息失败，请稍后重试。",
+                    )
+                )
+            }
+            return try {
+                JSONObject(text)
+            } catch (e: JSONException) {
+                throw IOException("服务返回格式异常，请稍后重试。", e)
+            }
         }
     }
 
@@ -30,8 +45,20 @@ class OkHttpConversationTransport(
             .build()
         httpClient.newCall(req).execute().use { resp ->
             val text = resp.body?.string().orEmpty()
-            if (!resp.isSuccessful) throw IllegalStateException("HTTP ${resp.code}: $text")
-            return JSONObject(text)
+            if (!resp.isSuccessful) {
+                throw IOException(
+                    FriendlyErrors.httpPayloadMessage(
+                        resp.code,
+                        text,
+                        "读取消息状态失败，请稍后重试。",
+                    )
+                )
+            }
+            return try {
+                JSONObject(text)
+            } catch (e: JSONException) {
+                throw IOException("服务返回格式异常，请稍后重试。", e)
+            }
         }
     }
 }

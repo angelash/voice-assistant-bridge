@@ -19,6 +19,11 @@ from pathlib import Path
 from typing import Optional
 
 import aiohttp
+from friendly_errors import (
+    attach_friendly_message,
+    build_exception_result,
+    friendly_result_message,
+)
 
 try:
     from PySide6.QtWidgets import (
@@ -107,111 +112,184 @@ class MeetingClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    async def create_meeting(self, client_id: str = "windows-client") -> dict:
+    async def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        action: str = "请求服务",
+        json_payload: Optional[dict] = None,
+        data: object = None,
+        timeout_sec: int = 20,
+        expect_bytes: bool = False,
+    ):
         session = await self._get_session()
-        async with session.post(
-            f"{self.base_url}/v2/meetings",
-            json={"client_id": client_id},
-        ) as resp:
-            return await resp.json()
+        url = f"{self.base_url}{path}"
+        try:
+            async with session.request(
+                method,
+                url,
+                json=json_payload,
+                data=data,
+                timeout=aiohttp.ClientTimeout(total=timeout_sec),
+            ) as resp:
+                if expect_bytes:
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        payload = {
+                            "ok": False,
+                            "status": resp.status,
+                            "error": text.strip() or f"http_{resp.status}",
+                            "detail": text,
+                        }
+                        return attach_friendly_message(payload, default=f"{action}失败，请稍后重试。")
+                    return await resp.read()
+
+                text = await resp.text()
+                try:
+                    payload = json.loads(text) if text.strip() else {}
+                except Exception:
+                    payload = {
+                        "ok": False,
+                        "status": resp.status,
+                        "error": text.strip() or f"http_{resp.status}",
+                        "detail": text,
+                    }
+                if not isinstance(payload, dict):
+                    payload = {"ok": resp.status < 400, "data": payload}
+                if resp.status >= 400 and payload.get("ok") is True:
+                    payload["ok"] = False
+                if resp.status >= 400 or payload.get("ok") is False:
+                    payload.setdefault("ok", False)
+                    payload.setdefault("status", resp.status)
+                    payload.setdefault("detail", text)
+                    return attach_friendly_message(payload, default=f"{action}失败，请稍后重试。")
+                payload.setdefault("ok", True)
+                return payload
+        except Exception as e:
+            return build_exception_result(e, action=action)
+
+    async def create_meeting(self, client_id: str = "windows-client") -> dict:
+        return await self._request_json(
+            "POST",
+            "/v2/meetings",
+            action="创建会议",
+            json_payload={"client_id": client_id},
+        )
 
     async def set_meeting_mode(self, meeting_id: str, mode: str) -> dict:
-        session = await self._get_session()
-        async with session.post(
-            f"{self.base_url}/v2/meetings/{meeting_id}/mode",
-            json={"mode": mode},
-        ) as resp:
-            return await resp.json()
+        action = "开启会议模式" if str(mode).lower() == "on" else "结束会议"
+        return await self._request_json(
+            "POST",
+            f"/v2/meetings/{meeting_id}/mode",
+            action=action,
+            json_payload={"mode": mode},
+        )
 
     async def list_meetings(self, limit: int = 20) -> dict:
-        session = await self._get_session()
-        async with session.get(
-            f"{self.base_url}/v2/meetings?limit={limit}",
-        ) as resp:
-            return await resp.json()
+        return await self._request_json("GET", f"/v2/meetings?limit={limit}", action="读取会议列表")
 
     async def get_meeting(self, meeting_id: str) -> dict:
-        session = await self._get_session()
-        async with session.get(
-            f"{self.base_url}/v2/meetings/{meeting_id}",
-        ) as resp:
-            return await resp.json()
+        return await self._request_json("GET", f"/v2/meetings/{meeting_id}", action="读取会议详情")
 
     async def get_timeline(self, meeting_id: str, after_seq: int = 0) -> dict:
-        session = await self._get_session()
-        async with session.get(
-            f"{self.base_url}/v2/meetings/{meeting_id}/timeline?after_seq={after_seq}",
-        ) as resp:
-            return await resp.json()
+        return await self._request_json(
+            "GET",
+            f"/v2/meetings/{meeting_id}/timeline?after_seq={after_seq}",
+            action="读取会议时间线",
+        )
 
     # M3: Transcription job API methods
     
     async def get_transcription_jobs(self, meeting_id: str) -> dict:
         """Get transcription jobs for a meeting."""
-        session = await self._get_session()
-        async with session.get(
-            f"{self.base_url}/v2/meetings/{meeting_id}/transcription",
-        ) as resp:
-            return await resp.json()
+        return await self._request_json(
+            "GET",
+            f"/v2/meetings/{meeting_id}/transcription",
+            action="读取转写任务",
+        )
     
     async def get_transcription_queue(self) -> dict:
         """Get all queued and running transcription jobs."""
-        session = await self._get_session()
-        async with session.get(
-            f"{self.base_url}/v2/transcription/queue",
-        ) as resp:
-            return await resp.json()
+        return await self._request_json("GET", "/v2/transcription/queue", action="读取转写队列")
     
     async def get_transcription_job(self, job_id: str) -> dict:
         """Get a specific transcription job status."""
-        session = await self._get_session()
-        async with session.get(
-            f"{self.base_url}/v2/transcription/{job_id}",
-        ) as resp:
-            return await resp.json()
+        return await self._request_json("GET", f"/v2/transcription/{job_id}", action="读取转写任务")
     
     async def run_transcription(self, meeting_id: str, model: str = "small") -> dict:
         """Start a transcription job for a meeting."""
-        session = await self._get_session()
-        async with session.post(
-            f"{self.base_url}/v2/meetings/{meeting_id}/transcription:run",
-            json={"model": model},
-        ) as resp:
-            return await resp.json()
+        return await self._request_json(
+            "POST",
+            f"/v2/meetings/{meeting_id}/transcription:run",
+            action="启动转写任务",
+            json_payload={"model": model},
+        )
 
     # M5: Image API methods
     
     async def get_images(self, meeting_id: str) -> dict:
         """Get all images for a meeting."""
-        session = await self._get_session()
-        async with session.get(
-            f"{self.base_url}/v2/meetings/{meeting_id}/images",
-        ) as resp:
-            return await resp.json()
+        return await self._request_json("GET", f"/v2/meetings/{meeting_id}/images", action="读取图片列表")
     
     async def get_image(self, meeting_id: str, image_id: str) -> dict:
         """Get a specific image."""
-        session = await self._get_session()
-        async with session.get(
-            f"{self.base_url}/v2/meetings/{meeting_id}/images/{image_id}",
-        ) as resp:
-            return await resp.json()
+        return await self._request_json(
+            "GET",
+            f"/v2/meetings/{meeting_id}/images/{image_id}",
+            action="读取图片详情",
+        )
     
     async def get_image_file(self, meeting_id: str, image_id: str) -> bytes:
         """Get image file content."""
-        session = await self._get_session()
-        async with session.get(
-            f"{self.base_url}/v2/meetings/{meeting_id}/images/{image_id}/file",
-        ) as resp:
-            return await resp.read()
+        return await self._request_json(
+            "GET",
+            f"/v2/meetings/{meeting_id}/images/{image_id}/file",
+            action="下载图片文件",
+            expect_bytes=True,
+        )
     
     async def trigger_image_analysis(self, meeting_id: str, image_id: str) -> dict:
         """Trigger image analysis for a specific image."""
-        session = await self._get_session()
-        async with session.post(
-            f"{self.base_url}/v2/meetings/{meeting_id}/images/{image_id}:analyze",
-        ) as resp:
-            return await resp.json()
+        return await self._request_json(
+            "POST",
+            f"/v2/meetings/{meeting_id}/images/{image_id}:analyze",
+            action="触发图片分析",
+        )
+
+    async def get_upload_manifest(self, meeting_id: str) -> Optional[dict]:
+        result = await self._request_json(
+            "GET",
+            f"/v2/meetings/{meeting_id}/audio/manifest",
+            action="读取上传状态",
+        )
+        return result if isinstance(result, dict) and result.get("ok") else None
+
+    async def get_speakers(self, meeting_id: str) -> dict:
+        return await self._request_json("GET", f"/v2/meetings/{meeting_id}/speakers", action="读取说话人信息")
+
+    async def rename_speaker(self, meeting_id: str, speaker_cluster_id: str, new_name: str) -> dict:
+        return await self._request_json(
+            "PATCH",
+            f"/v2/meetings/{meeting_id}/speakers/{speaker_cluster_id}",
+            action="保存说话人名称",
+            json_payload={"speaker_name": new_name},
+        )
+
+    async def upload_image(self, meeting_id: str, filename: str, data: bytes) -> dict:
+        form = aiohttp.FormData()
+        form.add_field("image", data, filename=filename, content_type="application/octet-stream")
+        form.add_field("filename", filename)
+        return await self._request_json(
+            "POST",
+            f"/v2/meetings/{meeting_id}/images:upload",
+            action="上传图片",
+            data=form,
+            timeout_sec=60,
+        )
+
+    async def get_refined_transcript(self, meeting_id: str) -> dict:
+        return await self._request_json("GET", f"/v2/meetings/{meeting_id}/refined", action="读取精修转写")
 
 
 class MeetingConsoleWidget(QWidget):
@@ -312,6 +390,26 @@ class MeetingConsoleWidget(QWidget):
 
     @asyncSlot()
     async def _on_start_clicked(self):
+        result = await self.client.create_meeting()
+        if not result.get("ok"):
+            self._log(friendly_result_message(result, "创建会议失败，请稍后重试。"), "error")
+            return
+
+        self.current_meeting_id = result["meeting_id"]
+        self._log(f"会议已创建: {self.current_meeting_id}")
+
+        mode_result = await self.client.set_meeting_mode(self.current_meeting_id, "on")
+        if not mode_result.get("ok"):
+            self._log(friendly_result_message(mode_result, "开启会议模式失败，请稍后重试。"), "error")
+            return
+
+        self.current_status = MEETING_STATUS_ACTIVE
+        self._update_controls()
+        self._log("会议模式已开启", "event")
+        self.meeting_started.emit(self.current_meeting_id)
+        self.status_changed.emit("active")
+        self._poll_timer.start(2000)
+        return
         try:
             result = await self.client.create_meeting()
             if result.get("ok"):
@@ -340,6 +438,16 @@ class MeetingConsoleWidget(QWidget):
     async def _on_end_clicked(self):
         if not self.current_meeting_id:
             return
+        result = await self.client.set_meeting_mode(self.current_meeting_id, "off")
+        if not result.get("ok"):
+            self._log(friendly_result_message(result, "结束会议失败，请稍后重试。"), "error")
+            return
+        self._log("会议已结束", "event")
+        self.current_status = MEETING_STATUS_IDLE
+        self._poll_timer.stop()
+        self._update_controls()
+        self.meeting_ended.emit(self.current_meeting_id)
+        return
         try:
             result = await self.client.set_meeting_mode(self.current_meeting_id, "off")
             if result.get("ok"):
@@ -391,6 +499,18 @@ class MeetingHistoryWidget(QWidget):
     @asyncSlot()
     async def _refresh(self):
         self.meeting_list.clear()
+        result = await self.client.list_meetings()
+        if not result.get("ok"):
+            print(f"Failed to refresh meeting list: {friendly_result_message(result, '读取会议列表失败，请稍后重试。')}")
+            return
+        for meeting in result.get("meetings", []):
+            meeting_id = meeting.get("meeting_id", "unknown")
+            status = meeting.get("status", "unknown")
+            created = _format_api_datetime(meeting.get("created_at", ""), fallback="n/a")
+            item = QListWidgetItem(f"{created} | {status} | {meeting_id[:16]}...")
+            item.setData(Qt.UserRole, meeting_id)
+            self.meeting_list.addItem(item)
+        return
         try:
             result = await self.client.list_meetings()
             if result.get("ok"):
@@ -408,6 +528,13 @@ class MeetingHistoryWidget(QWidget):
     async def _on_item_double_clicked(self, item: QListWidgetItem):
         meeting_id = item.data(Qt.UserRole)
         if not meeting_id:
+            return
+
+        meeting_resp = await self.client.get_meeting(meeting_id)
+        jobs_resp = await self.client.get_transcription_jobs(meeting_id)
+        images_resp = await self.client.get_images(meeting_id)
+        if not meeting_resp.get("ok"):
+            QMessageBox.warning(self, "错误", friendly_result_message(meeting_resp, "读取会议详情失败，请稍后重试。"))
             return
 
         try:
@@ -505,6 +632,27 @@ class BackupStatusWidget(QWidget):
 
     @asyncSlot()
     async def _refresh(self):
+        result = await self.client.list_meetings(limit=10)
+        if not result.get("ok"):
+            self.status_label.setText(friendly_result_message(result, "读取会议列表失败，请稍后重试。"))
+            return
+
+        meetings = result.get("meetings", [])
+        if not meetings:
+            self.status_label.setText("暂无会议记录")
+            return
+
+        for meeting in meetings:
+            meeting_id = meeting.get("meeting_id")
+            if not meeting_id:
+                continue
+            manifest_result = await self.client.get_upload_manifest(meeting_id)
+            if manifest_result:
+                self._update_ui(manifest_result)
+                return
+
+        self.status_label.setText("暂无可备份会议")
+        return
         try:
             # Get recent meetings
             result = await self.client.list_meetings(limit=10)
@@ -536,6 +684,7 @@ class BackupStatusWidget(QWidget):
 
     async def _get_upload_manifest(self, meeting_id: str) -> dict:
         """Get upload manifest for a meeting"""
+        return await self.client.get_upload_manifest(meeting_id)
         session = self.client._session
         if session is None:
             session = await self.client._get_session()
@@ -590,9 +739,17 @@ class BackupStatusWidget(QWidget):
             item = QListWidgetItem(item_text)
             
             if status == "failed":
+                friendly_error = friendly_result_message(
+                    {"error": seg.get("upload_error"), "detail": seg.get("upload_error")},
+                    "上传失败，请稍后重试。",
+                )
+                item.setToolTip(f"错误: {friendly_error}")
                 error = seg.get("upload_error", "")
+                item.setToolTip(f"错误: {friendly_error}")
                 item.setToolTip(f"错误: {error}")
             
+            if status == "failed":
+                item.setToolTip(f"错误: {friendly_error}")
             self.segment_list.addItem(item)
 
 
@@ -631,6 +788,13 @@ class TranscriptionTaskWidget(QWidget):
         asyncio.create_task(self._refresh())
     
     async def _refresh(self):
+        result = await self.client.get_transcription_queue()
+        if not result.get("ok"):
+            self.status_label.setText(friendly_result_message(result, "读取转写队列失败，请稍后重试。"))
+            return
+        jobs = result.get("queued_jobs", [])
+        self._update_ui(jobs)
+        return
         try:
             result = await self.client.get_transcription_queue()
             if result.get("ok"):
@@ -725,6 +889,13 @@ class SpeakerPanelWidget(QWidget):
     async def _refresh(self):
         if not self._current_meeting_id:
             return
+        result = await self.client.get_speakers(self._current_meeting_id)
+        if not result.get("ok"):
+            self.status_label.setText(friendly_result_message(result, "读取说话人信息失败，请稍后重试。"))
+            return
+        speakers = result.get("speakers", [])
+        self._update_ui(speakers)
+        return
         
         try:
             result = await self._get_speakers(self._current_meeting_id)
@@ -736,6 +907,7 @@ class SpeakerPanelWidget(QWidget):
     
     async def _get_speakers(self, meeting_id: str) -> dict:
         """Get speakers for a meeting."""
+        return await self.client.get_speakers(meeting_id)
         session = self.client._session
         if session is None:
             session = await self.client._get_session()
@@ -801,6 +973,13 @@ class SpeakerPanelWidget(QWidget):
     async def _rename_speaker(self, speaker_cluster_id: str, new_name: str):
         if not self._current_meeting_id:
             return
+        result = await self.client.rename_speaker(self._current_meeting_id, speaker_cluster_id, new_name)
+        if result.get("ok"):
+            self.status_label.setText(f"已重命名为: {new_name}")
+            await self._refresh()
+        else:
+            self.status_label.setText(friendly_result_message(result, "保存说话人名称失败，请稍后重试。"))
+        return
         
         try:
             session = self.client._session
@@ -882,6 +1061,13 @@ class ImagePanelWidget(QWidget):
     async def _refresh(self):
         if not self._current_meeting_id:
             return
+        result = await self.client.get_images(self._current_meeting_id)
+        if not result.get("ok"):
+            self.status_label.setText(friendly_result_message(result, "读取图片列表失败，请稍后重试。"))
+            return
+        images = result.get("images", [])
+        self._update_ui(images)
+        return
         
         try:
             result = await self._get_images(self._current_meeting_id)
@@ -893,6 +1079,7 @@ class ImagePanelWidget(QWidget):
     
     async def _get_images(self, meeting_id: str) -> dict:
         """Get images for a meeting."""
+        return await self.client.get_images(meeting_id)
         session = self.client._session
         if session is None:
             session = await self.client._get_session()
@@ -954,6 +1141,13 @@ class ImagePanelWidget(QWidget):
         """Open image in default viewer or show in dialog."""
         if not self._current_meeting_id:
             return
+        result = await self.client.get_image(self._current_meeting_id, image_id)
+        if result.get("ok"):
+            img = result.get("image", {})
+            self._show_image_dialog(img)
+        else:
+            self.status_label.setText(friendly_result_message(result, "读取图片详情失败，请稍后重试。"))
+        return
         
         try:
             session = self.client._session
@@ -1047,6 +1241,22 @@ class ImagePanelWidget(QWidget):
         """Upload an image file."""
         if not self._current_meeting_id:
             return
+        p = Path(file_path)
+        filename = p.name
+        try:
+            with open(file_path, "rb") as f:
+                data = f.read()
+        except Exception:
+            self.status_label.setText("读取图片文件失败，请确认文件仍可访问。")
+            return
+
+        result = await self.client.upload_image(self._current_meeting_id, filename, data)
+        if result.get("ok"):
+            self.status_label.setText(f"已上传: {filename}")
+            await self._refresh()
+        else:
+            self.status_label.setText(friendly_result_message(result, "上传图片失败，请稍后重试。"))
+        return
         
         try:
             import os
@@ -1132,6 +1342,13 @@ class RefinedTranscriptWidget(QWidget):
     async def _refresh(self):
         if not self._current_meeting_id:
             return
+        result = await self.client.get_refined_transcript(self._current_meeting_id)
+        if result.get("ok"):
+            segments = result.get("segments", [])
+            self._update_ui(segments)
+        else:
+            self.status_label.setText(friendly_result_message(result, "读取精修转写失败，请稍后重试。"))
+        return
         
         try:
             session = self.client._session
