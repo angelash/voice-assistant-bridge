@@ -200,6 +200,54 @@
             android:textColor="#BFD2EF"
             android:textSize="11sp" />
 
+        <TextView
+            android:id="@+id/meetingCaptionSectionTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="实时字幕"
+            android:textColor="#CCE0FF"
+            android:textSize="13sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/meetingCaptionStatusText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#1A2B40"
+            android:padding="8dp"
+            android:text="会议未开始"
+            android:textColor="#DCE8FF"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/meetingCaptionFinalText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#101925"
+            android:fontFamily="monospace"
+            android:minHeight="96dp"
+            android:padding="8dp"
+            android:text="(暂无字幕)"
+            android:textColor="#CFE2FF"
+            android:textSize="11sp" />
+
+        <TextView
+            android:id="@+id/meetingCaptionPartialText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:background="#162638"
+            android:ellipsize="end"
+            android:fontFamily="monospace"
+            android:maxLines="2"
+            android:padding="8dp"
+            android:text="(等待发言)"
+            android:textColor="#9DB2D0"
+            android:textSize="11sp" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

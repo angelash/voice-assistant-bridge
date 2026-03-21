@@ -37,6 +37,8 @@ import com.audiobridge.client.conversation.LongReplyDecisionRequired
 import com.audiobridge.client.conversation.RoleMessage
 import com.audiobridge.client.conversation.RoleSource
 import com.audiobridge.client.conversation.SharedConversationEngine
+import com.audiobridge.client.meeting.MeetingCaptionSnapshot
+import com.audiobridge.client.meeting.MeetingCaptionState
 import com.audiobridge.client.meeting.MeetingControlBus
 import com.audiobridge.client.meeting.MeetingUiSnapshot
 import com.audiobridge.client.meeting.MeetingUiState
@@ -107,6 +109,9 @@ class VisualStageActivity : AppCompatActivity() {
     private lateinit var visualMeetingStatusText: TextView
     private lateinit var visualMeetingIdText: TextView
     private lateinit var visualMeetingInfoText: TextView
+    private lateinit var visualMeetingCaptionStatusText: TextView
+    private lateinit var visualMeetingCaptionFinalText: TextView
+    private lateinit var visualMeetingCaptionPartialText: TextView
     private lateinit var visualRouteInfoText: TextView
     private lateinit var eyeAvatarView: EyeAvatarView
     private lateinit var subtitleRowContainer: LinearLayout
@@ -250,9 +255,10 @@ class VisualStageActivity : AppCompatActivity() {
                 0, 1 -> runOnUiThread { updateStatus(if (purpose == SpeechPurpose.LONG_REPLY_DECISION) "正在听取选择..." else "识别中...") }
                 2 -> {
                     sttListening = false
+                    sttFinished.set(true)
                     stopAudioCapture()
                     runOnUiThread {
-                        sttButton.text = "语音输入"
+                        updateSpeechInputAvailability()
                         updateStatus(if (purpose == SpeechPurpose.LONG_REPLY_DECISION) "已识别到选择" else "语音识别完成")
                     }
                     emitSpeechResult(textRaw.ifBlank { lastAsrText }, purpose)
@@ -264,11 +270,11 @@ class VisualStageActivity : AppCompatActivity() {
         override fun onError(asrError: ASR.ASRError, userTag: Any?) {
             val purpose = currentSpeechPurpose
             sttListening = false
+            sttFinished.set(true)
             stopAudioCapture()
-            runOnUiThread { sttButton.text = "语音输入" }
+            runOnUiThread { updateSpeechInputAvailability() }
 
             if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
-                sttFinished.set(true)
                 runOnUiThread { updateStatus("等待你的选择...") }
                 scheduleLongReplyDecisionListening(delayMs = 700)
                 return
@@ -294,6 +300,9 @@ class VisualStageActivity : AppCompatActivity() {
         visualMeetingStatusText = findViewById(R.id.visualMeetingStatusText)
         visualMeetingIdText = findViewById(R.id.visualMeetingIdText)
         visualMeetingInfoText = findViewById(R.id.visualMeetingInfoText)
+        visualMeetingCaptionStatusText = findViewById(R.id.visualMeetingCaptionStatusText)
+        visualMeetingCaptionFinalText = findViewById(R.id.visualMeetingCaptionFinalText)
+        visualMeetingCaptionPartialText = findViewById(R.id.visualMeetingCaptionPartialText)
         visualRouteInfoText = findViewById(R.id.visualRouteInfoText)
         eyeAvatarView = findViewById(R.id.eyeAvatarView)
         subtitleRowContainer = findViewById(R.id.subtitleRowContainer)
@@ -396,6 +405,7 @@ class VisualStageActivity : AppCompatActivity() {
             requestRecordAudioPermission()
         }
         syncMeetingSnapshot()
+        renderMeetingCaptionSnapshot(MeetingCaptionState.snapshot())
         refreshRouteInfo(allowNetworkProbe = false)
         applyTopPanelExpansionStates()
         applySubtitleExpansionStates()
@@ -408,6 +418,7 @@ class VisualStageActivity : AppCompatActivity() {
         setLongReplyChoiceButtonsVisible(isPendingLongReplyActive())
         restoreFromSharedState()
         syncMeetingSnapshot()
+        renderMeetingCaptionSnapshot(MeetingCaptionState.snapshot())
         refreshRouteInfo(allowNetworkProbe = false)
         mainHandler.post(meetingUiSyncTask)
         applyTopPanelExpansionStates()
@@ -540,6 +551,34 @@ class VisualStageActivity : AppCompatActivity() {
         visualMeetingPanelToggleButton.text = "$status $arrow"
     }
 
+    private fun renderMeetingCaptionSnapshot(snapshot: MeetingCaptionSnapshot) {
+        visualMeetingCaptionStatusText.text = snapshot.statusText.ifBlank { "会议未开始" }
+        visualMeetingCaptionFinalText.text = if (snapshot.finalLines.isEmpty()) {
+            "(暂无字幕)"
+        } else {
+            snapshot.finalLines.joinToString("\n")
+        }
+        visualMeetingCaptionPartialText.text = snapshot.partialText.ifBlank {
+            if (snapshot.active) "(等待发言)" else "(无进行中的转写)"
+        }
+    }
+
+    private fun isSpeechInputBlockedByMeeting(snapshot: MeetingUiSnapshot = MeetingUiState.snapshot()): Boolean {
+        return snapshot.active || snapshot.busy
+    }
+
+    private fun updateSpeechInputAvailability(snapshot: MeetingUiSnapshot = MeetingUiState.snapshot()) {
+        val blockedByMeeting = isSpeechInputBlockedByMeeting(snapshot)
+        sttButton.isEnabled = !blockedByMeeting
+        sttButton.alpha = if (blockedByMeeting) 0.55f else 1f
+        sttButton.text = when {
+            blockedByMeeting && snapshot.active -> "会议中禁用"
+            blockedByMeeting -> "处理中..."
+            sttListening -> "停止"
+            else -> "语音输入"
+        }
+    }
+
     private fun refreshRouteInfo(allowNetworkProbe: Boolean) {
         val routeDecision = resolveRouteDecision(allowNetworkProbe = allowNetworkProbe)
         refreshRouteInfo(routeDecision)
@@ -649,6 +688,9 @@ class VisualStageActivity : AppCompatActivity() {
             syncMeetingSnapshot()
             return
         }
+        if (targetEnabled && sttListening) {
+            stopSpeechToText()
+        }
         val accepted = MeetingControlBus.requestToggle(targetEnabled)
         if (!accepted) {
             pendingMeetingToggleTarget = null
@@ -664,6 +706,9 @@ class VisualStageActivity : AppCompatActivity() {
 
     private fun syncMeetingSnapshot() {
         val snapshot = MeetingUiState.snapshot()
+        if (snapshot.active && sttListening) {
+            stopSpeechToText()
+        }
         val controllerBound = MeetingControlBus.isBound()
         setVisualMeetingSwitchChecked(snapshot.active)
         val controlsEnabled = controllerBound && !snapshot.busy
@@ -690,6 +735,8 @@ class VisualStageActivity : AppCompatActivity() {
             "会议ID：$mid"
         }
         visualMeetingInfoText.text = snapshot.infoText.ifBlank { "暂无会议信息" }
+        renderMeetingCaptionSnapshot(MeetingCaptionState.snapshot())
+        updateSpeechInputAvailability(snapshot)
         updateMeetingPanelToggleText(snapshot)
         syncMeetingActionStatus(snapshot, controllerBound)
     }
@@ -994,6 +1041,10 @@ class VisualStageActivity : AppCompatActivity() {
             if (System.currentTimeMillis() >= active.request.deadlineAtMs) return@Runnable
             if (sttListening) return@Runnable
             if (active.decisionListenAttempts >= LONG_REPLY_MAX_LISTEN_ATTEMPTS) return@Runnable
+            if (isSpeechInputBlockedByMeeting()) {
+                updateStatus("会议模式中请点击按钮选择简报或原文")
+                return@Runnable
+            }
             active.decisionListenAttempts += 1
             startSpeechToText(SpeechPurpose.LONG_REPLY_DECISION)
         }
@@ -1065,23 +1116,37 @@ class VisualStageActivity : AppCompatActivity() {
         sttListening = false
         stopAudioCapture()
         runOnUiThread {
-            sttButton.text = "语音输入"
+            updateSpeechInputAvailability()
             updateStatus("语音识别异常: $msg", isError = true)
         }
     }
 
-    private fun startSpeechToText(purpose: SpeechPurpose) {
+    private fun startSpeechToText(purpose: SpeechPurpose): Boolean {
         try {
-            if (sttListening) return
+            if (sttListening) return true
+            if (isSpeechInputBlockedByMeeting()) {
+                runOnUiThread {
+                    updateSpeechInputAvailability()
+                    updateStatus(
+                        if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
+                            "会议模式中请点击按钮选择简报或原文"
+                        } else {
+                            "会议模式中已禁用独立语音输入"
+                        },
+                        isError = true,
+                    )
+                }
+                return false
+            }
             if (!hasRecordAudioPermission()) {
                 requestRecordAudioPermission()
-                return
+                return false
             }
-            if (!ensureSparkInitialized()) return
+            if (!ensureSparkInitialized()) return false
 
             currentSpeechPurpose = purpose
             ensureAsr()
-            val asrClient = asr ?: return
+            val asrClient = asr ?: return false
             asrClient.language("zh_cn")
             asrClient.domain("iat")
             asrClient.accent("mandarin")
@@ -1098,7 +1163,7 @@ class VisualStageActivity : AppCompatActivity() {
                 } else {
                     updateStatus("语音识别启动失败: $ret", isError = true)
                 }
-                return
+                return false
             }
 
             if (!startAudioCapture(asrClient)) {
@@ -1108,14 +1173,17 @@ class VisualStageActivity : AppCompatActivity() {
                 } else {
                     updateStatus("麦克风不可用", isError = true)
                 }
-                return
+                return false
             }
 
             sttListening = true
-            sttButton.text = "\u505c\u6b62"
+            sttButton.text = "停止"
             updateStatus(if (purpose == SpeechPurpose.LONG_REPLY_DECISION) "正在听取选择..." else "正在聆听...")
+            runOnUiThread { updateSpeechInputAvailability() }
+            return true
         } catch (err: Throwable) {
             handleSttException("start", err, purpose)
+            return false
         }
     }
 
@@ -1123,7 +1191,7 @@ class VisualStageActivity : AppCompatActivity() {
         try {
             if (!sttListening) return
             sttListening = false
-            sttButton.text = "语音输入"
+            updateSpeechInputAvailability()
             updateStatus("处理中...")
             stopAudioCapture()
 
@@ -1139,6 +1207,7 @@ class VisualStageActivity : AppCompatActivity() {
                     updateStatus("语音识别停止失败: $ret", isError = true)
                 }
             }
+            runOnUiThread { updateSpeechInputAvailability() }
         } catch (err: Throwable) {
             handleSttException("stop", err, currentSpeechPurpose)
         }
@@ -1201,7 +1270,7 @@ class VisualStageActivity : AppCompatActivity() {
                         audioWriting.set(false)
                         sttListening = false
                         runOnUiThread {
-                            sttButton.text = "语音输入"
+                            updateSpeechInputAvailability()
                             updateStatus("语音识别写入失败: $ret", isError = true)
                         }
                         try {

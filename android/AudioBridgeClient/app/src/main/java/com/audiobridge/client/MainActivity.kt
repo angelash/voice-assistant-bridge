@@ -46,7 +46,10 @@ import com.audiobridge.client.conversation.ConversationSubmitRequest
 import com.audiobridge.client.conversation.LongReplyDecisionRequired
 import com.audiobridge.client.conversation.RoleSource
 import com.audiobridge.client.conversation.SharedConversationEngine
+import com.audiobridge.client.meeting.MeetingCaptionSnapshot
+import com.audiobridge.client.meeting.MeetingCaptionState
 import com.audiobridge.client.meeting.MeetingControlBus
+import com.audiobridge.client.meeting.MeetingEventReporter
 import com.audiobridge.client.meeting.MeetingManager
 import com.audiobridge.client.meeting.MeetingUiState
 import com.audiobridge.client.upload.ImageUploadManager
@@ -68,6 +71,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.Inet4Address
 import java.text.SimpleDateFormat
+import java.util.ArrayDeque
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
@@ -102,11 +106,13 @@ class MainActivity : AppCompatActivity() {
         private const val LAN_ROUTE_IPV4_PREFIX_BYTES = 3
         private const val REMOTE_HISTORY_REFRESH_MS = 15_000L
         private const val MEETING_START_FAILURE_KEEP_MS = 10 * 60 * 1000L
+        private const val MEETING_CAPTION_HISTORY_MAX = 8
+        private const val MEETING_CAPTION_RESTART_DELAY_MS = 1200L
     }
 
     private enum class LinkMode { LAN, TUNNEL }
 
-    private enum class SpeechPurpose { USER_MESSAGE, LONG_REPLY_DECISION }
+    private enum class SpeechPurpose { USER_MESSAGE, LONG_REPLY_DECISION, MEETING_LIVE_CAPTION }
 
     private enum class LongReplyChoice { SUMMARY, ORIGINAL, OTHER }
 
@@ -169,6 +175,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var meetingModeSwitch: Switch
     private lateinit var meetingStatusText: TextView
     private lateinit var meetingInfoText: TextView
+    private lateinit var meetingCaptionStatusText: TextView
+    private lateinit var meetingCaptionFinalText: TextView
+    private lateinit var meetingCaptionPartialText: TextView
     private lateinit var refreshMeetingHistoryButton: Button
     private lateinit var meetingHistoryText: TextView
     private lateinit var imageSectionTitle: TextView
@@ -180,9 +189,27 @@ class MainActivity : AppCompatActivity() {
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val meetingCaptionLines = ArrayDeque<String>()
+    private var meetingCaptionLineIndex = 0
+    @Volatile
+    private var meetingCaptionWanted = false
+    private val meetingCaptionRestartTask = Runnable {
+        if (!meetingCaptionWanted || !::meetingManager.isInitialized || !meetingManager.isActive) {
+            return@Runnable
+        }
+        val started = runCatching { startSpeechToText(SpeechPurpose.MEETING_LIVE_CAPTION) }
+            .getOrElse {
+                handleMeetingCaptionStartFailure("实时字幕暂不可用，正在重试...", it)
+                false
+            }
+        if (!started) {
+            scheduleMeetingCaptionRestart()
+        }
+    }
 
     // Meeting mode components
     private lateinit var meetingManager: MeetingManager
+    private lateinit var meetingEventReporter: MeetingEventReporter
     private lateinit var pcmBus: PcmDistributionBus
     private lateinit var wakeWordStateMachine: WakeWordStateMachine
     private lateinit var wakeWordController: WakeWordController
@@ -322,9 +349,15 @@ class MainActivity : AppCompatActivity() {
             }
             val purpose = currentSpeechPurpose
 
+            if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+                handleMeetingCaptionResult(status, textRaw)
+                return
+            }
+
             when (status) {
                 0, 1 -> {
                     runOnUiThread {
+                        updateSpeechInputAvailability()
                         statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
                             "正在听取选择..."
                         } else {
@@ -334,11 +367,12 @@ class MainActivity : AppCompatActivity() {
                 }
                 2 -> {
                     sttListening = false
+                    sttFinished.set(true)
                     // Disable STT forwarder and stop unified capture if not in meeting mode
                     sttForwarderConsumer?.enabled = false
                     stopUnifiedAudioCapture()
                     runOnUiThread {
-                        sttButton.text = "语音输入"
+                        updateSpeechInputAvailability()
                         statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
                             "已识别到选择"
                         } else {
@@ -353,16 +387,22 @@ class MainActivity : AppCompatActivity() {
 
         override fun onError(asrError: ASR.ASRError, userTag: Any?) {
             val purpose = currentSpeechPurpose
+
+            if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+                handleMeetingCaptionError(asrError)
+                return
+            }
+
             sttListening = false
+            sttFinished.set(true)
             // Disable STT forwarder and stop unified capture if not in meeting mode
             sttForwarderConsumer?.enabled = false
             stopUnifiedAudioCapture()
             runOnUiThread {
-                sttButton.text = "语音输入"
+                updateSpeechInputAvailability()
             }
 
             if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
-                sttFinished.set(true)
                 runOnUiThread { statusText.text = "等待你的选择..." }
                 scheduleLongReplyDecisionListening(delayMs = 700)
                 return
@@ -399,6 +439,9 @@ class MainActivity : AppCompatActivity() {
         meetingModeSwitch = findViewById(R.id.meetingModeSwitch)
         meetingStatusText = findViewById(R.id.meetingStatusText)
         meetingInfoText = findViewById(R.id.meetingInfoText)
+        meetingCaptionStatusText = findViewById(R.id.meetingCaptionStatusText)
+        meetingCaptionFinalText = findViewById(R.id.meetingCaptionFinalText)
+        meetingCaptionPartialText = findViewById(R.id.meetingCaptionPartialText)
         refreshMeetingHistoryButton = findViewById(R.id.refreshMeetingHistoryButton)
         meetingHistoryText = findViewById(R.id.meetingHistoryText)
         
@@ -418,6 +461,8 @@ class MainActivity : AppCompatActivity() {
         loadPrefs()
         refreshRouteInfo()
         applyMainPanelExpansionStates()
+        renderMeetingCaptionSnapshot(MeetingCaptionState.snapshot())
+        updateSpeechInputAvailability()
         speakSwitch.setOnCheckedChangeListener { _, isChecked ->
             savePrefs()
             appendResult("[系统] TTS${if (isChecked) "已开启" else "已关闭"}")
@@ -498,6 +543,7 @@ class MainActivity : AppCompatActivity() {
         setLongReplyChoiceButtonsVisible(isPendingLongReplyActive())
         refreshRouteInfo()
         applyMainPanelExpansionStates()
+        renderMeetingCaptionSnapshot(MeetingCaptionState.snapshot())
         updateMeetingStatusUI()
         focusMainInputCursor()
     }
@@ -705,6 +751,214 @@ class MainActivity : AppCompatActivity() {
         mainMeetingPanelToggleButton.text = "$meetingState $arrow"
     }
 
+    private fun renderMeetingCaptionSnapshot(snapshot: MeetingCaptionSnapshot) {
+        meetingCaptionStatusText.text = snapshot.statusText.ifBlank { "会议未开始" }
+        meetingCaptionFinalText.text = if (snapshot.finalLines.isEmpty()) {
+            "(暂无字幕)"
+        } else {
+            snapshot.finalLines.joinToString("\n")
+        }
+        meetingCaptionPartialText.text = snapshot.partialText.ifBlank {
+            if (snapshot.active) "(等待发言)" else "(无进行中的转写)"
+        }
+    }
+
+    private fun publishMeetingCaptionSnapshot(
+        active: Boolean,
+        statusText: String,
+        partialText: String = "",
+        finalLines: List<String> = meetingCaptionLines.toList(),
+    ) {
+        MeetingCaptionState.update(
+            active = active,
+            statusText = statusText,
+            partialText = partialText,
+            finalLines = finalLines,
+        )
+        runOnUiThread {
+            if (::meetingCaptionStatusText.isInitialized) {
+                renderMeetingCaptionSnapshot(MeetingCaptionState.snapshot())
+            }
+        }
+    }
+
+    private fun isSpeechInputBlockedByMeeting(): Boolean {
+        if (!::meetingManager.isInitialized) return false
+        return meetingManager.isActive || meetingToggleInFlight.get()
+    }
+
+    private fun updateSpeechInputAvailability() {
+        if (!::sttButton.isInitialized) return
+        val blockedByMeeting = isSpeechInputBlockedByMeeting()
+        sttButton.isEnabled = !blockedByMeeting
+        sttButton.alpha = if (blockedByMeeting) 0.55f else 1f
+        sttButton.text = when {
+            blockedByMeeting && ::meetingManager.isInitialized && meetingManager.isActive -> "会议中禁用"
+            blockedByMeeting -> "处理中..."
+            sttListening && currentSpeechPurpose != SpeechPurpose.MEETING_LIVE_CAPTION -> "停止"
+            else -> "语音输入"
+        }
+    }
+
+    private fun appendMeetingCaptionFinal(text: String) {
+        val normalized = text.trim()
+        if (normalized.isBlank()) return
+        if (meetingCaptionLines.isNotEmpty() && meetingCaptionLines.last() == normalized) return
+
+        meetingCaptionLines.addLast(normalized)
+        while (meetingCaptionLines.size > MEETING_CAPTION_HISTORY_MAX) {
+            meetingCaptionLines.removeFirst()
+        }
+        meetingCaptionLineIndex += 1
+        meetingManager.meetingId?.let { meetingId ->
+            meetingEventReporter.reportSttFinal(
+                meetingId = meetingId,
+                lineIndex = meetingCaptionLineIndex,
+                text = normalized,
+            )
+        }
+    }
+
+    private fun scheduleMeetingCaptionRestart(delayMs: Long = MEETING_CAPTION_RESTART_DELAY_MS) {
+        mainHandler.removeCallbacks(meetingCaptionRestartTask)
+        if (!meetingCaptionWanted || !::meetingManager.isInitialized || !meetingManager.isActive) {
+            return
+        }
+        mainHandler.postDelayed(meetingCaptionRestartTask, delayMs)
+    }
+
+    private fun startMeetingLiveCaptioning() {
+        meetingCaptionWanted = true
+        meetingCaptionLines.clear()
+        meetingCaptionLineIndex = 0
+        publishMeetingCaptionSnapshot(
+            active = true,
+            statusText = "实时转写准备中...",
+            partialText = "",
+            finalLines = emptyList(),
+        )
+        scheduleMeetingCaptionRestart(delayMs = 0L)
+    }
+
+    private fun stopMeetingLiveCaptioning(
+        endStatus: String,
+        preserveHistory: Boolean = true,
+    ) {
+        meetingCaptionWanted = false
+        mainHandler.removeCallbacks(meetingCaptionRestartTask)
+        if (sttListening && currentSpeechPurpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+            sttListening = false
+            sttFinished.set(true)
+            sttForwarderConsumer?.enabled = false
+            try {
+                asr?.stop(true)
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
+        val finalLines = if (preserveHistory) {
+            meetingCaptionLines.toList()
+        } else {
+            meetingCaptionLines.clear()
+            meetingCaptionLineIndex = 0
+            emptyList()
+        }
+        publishMeetingCaptionSnapshot(
+            active = false,
+            statusText = endStatus,
+            partialText = "",
+            finalLines = finalLines,
+        )
+        runOnUiThread { updateSpeechInputAvailability() }
+    }
+
+    private fun handleMeetingCaptionStartFailure(
+        statusText: String,
+        throwable: Throwable? = null,
+    ) {
+        throwable?.let { Log.w(TAG, "Meeting caption start failed", it) }
+        publishMeetingCaptionSnapshot(
+            active = true,
+            statusText = statusText,
+            partialText = "",
+        )
+    }
+
+    private fun handleMeetingCaptionResult(status: Int, textRaw: String) {
+        when (status) {
+            0, 1 -> {
+                publishMeetingCaptionSnapshot(
+                    active = true,
+                    statusText = "实时转写中",
+                    partialText = textRaw.ifBlank { lastAsrText },
+                )
+            }
+
+            2 -> {
+                sttListening = false
+                sttFinished.set(true)
+                sttForwarderConsumer?.enabled = false
+                try {
+                    asr?.stop(true)
+                } catch (_: Exception) {
+                    // ignore
+                }
+                val finalText = textRaw.ifBlank { lastAsrText }.trim()
+                if (finalText.isNotBlank()) {
+                    appendMeetingCaptionFinal(finalText)
+                }
+                publishMeetingCaptionSnapshot(
+                    active = meetingCaptionWanted && meetingManager.isActive,
+                    statusText = if (meetingCaptionWanted && meetingManager.isActive) {
+                        "实时转写中"
+                    } else {
+                        "会议已结束"
+                    },
+                    partialText = "",
+                )
+                if (meetingCaptionWanted && meetingManager.isActive) {
+                    scheduleMeetingCaptionRestart(delayMs = 180L)
+                }
+            }
+
+            else -> {
+                publishMeetingCaptionSnapshot(
+                    active = true,
+                    statusText = "实时转写中",
+                    partialText = textRaw.ifBlank { lastAsrText },
+                )
+            }
+        }
+        runOnUiThread { updateSpeechInputAvailability() }
+    }
+
+    private fun handleMeetingCaptionError(asrError: ASR.ASRError) {
+        sttListening = false
+        sttFinished.set(true)
+        sttForwarderConsumer?.enabled = false
+        try {
+            asr?.stop(true)
+        } catch (_: Exception) {
+            // ignore
+        }
+        if (!meetingCaptionWanted || !meetingManager.isActive) {
+            publishMeetingCaptionSnapshot(
+                active = false,
+                statusText = "会议已结束",
+                partialText = "",
+            )
+            return
+        }
+        Log.w(TAG, "Meeting caption error: code=${asrError.code}, msg=${asrError.errMsg}")
+        publishMeetingCaptionSnapshot(
+            active = true,
+            statusText = "实时字幕暂不可用，正在重试...",
+            partialText = "",
+        )
+        scheduleMeetingCaptionRestart()
+        runOnUiThread { updateSpeechInputAvailability() }
+    }
+
     private fun appendResult(line: String) {
         runOnUiThread {
             val old = textResultView.text?.toString().orEmpty()
@@ -851,6 +1105,10 @@ class MainActivity : AppCompatActivity() {
             if (System.currentTimeMillis() >= active.request.deadlineAtMs) return@Runnable
             if (sttListening) return@Runnable
             if (active.decisionListenAttempts >= LONG_REPLY_MAX_LISTEN_ATTEMPTS) return@Runnable
+            if (isSpeechInputBlockedByMeeting()) {
+                statusText.text = "会议模式中请点击按钮选择简报或原文"
+                return@Runnable
+            }
             active.decisionListenAttempts += 1
             startSpeechToText(SpeechPurpose.LONG_REPLY_DECISION)
         }
@@ -923,34 +1181,57 @@ class MainActivity : AppCompatActivity() {
     ) {
         val msg = throwable.message ?: throwable::class.java.simpleName
         Log.e(TAG, "STT $stage exception", throwable)
+        if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+            handleMeetingCaptionStartFailure("实时字幕暂不可用，正在重试...", throwable)
+            scheduleMeetingCaptionRestart()
+            return
+        }
         if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
             scheduleLongReplyDecisionListening(delayMs = 700)
             return
         }
         sttListening = false
         runOnUiThread {
-            sttButton.text = "语音输入"
+            updateSpeechInputAvailability()
             statusText.text = "语音识别异常: $msg"
         }
         appendResult("[系统] 语音识别异常($stage): $msg")
     }
 
-    private fun startSpeechToText(purpose: SpeechPurpose) {
+    private fun startSpeechToText(purpose: SpeechPurpose): Boolean {
         try {
-            if (sttListening) return
+            if (sttListening) {
+                return purpose == SpeechPurpose.MEETING_LIVE_CAPTION &&
+                    currentSpeechPurpose == SpeechPurpose.MEETING_LIVE_CAPTION
+            }
+
+            if (purpose != SpeechPurpose.MEETING_LIVE_CAPTION && isSpeechInputBlockedByMeeting()) {
+                runOnUiThread {
+                    updateSpeechInputAvailability()
+                    statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
+                        "会议模式中请点击按钮选择简报或原文"
+                    } else {
+                        "会议模式中已禁用独立语音输入"
+                    }
+                }
+                return false
+            }
 
             if (!hasRecordAudioPermission()) {
                 requestRecordAudioPermission()
-                return
+                return false
             }
 
             if (!ensureSparkInitialized()) {
-                return
+                if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+                    handleMeetingCaptionStartFailure("实时字幕初始化失败，正在重试...")
+                }
+                return false
             }
 
             currentSpeechPurpose = purpose
             ensureAsr()
-            val asrClient = asr ?: return
+            val asrClient = asr ?: return false
             asrClient.language("zh_cn")
             asrClient.domain("iat")
             asrClient.accent("mandarin")
@@ -963,37 +1244,52 @@ class MainActivity : AppCompatActivity() {
             val ret = asrClient.start("voice-bridge-$asrToken")
             if (ret != 0) {
                 sttListening = false
-                if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+                    handleMeetingCaptionStartFailure("实时字幕启动失败，正在重试...")
+                } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                     scheduleLongReplyDecisionListening(delayMs = 700)
                 } else {
                     appendResult("[系统] 语音识别启动失败: $ret")
                     statusText.text = "语音识别启动失败: $ret"
                 }
-                return
+                return false
             }
 
             // Use unified audio capture via PcmDistributionBus
             if (!startUnifiedAudioCapture()) {
                 asrClient.stop(true)
                 sttListening = false
-                if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
+                if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+                    handleMeetingCaptionStartFailure("麦克风不可用，正在重试...")
+                } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                     scheduleLongReplyDecisionListening(delayMs = 700)
                 } else {
                     appendResult("[系统] 麦克风不可用")
                     statusText.text = "麦克风不可用"
                 }
-                return
+                return false
             }
 
             sttListening = true
-            sttButton.text = "停止"
-            statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
-                "正在听取选择..."
+            if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+                publishMeetingCaptionSnapshot(
+                    active = true,
+                    statusText = "实时转写中",
+                    partialText = "",
+                )
             } else {
-                "正在聆听..."
+                sttButton.text = "停止"
+                statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
+                    "正在听取选择..."
+                } else {
+                    "正在聆听..."
+                }
             }
+            runOnUiThread { updateSpeechInputAvailability() }
+            return true
         } catch (err: Throwable) {
             handleSttException("start", err, purpose)
+            return false
         }
     }
 
@@ -1001,14 +1297,16 @@ class MainActivity : AppCompatActivity() {
         try {
             if (!sttListening) return
             sttListening = false
-            sttButton.text = "语音输入"
-            statusText.text = "处理中..."
+            val purpose = currentSpeechPurpose
+            if (purpose != SpeechPurpose.MEETING_LIVE_CAPTION) {
+                sttButton.text = "语音输入"
+                statusText.text = "处理中..."
+            }
 
             // Disable STT forwarder and stop unified capture if not in meeting mode
             sttForwarderConsumer?.enabled = false
             stopUnifiedAudioCapture()
 
-            val purpose = currentSpeechPurpose
             val ret = asr?.stop(false) ?: -1
             if (ret != 0 && sttFinished.compareAndSet(false, true)) {
                 val fallback = lastAsrText.trim()
@@ -1021,6 +1319,7 @@ class MainActivity : AppCompatActivity() {
                     statusText.text = "语音识别停止失败: $ret"
                 }
             }
+            runOnUiThread { updateSpeechInputAvailability() }
         } catch (err: Throwable) {
             handleSttException("stop", err, currentSpeechPurpose)
         }
@@ -1182,7 +1481,7 @@ class MainActivity : AppCompatActivity() {
                         audioWriting.set(false)
                         sttListening = false
                         runOnUiThread {
-                            sttButton.text = "语音输入"
+                            updateSpeechInputAvailability()
                             statusText.text = "语音识别写入失败: $ret"
                             appendResult("[系统] 语音识别写入失败: $ret")
                         }
@@ -1288,6 +1587,7 @@ class MainActivity : AppCompatActivity() {
         
         // Initialize wakeword event reporter (M2)
         wakewordEventReporter = WakewordEventReporter(initialMeetingBaseUrl, httpClient)
+        meetingEventReporter = MeetingEventReporter(initialMeetingBaseUrl, httpClient)
         
         // Initialize upload queue manager (M2)
         uploadQueueManager = UploadQueueManager(initialMeetingBaseUrl, httpClient)
@@ -1469,6 +1769,7 @@ class MainActivity : AppCompatActivity() {
             Log.i(TAG, "Meeting started: $meetingId")
             runOnUiThread {
                 appendResult("[会议] 已开始: $meetingId")
+                renderMeetingCaptionSnapshot(MeetingCaptionState.snapshot())
                 updateMeetingStatusUI()
                 showImageUploadUI()
             }
@@ -1476,8 +1777,10 @@ class MainActivity : AppCompatActivity() {
 
         meetingManager.onMeetingEnded = { meetingId ->
             Log.i(TAG, "Meeting ended: $meetingId")
+            stopMeetingLiveCaptioning(endStatus = "会议已结束", preserveHistory = true)
             runOnUiThread {
                 appendResult("[会议] 已结束: $meetingId")
+                renderMeetingCaptionSnapshot(MeetingCaptionState.snapshot())
                 updateMeetingStatusUI()
                 hideImageUploadUI()
             }
@@ -1572,6 +1875,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateMeetingNetworkTargets(baseUrl: String) {
         wakewordEventReporter.setBaseUrl(baseUrl)
+        meetingEventReporter.setBaseUrl(baseUrl)
         uploadQueueManager.setBaseUrl(baseUrl)
         imageUploadManager.setBaseUrl(baseUrl)
     }
@@ -1763,18 +2067,29 @@ class MainActivity : AppCompatActivity() {
         }
 
         if (enabled) {
+            if (sttListening && currentSpeechPurpose != SpeechPurpose.MEETING_LIVE_CAPTION) {
+                stopSpeechToText()
+            }
             if (!hasRecordAudioPermission()) {
                 requestRecordAudioPermission()
                 setMeetingSwitchChecked(false)
                 meetingToggleInFlight.set(false)
+                updateSpeechInputAvailability()
                 return
             }
 
             clearMeetingStartFailure()
+            publishMeetingCaptionSnapshot(
+                active = true,
+                statusText = "实时转写准备中...",
+                partialText = "",
+                finalLines = emptyList(),
+            )
             val clientId = clientIdInput.text?.toString()?.trim().orEmpty().ifBlank { "android-client" }
             meetingModeSwitch.isEnabled = false
             meetingStatusText.text = "正在开始会议..."
             publishMeetingUiSnapshot()
+            updateSpeechInputAvailability()
 
             Thread {
                 val endpoint = resolveBridgeEndpoint(allowNetworkProbe = true)
@@ -1801,6 +2116,7 @@ class MainActivity : AppCompatActivity() {
                         setMeetingSwitchChecked(false)
                         meetingStatusText.text = "启动失败"
                         publishMeetingUiSnapshot()
+                        stopMeetingLiveCaptioning(endStatus = "实时字幕未启动", preserveHistory = false)
                         meetingModeSwitch.isEnabled = true
                         meetingToggleInFlight.set(false)
                         updateMeetingStatusUI()
@@ -1831,9 +2147,11 @@ class MainActivity : AppCompatActivity() {
                             Thread {
                                 setRemoteMeetingMode(baseUrl, remoteMeetingId, enabled = false)
                             }.start()
+                            stopMeetingLiveCaptioning(endStatus = "实时字幕未启动", preserveHistory = false)
                         } else {
                             clearMeetingStartFailure()
                             appendResult("[会议] 远端会议就绪: $meetingId")
+                            startMeetingLiveCaptioning()
                         }
                     } else {
                         appendResult("[会议] 本地会议启动失败")
@@ -1848,6 +2166,7 @@ class MainActivity : AppCompatActivity() {
                         Thread {
                             setRemoteMeetingMode(baseUrl, remoteMeetingId, enabled = false)
                         }.start()
+                        stopMeetingLiveCaptioning(endStatus = "实时字幕未启动", preserveHistory = false)
                     }
 
                     meetingModeSwitch.isEnabled = true
@@ -1862,6 +2181,7 @@ class MainActivity : AppCompatActivity() {
         meetingModeSwitch.isEnabled = false
         meetingStatusText.text = "正在结束会议..."
         publishMeetingUiSnapshot()
+        updateSpeechInputAvailability()
         meetingManager.endMeeting()
         wakeWordController.onMeetingModeChanged(false)
         diskWriterConsumer.enabled = false
@@ -1974,6 +2294,8 @@ class MainActivity : AppCompatActivity() {
         )
         meetingStatusText.text = quickStatus
         meetingInfoText.text = detail.toString()
+        renderMeetingCaptionSnapshot(MeetingCaptionState.snapshot())
+        updateSpeechInputAvailability()
         updateMainPanelToggleTexts()
         publishMeetingUiSnapshot()
         refreshMeetingHistoryUI(force = false)
