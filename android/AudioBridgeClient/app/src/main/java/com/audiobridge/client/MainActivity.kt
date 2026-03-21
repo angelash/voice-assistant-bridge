@@ -108,11 +108,20 @@ class MainActivity : AppCompatActivity() {
         private const val MEETING_START_FAILURE_KEEP_MS = 10 * 60 * 1000L
         private const val MEETING_CAPTION_HISTORY_MAX = 8
         private const val MEETING_CAPTION_RESTART_DELAY_MS = 1200L
+        private const val MEETING_WAKEWORD = "小爱同学"
+        private const val MEETING_WAKEWORD_ACK_TEXT = "唉"
+        private const val WAKEWORD_COMMAND_RESTART_DELAY_MS = 220L
+        private const val WAKEWORD_FILLER_MAX_CHARS = 3
     }
 
     private enum class LinkMode { LAN, TUNNEL }
 
-    private enum class SpeechPurpose { USER_MESSAGE, LONG_REPLY_DECISION, MEETING_LIVE_CAPTION }
+    private enum class SpeechPurpose {
+        USER_MESSAGE,
+        LONG_REPLY_DECISION,
+        MEETING_LIVE_CAPTION,
+        WAKEWORD_COMMAND,
+    }
 
     private enum class LongReplyChoice { SUMMARY, ORIGINAL, OTHER }
 
@@ -193,8 +202,23 @@ class MainActivity : AppCompatActivity() {
     private var meetingCaptionLineIndex = 0
     @Volatile
     private var meetingCaptionWanted = false
+    @Volatile
+    private var meetingCaptionPausedForWakeword = false
+    @Volatile
+    private var wakewordAckPlaying = false
+    @Volatile
+    private var wakewordCommandActive = false
+    @Volatile
+    private var wakewordCommandCaptured = false
+    @Volatile
+    private var wakewordCommandClosingManually = false
     private val meetingCaptionRestartTask = Runnable {
-        if (!meetingCaptionWanted || !::meetingManager.isInitialized || !meetingManager.isActive) {
+        if (
+            !meetingCaptionWanted ||
+            meetingCaptionPausedForWakeword ||
+            !::meetingManager.isInitialized ||
+            !meetingManager.isActive
+        ) {
             return@Runnable
         }
         val started = runCatching { startSpeechToText(SpeechPurpose.MEETING_LIVE_CAPTION) }
@@ -353,6 +377,10 @@ class MainActivity : AppCompatActivity() {
                 handleMeetingCaptionResult(status, textRaw)
                 return
             }
+            if (purpose == SpeechPurpose.WAKEWORD_COMMAND) {
+                handleWakewordCommandResult(status, textRaw)
+                return
+            }
 
             when (status) {
                 0, 1 -> {
@@ -390,6 +418,10 @@ class MainActivity : AppCompatActivity() {
 
             if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
                 handleMeetingCaptionError(asrError)
+                return
+            }
+            if (purpose == SpeechPurpose.WAKEWORD_COMMAND) {
+                handleWakewordCommandError(asrError)
                 return
             }
 
@@ -800,10 +832,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun appendMeetingCaptionFinal(text: String) {
+    private fun appendMeetingCaptionFinal(
+        text: String,
+        kind: String? = null,
+        trigger: String? = null,
+        wakeword: String? = null,
+    ) {
         val normalized = text.trim()
         if (normalized.isBlank()) return
-        if (meetingCaptionLines.isNotEmpty() && meetingCaptionLines.last() == normalized) return
+        if (kind.isNullOrBlank() && meetingCaptionLines.isNotEmpty() && meetingCaptionLines.last() == normalized) {
+            return
+        }
 
         meetingCaptionLines.addLast(normalized)
         while (meetingCaptionLines.size > MEETING_CAPTION_HISTORY_MAX) {
@@ -815,13 +854,21 @@ class MainActivity : AppCompatActivity() {
                 meetingId = meetingId,
                 lineIndex = meetingCaptionLineIndex,
                 text = normalized,
+                kind = kind,
+                trigger = trigger,
+                wakeword = wakeword,
             )
         }
     }
 
     private fun scheduleMeetingCaptionRestart(delayMs: Long = MEETING_CAPTION_RESTART_DELAY_MS) {
         mainHandler.removeCallbacks(meetingCaptionRestartTask)
-        if (!meetingCaptionWanted || !::meetingManager.isInitialized || !meetingManager.isActive) {
+        if (
+            !meetingCaptionWanted ||
+            meetingCaptionPausedForWakeword ||
+            !::meetingManager.isInitialized ||
+            !meetingManager.isActive
+        ) {
             return
         }
         mainHandler.postDelayed(meetingCaptionRestartTask, delayMs)
@@ -829,6 +876,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun startMeetingLiveCaptioning() {
         meetingCaptionWanted = true
+        meetingCaptionPausedForWakeword = false
+        wakewordAckPlaying = false
+        wakewordCommandActive = false
+        wakewordCommandCaptured = false
+        wakewordCommandClosingManually = false
         meetingCaptionLines.clear()
         meetingCaptionLineIndex = 0
         publishMeetingCaptionSnapshot(
@@ -845,8 +897,19 @@ class MainActivity : AppCompatActivity() {
         preserveHistory: Boolean = true,
     ) {
         meetingCaptionWanted = false
+        meetingCaptionPausedForWakeword = false
+        wakewordAckPlaying = false
+        wakewordCommandActive = false
+        wakewordCommandCaptured = false
+        wakewordCommandClosingManually = false
         mainHandler.removeCallbacks(meetingCaptionRestartTask)
-        if (sttListening && currentSpeechPurpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+        if (
+            sttListening &&
+            (
+                currentSpeechPurpose == SpeechPurpose.MEETING_LIVE_CAPTION ||
+                    currentSpeechPurpose == SpeechPurpose.WAKEWORD_COMMAND
+                )
+        ) {
             sttListening = false
             sttFinished.set(true)
             sttForwarderConsumer?.enabled = false
@@ -876,6 +939,9 @@ class MainActivity : AppCompatActivity() {
         statusText: String,
         throwable: Throwable? = null,
     ) {
+        if (!meetingCaptionWanted || meetingCaptionPausedForWakeword) {
+            return
+        }
         throwable?.let { Log.w(TAG, "Meeting caption start failed", it) }
         publishMeetingCaptionSnapshot(
             active = true,
@@ -884,13 +950,224 @@ class MainActivity : AppCompatActivity() {
         )
     }
 
+    private fun normalizeWakewordCandidate(text: String): String {
+        return text.trim()
+            .replace(Regex("""[\s\p{Punct}，。！？、；：“”‘’（）【】《》]+"""), "")
+            .lowercase(Locale.getDefault())
+    }
+
+    private fun isWakewordCandidate(text: String): Boolean {
+        val normalized = normalizeWakewordCandidate(text)
+        if (normalized.isBlank()) return false
+        val wakeword = normalizeWakewordCandidate(MEETING_WAKEWORD)
+        if (normalized == wakeword) return true
+        if (normalized.endsWith(wakeword)) {
+            val prefix = normalized.removeSuffix(wakeword)
+            return prefix.isNotBlank() && prefix.length <= WAKEWORD_FILLER_MAX_CHARS
+        }
+        return false
+    }
+
+    private fun maybeTriggerWakewordFromCaption(textRaw: String): Boolean {
+        if (
+            !meetingCaptionWanted ||
+            !meetingManager.isActive ||
+            meetingCaptionPausedForWakeword ||
+            wakewordAckPlaying ||
+            wakewordCommandActive ||
+            !wakeWordStateMachine.isListening
+        ) {
+            return false
+        }
+        val candidate = textRaw.trim()
+        if (candidate.isBlank() || !isWakewordCandidate(candidate)) {
+            return false
+        }
+        triggerWakewordCommandFlow(candidate)
+        return true
+    }
+
+    private fun stopMeetingCaptionSttForWakeword() {
+        mainHandler.removeCallbacks(meetingCaptionRestartTask)
+        if (sttListening && currentSpeechPurpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
+            sttListening = false
+            sttFinished.set(true)
+            sttForwarderConsumer?.enabled = false
+            try {
+                asr?.stop(true)
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
+    }
+
+    private fun triggerWakewordCommandFlow(detectedText: String) {
+        Log.i(TAG, "Wakeword detected from meeting caption: $detectedText")
+        meetingCaptionPausedForWakeword = true
+        wakewordAckPlaying = false
+        wakewordCommandActive = false
+        wakewordCommandCaptured = false
+        wakewordCommandClosingManually = false
+        stopMeetingCaptionSttForWakeword()
+        wakeWordController.onWakeWordDetected()
+        meetingManager.meetingId?.let { meetingId ->
+            wakewordEventReporter.reportWakeWordDetected(
+                meetingId = meetingId,
+                keyword = MEETING_WAKEWORD,
+            )
+        }
+        publishMeetingCaptionSnapshot(
+            active = true,
+            statusText = "已唤醒，正在确认...",
+            partialText = "",
+        )
+        runOnUiThread {
+            statusText.text = "已检测到唤醒词"
+            updateSpeechInputAvailability()
+        }
+        playWakewordAckAndListen()
+    }
+
+    private fun playWakewordAckAndListen() {
+        wakewordAckPlaying = true
+        publishMeetingCaptionSnapshot(
+            active = true,
+            statusText = "已唤醒，等待指令...",
+            partialText = "",
+        )
+        val queued = speak(
+            text = MEETING_WAKEWORD_ACK_TEXT,
+            force = true,
+            queueMode = TextToSpeech.QUEUE_FLUSH,
+            manageWakewordSuppression = false,
+            requireActiveView = false,
+        ) {
+            beginWakewordCommandListening()
+        }
+        if (!queued) {
+            mainHandler.postDelayed(
+                { beginWakewordCommandListening() },
+                WAKEWORD_COMMAND_RESTART_DELAY_MS,
+            )
+        }
+    }
+
+    private fun beginWakewordCommandListening() {
+        wakewordAckPlaying = false
+        if (
+            !meetingCaptionWanted ||
+            !meetingManager.isActive ||
+            !wakeWordStateMachine.isInCommandWindow
+        ) {
+            finishWakewordCommandFlow(
+                commandCaptured = false,
+                statusText = if (meetingManager.isActive) "未听到指令，已恢复实时字幕" else "会议已结束",
+                resumeCaption = meetingManager.isActive && meetingCaptionWanted,
+            )
+            return
+        }
+        wakewordCommandActive = true
+        wakewordCommandCaptured = false
+        publishMeetingCaptionSnapshot(
+            active = true,
+            statusText = "已唤醒，正在收听指令...",
+            partialText = "",
+        )
+        val started = runCatching { startSpeechToText(SpeechPurpose.WAKEWORD_COMMAND) }
+            .getOrElse {
+                Log.w(TAG, "Wakeword command start failed", it)
+                handleWakewordCommandStartFailure("指令识别启动失败，已恢复实时字幕")
+                false
+            }
+        if (!started) {
+            return
+        }
+    }
+
+    private fun finishWakewordCommandFlow(
+        commandCaptured: Boolean,
+        statusText: String,
+        resumeCaption: Boolean,
+        resumeDelayMs: Long = WAKEWORD_COMMAND_RESTART_DELAY_MS,
+    ) {
+        wakewordAckPlaying = false
+        wakewordCommandActive = false
+        wakewordCommandCaptured = commandCaptured
+        wakewordCommandClosingManually = false
+        meetingCaptionPausedForWakeword = false
+        if (!meetingCaptionWanted || !meetingManager.isActive) {
+            publishMeetingCaptionSnapshot(
+                active = false,
+                statusText = "会议已结束",
+                partialText = "",
+            )
+            runOnUiThread { updateSpeechInputAvailability() }
+            return
+        }
+        publishMeetingCaptionSnapshot(
+            active = true,
+            statusText = statusText,
+            partialText = "",
+        )
+        if (resumeCaption) {
+            scheduleMeetingCaptionRestart(delayMs = resumeDelayMs)
+        }
+        runOnUiThread { updateSpeechInputAvailability() }
+    }
+
+    private fun handleWakewordCommandStartFailure(statusText: String) {
+        if (wakeWordStateMachine.isInCommandWindow) {
+            wakewordCommandClosingManually = true
+            wakeWordStateMachine.endCommand()
+        }
+        runOnUiThread {
+            this.statusText.text = statusText
+        }
+        finishWakewordCommandFlow(
+            commandCaptured = false,
+            statusText = statusText,
+            resumeCaption = true,
+        )
+    }
+
+    private fun handleWakewordCommandWindowExpired() {
+        if (!meetingCaptionPausedForWakeword && !wakewordAckPlaying && !wakewordCommandActive) {
+            return
+        }
+        if (sttListening && currentSpeechPurpose == SpeechPurpose.WAKEWORD_COMMAND) {
+            sttListening = false
+            sttFinished.set(true)
+            sttForwarderConsumer?.enabled = false
+            try {
+                asr?.stop(true)
+            } catch (_: Exception) {
+                // ignore
+            }
+        }
+        runOnUiThread {
+            statusText.text = "未听到指令，已恢复实时字幕"
+        }
+        finishWakewordCommandFlow(
+            commandCaptured = false,
+            statusText = "未听到指令，已恢复实时字幕",
+            resumeCaption = true,
+        )
+    }
+
     private fun handleMeetingCaptionResult(status: Int, textRaw: String) {
+        if (meetingCaptionPausedForWakeword) {
+            return
+        }
+        val candidateText = textRaw.ifBlank { lastAsrText }
+        if (maybeTriggerWakewordFromCaption(candidateText)) {
+            return
+        }
         when (status) {
             0, 1 -> {
                 publishMeetingCaptionSnapshot(
                     active = true,
                     statusText = "实时转写中",
-                    partialText = textRaw.ifBlank { lastAsrText },
+                    partialText = candidateText,
                 )
             }
 
@@ -903,7 +1180,7 @@ class MainActivity : AppCompatActivity() {
                 } catch (_: Exception) {
                     // ignore
                 }
-                val finalText = textRaw.ifBlank { lastAsrText }.trim()
+                val finalText = candidateText.trim()
                 if (finalText.isNotBlank()) {
                     appendMeetingCaptionFinal(finalText)
                 }
@@ -925,7 +1202,80 @@ class MainActivity : AppCompatActivity() {
                 publishMeetingCaptionSnapshot(
                     active = true,
                     statusText = "实时转写中",
-                    partialText = textRaw.ifBlank { lastAsrText },
+                    partialText = candidateText,
+                )
+            }
+        }
+        runOnUiThread { updateSpeechInputAvailability() }
+    }
+
+    private fun handleWakewordCommandResult(status: Int, textRaw: String) {
+        if (!meetingCaptionPausedForWakeword && !wakewordCommandActive) {
+            return
+        }
+        val candidateText = textRaw.ifBlank { lastAsrText }
+        when (status) {
+            0, 1 -> {
+                publishMeetingCaptionSnapshot(
+                    active = true,
+                    statusText = "已唤醒，正在收听指令...",
+                    partialText = candidateText,
+                )
+            }
+
+            2 -> {
+                sttListening = false
+                sttFinished.set(true)
+                sttForwarderConsumer?.enabled = false
+                try {
+                    asr?.stop(true)
+                } catch (_: Exception) {
+                    // ignore
+                }
+                val finalText = candidateText.trim()
+                if (finalText.isBlank()) {
+                    if (wakeWordStateMachine.isInCommandWindow) {
+                        wakewordCommandClosingManually = true
+                        wakeWordStateMachine.endCommand()
+                    }
+                    runOnUiThread {
+                        statusText.text = "未听清指令，已恢复实时字幕"
+                    }
+                    finishWakewordCommandFlow(
+                        commandCaptured = false,
+                        statusText = "未听清指令，已恢复实时字幕",
+                        resumeCaption = true,
+                    )
+                    return
+                }
+                appendMeetingCaptionFinal(
+                    text = finalText,
+                    kind = "voice_command",
+                    trigger = "wakeword",
+                    wakeword = MEETING_WAKEWORD,
+                )
+                wakewordCommandCaptured = true
+                if (wakeWordStateMachine.isInCommandWindow) {
+                    wakewordCommandClosingManually = true
+                    wakeWordStateMachine.endCommand()
+                }
+                runOnUiThread {
+                    textInput.setText(finalText)
+                    statusText.text = "唤醒指令已送出"
+                }
+                finishWakewordCommandFlow(
+                    commandCaptured = true,
+                    statusText = "实时转写恢复中...",
+                    resumeCaption = true,
+                )
+                sendTextToBridge(finalText)
+            }
+
+            else -> {
+                publishMeetingCaptionSnapshot(
+                    active = true,
+                    statusText = "已唤醒，正在收听指令...",
+                    partialText = candidateText,
                 )
             }
         }
@@ -940,6 +1290,9 @@ class MainActivity : AppCompatActivity() {
             asr?.stop(true)
         } catch (_: Exception) {
             // ignore
+        }
+        if (meetingCaptionPausedForWakeword) {
+            return
         }
         if (!meetingCaptionWanted || !meetingManager.isActive) {
             publishMeetingCaptionSnapshot(
@@ -957,6 +1310,33 @@ class MainActivity : AppCompatActivity() {
         )
         scheduleMeetingCaptionRestart()
         runOnUiThread { updateSpeechInputAvailability() }
+    }
+
+    private fun handleWakewordCommandError(asrError: ASR.ASRError) {
+        if (!meetingCaptionPausedForWakeword && !wakewordCommandActive) {
+            return
+        }
+        sttListening = false
+        sttFinished.set(true)
+        sttForwarderConsumer?.enabled = false
+        try {
+            asr?.stop(true)
+        } catch (_: Exception) {
+            // ignore
+        }
+        Log.w(TAG, "Wakeword command error: code=${asrError.code}, msg=${asrError.errMsg}")
+        if (wakeWordStateMachine.isInCommandWindow) {
+            wakewordCommandClosingManually = true
+            wakeWordStateMachine.endCommand()
+        }
+        runOnUiThread {
+            statusText.text = "指令识别失败，已恢复实时字幕"
+        }
+        finishWakewordCommandFlow(
+            commandCaptured = false,
+            statusText = "指令识别失败，已恢复实时字幕",
+            resumeCaption = true,
+        )
     }
 
     private fun appendResult(line: String) {
@@ -1186,6 +1566,11 @@ class MainActivity : AppCompatActivity() {
             scheduleMeetingCaptionRestart()
             return
         }
+        if (purpose == SpeechPurpose.WAKEWORD_COMMAND) {
+            Log.w(TAG, "Wakeword command exception", throwable)
+            handleWakewordCommandStartFailure("指令识别异常，已恢复实时字幕")
+            return
+        }
         if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
             scheduleLongReplyDecisionListening(delayMs = 700)
             return
@@ -1201,11 +1586,18 @@ class MainActivity : AppCompatActivity() {
     private fun startSpeechToText(purpose: SpeechPurpose): Boolean {
         try {
             if (sttListening) {
-                return purpose == SpeechPurpose.MEETING_LIVE_CAPTION &&
-                    currentSpeechPurpose == SpeechPurpose.MEETING_LIVE_CAPTION
+                return (
+                    purpose == SpeechPurpose.MEETING_LIVE_CAPTION &&
+                        currentSpeechPurpose == SpeechPurpose.MEETING_LIVE_CAPTION
+                    ) || (
+                    purpose == SpeechPurpose.WAKEWORD_COMMAND &&
+                        currentSpeechPurpose == SpeechPurpose.WAKEWORD_COMMAND
+                    )
             }
 
-            if (purpose != SpeechPurpose.MEETING_LIVE_CAPTION && isSpeechInputBlockedByMeeting()) {
+            val isMeetingInternalSpeech =
+                purpose == SpeechPurpose.MEETING_LIVE_CAPTION || purpose == SpeechPurpose.WAKEWORD_COMMAND
+            if (!isMeetingInternalSpeech && isSpeechInputBlockedByMeeting()) {
                 runOnUiThread {
                     updateSpeechInputAvailability()
                     statusText.text = if (purpose == SpeechPurpose.LONG_REPLY_DECISION) {
@@ -1219,12 +1611,17 @@ class MainActivity : AppCompatActivity() {
 
             if (!hasRecordAudioPermission()) {
                 requestRecordAudioPermission()
+                if (purpose == SpeechPurpose.WAKEWORD_COMMAND) {
+                    handleWakewordCommandStartFailure("缺少麦克风权限，已恢复实时字幕")
+                }
                 return false
             }
 
             if (!ensureSparkInitialized()) {
                 if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
                     handleMeetingCaptionStartFailure("实时字幕初始化失败，正在重试...")
+                } else if (purpose == SpeechPurpose.WAKEWORD_COMMAND) {
+                    handleWakewordCommandStartFailure("语音识别初始化失败，已恢复实时字幕")
                 }
                 return false
             }
@@ -1246,6 +1643,8 @@ class MainActivity : AppCompatActivity() {
                 sttListening = false
                 if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
                     handleMeetingCaptionStartFailure("实时字幕启动失败，正在重试...")
+                } else if (purpose == SpeechPurpose.WAKEWORD_COMMAND) {
+                    handleWakewordCommandStartFailure("指令识别启动失败，已恢复实时字幕")
                 } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                     scheduleLongReplyDecisionListening(delayMs = 700)
                 } else {
@@ -1261,6 +1660,8 @@ class MainActivity : AppCompatActivity() {
                 sttListening = false
                 if (purpose == SpeechPurpose.MEETING_LIVE_CAPTION) {
                     handleMeetingCaptionStartFailure("麦克风不可用，正在重试...")
+                } else if (purpose == SpeechPurpose.WAKEWORD_COMMAND) {
+                    handleWakewordCommandStartFailure("麦克风不可用，已恢复实时字幕")
                 } else if (purpose == SpeechPurpose.LONG_REPLY_DECISION && isPendingLongReplyActive()) {
                     scheduleLongReplyDecisionListening(delayMs = 700)
                 } else {
@@ -1275,6 +1676,12 @@ class MainActivity : AppCompatActivity() {
                 publishMeetingCaptionSnapshot(
                     active = true,
                     statusText = "实时转写中",
+                    partialText = "",
+                )
+            } else if (purpose == SpeechPurpose.WAKEWORD_COMMAND) {
+                publishMeetingCaptionSnapshot(
+                    active = true,
+                    statusText = "已唤醒，正在收听指令...",
                     partialText = "",
                 )
             } else {
@@ -1739,6 +2146,15 @@ class MainActivity : AppCompatActivity() {
 
         // Wire wake word state changes
         wakeWordStateMachine.onStateChanged = { oldState, newState ->
+            if (
+                newState == WakeWordStateMachine.State.COOLDOWN &&
+                !wakewordCommandCaptured &&
+                !wakewordCommandClosingManually
+            ) {
+                runOnUiThread {
+                    handleWakewordCommandWindowExpired()
+                }
+            }
             runOnUiThread {
                 updateMeetingStatusUI()
             }
@@ -1750,12 +2166,14 @@ class MainActivity : AppCompatActivity() {
                         wakewordEventReporter.reportCommandWindowStarted(meetingId)
                     }
                     WakeWordStateMachine.State.COOLDOWN -> {
+                        wakewordEventReporter.reportCommandWindowEnded(
+                            meetingId,
+                            commandCaptured = wakewordCommandCaptured,
+                        )
                         wakewordEventReporter.reportCooldownStarted(meetingId)
                     }
                     WakeWordStateMachine.State.LISTENING -> {
-                        if (oldState == WakeWordStateMachine.State.COMMAND_WINDOW) {
-                            wakewordEventReporter.reportCommandWindowEnded(meetingId, false)
-                        } else if (oldState == WakeWordStateMachine.State.COOLDOWN) {
+                        if (oldState == WakeWordStateMachine.State.COOLDOWN) {
                             wakewordEventReporter.reportCooldownEnded(meetingId)
                         }
                     }
@@ -2127,7 +2545,7 @@ class MainActivity : AppCompatActivity() {
                     if (meetingId != null) {
                         wakeWordController.onMeetingModeChanged(true)
                         diskWriterConsumer.enabled = true
-                        kwsConsumer.enabled = true
+                        kwsConsumer.enabled = false
                         if (!startMeetingAudioCapture()) {
                             appendResult("[会议] 音频采集启动失败")
                             meetingManager.endMeeting()
@@ -2520,24 +2938,32 @@ class MainActivity : AppCompatActivity() {
         }.start()
     }
 
-    private fun speak(text: String, force: Boolean = false) {
-        if (!ConversationUiState.isActiveView(VIEW_ID)) {
+    private fun speak(
+        text: String,
+        force: Boolean = false,
+        queueMode: Int = TextToSpeech.QUEUE_ADD,
+        manageWakewordSuppression: Boolean = true,
+        requireActiveView: Boolean = true,
+        onComplete: (() -> Unit)? = null,
+    ): Boolean {
+        if (requireActiveView && !ConversationUiState.isActiveView(VIEW_ID)) {
             Log.i(TAG, "Skip TTS speak: inactive view")
-            return
+            onComplete?.invoke()
+            return false
         }
-        if (!force && !speakSwitch.isChecked) return
+        if (!force && !speakSwitch.isChecked) return false
         val speakText = normalizeForSpeech(text)
-        if (speakText.isBlank()) return
+        if (speakText.isBlank()) return false
         Log.i(TAG, "TTS speak requested, force=$force, length=${speakText.length}")
         if (!ttsReady || tts == null) {
             Log.w(TAG, "TTS not ready, reinitializing")
             appendResult("[系统] TTS未就绪，正在重试")
             initTts()
-            return
+            return false
         }
 
         // Suppress wake word during TTS playback
-        if (::wakeWordController.isInitialized && meetingManager.isActive) {
+        if (manageWakewordSuppression && ::wakeWordController.isInitialized && meetingManager.isActive) {
             wakeWordController.onTtsStarted()
         }
 
@@ -2550,27 +2976,36 @@ class MainActivity : AppCompatActivity() {
 
             override fun onDone(utteranceId: String?) {
                 // Resume wake word after TTS
-                if (::wakeWordController.isInitialized && meetingManager.isActive) {
+                if (manageWakewordSuppression && ::wakeWordController.isInitialized && meetingManager.isActive) {
                     wakeWordController.onTtsEnded()
+                }
+                onComplete?.let { completion ->
+                    runOnUiThread { completion() }
                 }
             }
 
             override fun onError(utteranceId: String?) {
                 // Resume wake word on error too
-                if (::wakeWordController.isInitialized && meetingManager.isActive) {
+                if (manageWakewordSuppression && ::wakeWordController.isInitialized && meetingManager.isActive) {
                     wakeWordController.onTtsEnded()
+                }
+                onComplete?.let { completion ->
+                    runOnUiThread { completion() }
                 }
             }
         })
 
-        val ret = tts?.speak(speakText, TextToSpeech.QUEUE_ADD, null, utteranceId) ?: TextToSpeech.ERROR
+        val ret = tts?.speak(speakText, queueMode, null, utteranceId) ?: TextToSpeech.ERROR
         Log.i(TAG, "TTS speak return code=$ret")
         if (ret != TextToSpeech.SUCCESS) {
             Log.e(TAG, "TTS speak failed: ret=$ret")
             appendResult("[系统] TTS播报失败: $ret")
             ttsReady = false
             initTts()
+            onComplete?.invoke()
+            return false
         }
+        return true
     }
 
     private fun prefs() = getSharedPreferences(PREFS_NAME, MODE_PRIVATE)

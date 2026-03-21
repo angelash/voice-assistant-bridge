@@ -29,6 +29,9 @@ class MeetingEventReporter(
         meetingId: String,
         lineIndex: Int,
         text: String,
+        kind: String? = null,
+        trigger: String? = null,
+        wakeword: String? = null,
     ) {
         if (meetingId.isBlank() || text.isBlank()) return
         val payload = JSONObject().apply {
@@ -36,6 +39,15 @@ class MeetingEventReporter(
             put("line_index", lineIndex)
             put("text_length", text.length)
             put("finalized_at_ms", System.currentTimeMillis())
+            if (!kind.isNullOrBlank()) {
+                put("kind", kind)
+            }
+            if (!trigger.isNullOrBlank()) {
+                put("trigger", trigger)
+            }
+            if (!wakeword.isNullOrBlank()) {
+                put("wakeword", wakeword)
+            }
         }
         reportEvent(meetingId = meetingId, eventType = "stt.final", payload = payload)
     }

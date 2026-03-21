@@ -214,11 +214,11 @@ class WakeWordStateMachine {
      */
     fun getStateDescription(): String {
         return when (state) {
-            State.IDLE -> "Disabled"
-            State.LISTENING -> "Listening"
-            State.COMMAND_WINDOW -> "Command Window"
-            State.COOLDOWN -> "Cooldown"
-            State.SUPPRESSED -> "Suppressed (TTS)"
+            State.IDLE -> "未启用"
+            State.LISTENING -> "监听中"
+            State.COMMAND_WINDOW -> "等待指令"
+            State.COOLDOWN -> "冷却中"
+            State.SUPPRESSED -> "播报中"
         }
     }
 }
