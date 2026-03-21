@@ -48,6 +48,7 @@ import com.audiobridge.client.conversation.RoleSource
 import com.audiobridge.client.conversation.SharedConversationEngine
 import com.audiobridge.client.meeting.MeetingCaptionSnapshot
 import com.audiobridge.client.meeting.MeetingCaptionState
+import com.audiobridge.client.meeting.MeetingAudioGateState
 import com.audiobridge.client.meeting.MeetingControlBus
 import com.audiobridge.client.meeting.MeetingEventReporter
 import com.audiobridge.client.meeting.MeetingManager
@@ -2107,7 +2108,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         // Create consumers
-        diskWriterConsumer = DiskWriterConsumer(meetingManager)
+        diskWriterConsumer = DiskWriterConsumer(
+            meetingManager = meetingManager,
+            suppressInputProvider = { MeetingAudioGateState.isInputSuppressed() },
+        )
         kwsConsumer = KwsDetectorConsumer()
         
         // Create STT forwarder with resampling (48kHz -> 16kHz)
@@ -2122,7 +2126,8 @@ class MainActivity : AppCompatActivity() {
                 }
             },
             sourceSampleRate = AudioConfig.SAMPLE_RATE, // 48000
-            targetSampleRate = STT_SAMPLE_RATE           // 16000
+            targetSampleRate = STT_SAMPLE_RATE,         // 16000
+            suppressInputProvider = { MeetingAudioGateState.isInputSuppressed() },
         )
 
         // Register consumers with the bus
@@ -2961,6 +2966,10 @@ class MainActivity : AppCompatActivity() {
             initTts()
             return false
         }
+        val gateMeetingInput = ::meetingManager.isInitialized && meetingManager.isActive
+        if (gateMeetingInput) {
+            MeetingAudioGateState.beginPlayback()
+        }
 
         // Suppress wake word during TTS playback
         if (manageWakewordSuppression && ::wakeWordController.isInitialized && meetingManager.isActive) {
@@ -2979,6 +2988,9 @@ class MainActivity : AppCompatActivity() {
                 if (manageWakewordSuppression && ::wakeWordController.isInitialized && meetingManager.isActive) {
                     wakeWordController.onTtsEnded()
                 }
+                if (gateMeetingInput) {
+                    MeetingAudioGateState.endPlayback()
+                }
                 onComplete?.let { completion ->
                     runOnUiThread { completion() }
                 }
@@ -2988,6 +3000,9 @@ class MainActivity : AppCompatActivity() {
                 // Resume wake word on error too
                 if (manageWakewordSuppression && ::wakeWordController.isInitialized && meetingManager.isActive) {
                     wakeWordController.onTtsEnded()
+                }
+                if (gateMeetingInput) {
+                    MeetingAudioGateState.endPlayback()
                 }
                 onComplete?.let { completion ->
                     runOnUiThread { completion() }
@@ -3002,6 +3017,9 @@ class MainActivity : AppCompatActivity() {
             appendResult("[系统] TTS播报失败: $ret")
             ttsReady = false
             initTts()
+            if (gateMeetingInput) {
+                MeetingAudioGateState.endPlayback(holdMs = 0L)
+            }
             onComplete?.invoke()
             return false
         }

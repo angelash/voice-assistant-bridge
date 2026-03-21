@@ -4,13 +4,19 @@ import android.annotation.SuppressLint
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import android.os.Process
 import android.util.Log
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 
 /**
- * 麦克风捕获：使用 AudioRecord 捕获 48kHz/16bit/mono PCM
+ * Captures 48kHz mono PCM frames from a single AudioRecord instance.
+ *
+ * We prefer the voice communication source so the platform can apply built-in
+ * echo handling. When available, AEC/NS effects are also attached directly to
+ * the recorder session.
  */
 class AudioRecordCapture {
 
@@ -19,27 +25,22 @@ class AudioRecordCapture {
     }
 
     private var audioRecord: AudioRecord? = null
+    private var acousticEchoCanceler: AcousticEchoCanceler? = null
+    private var noiseSuppressor: NoiseSuppressor? = null
     private val isCapturing = AtomicBoolean(false)
     private var captureThread: Thread? = null
     private var tuningMode: AudioTuningMode = AudioTuningMode.ROBUST
 
-    /** 当收到完整的 20ms PCM 帧时触发 */
     var onFrameAvailable: ((ByteArray) -> Unit)? = null
-
-    /** 当捕获出错时触发 */
     var onError: ((String) -> Unit)? = null
 
-    /** 是否正在捕获 */
-    val isRunning: Boolean get() = isCapturing.get()
+    val isRunning: Boolean
+        get() = isCapturing.get()
 
     fun setTuningMode(mode: AudioTuningMode) {
         tuningMode = mode
     }
 
-    /**
-     * 开始捕获
-     * @return 成功返回 true，失败返回 false
-     */
     @SuppressLint("MissingPermission")
     fun start(): Boolean {
         if (isCapturing.get()) {
@@ -50,55 +51,50 @@ class AudioRecordCapture {
         val bufferSize = AudioRecord.getMinBufferSize(
             AudioConfig.SAMPLE_RATE,
             AudioFormat.CHANNEL_IN_MONO,
-            AudioFormat.ENCODING_PCM_16BIT
+            AudioFormat.ENCODING_PCM_16BIT,
         )
-
         if (bufferSize == AudioRecord.ERROR_BAD_VALUE || bufferSize == AudioRecord.ERROR) {
-            onError?.invoke("无法获取合适的缓冲区大小")
+            onError?.invoke("Unable to determine a valid audio buffer size.")
             return false
         }
 
-        // 使用较大的缓冲区以避免溢出
         val multiplier = if (tuningMode == AudioTuningMode.ROBUST) 6 else 4
         val actualBufferSize = maxOf(bufferSize, AudioConfig.BYTES_PER_FRAME * multiplier)
 
-        try {
+        return try {
             audioRecord = AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
                 AudioConfig.SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                actualBufferSize
+                actualBufferSize,
             )
 
-            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                onError?.invoke("AudioRecord 初始化失败")
-                audioRecord?.release()
-                audioRecord = null
+            val record = audioRecord
+            if (record?.state != AudioRecord.STATE_INITIALIZED) {
+                onError?.invoke("AudioRecord initialization failed.")
+                cleanupRecorder()
                 return false
             }
 
-            audioRecord?.startRecording()
+            attachAudioEffects(record)
+            record.startRecording()
             isCapturing.set(true)
 
             captureThread = thread(name = "AudioRecordCapture") {
                 captureLoop()
             }
 
-            Log.i(TAG, "开始捕获：bufferSize=$actualBufferSize")
-            return true
+            Log.i(TAG, "Capture started, bufferSize=$actualBufferSize")
+            true
         } catch (e: Exception) {
-            Log.e(TAG, "启动捕获失败", e)
-            onError?.invoke("启动捕获失败：${e.message}")
-            audioRecord?.release()
-            audioRecord = null
-            return false
+            Log.e(TAG, "Failed to start capture", e)
+            onError?.invoke("Failed to start capture: ${e.message ?: "unknown error"}")
+            cleanupRecorder()
+            false
         }
     }
 
-    /**
-     * 停止捕获
-     */
     fun stop() {
         if (!isCapturing.get()) return
 
@@ -109,13 +105,11 @@ class AudioRecordCapture {
         try {
             audioRecord?.stop()
         } catch (e: Exception) {
-            Log.w(TAG, "停止录音异常", e)
+            Log.w(TAG, "Stopping AudioRecord failed", e)
         }
 
-        audioRecord?.release()
-        audioRecord = null
-
-        Log.i(TAG, "已停止捕获")
+        cleanupRecorder()
+        Log.i(TAG, "Capture stopped")
     }
 
     private fun captureLoop() {
@@ -135,33 +129,81 @@ class AudioRecordCapture {
                 val record = audioRecord ?: break
                 val bytesRead = record.read(frameBuffer, offset, frameBuffer.size - offset)
 
-                if (bytesRead > 0) {
-                    offset += bytesRead
-
-                    // 满一帧则回调
-                    if (offset >= AudioConfig.BYTES_PER_FRAME) {
-                        onFrameAvailable?.invoke(frameBuffer.copyOf())
-                        offset = 0
+                when {
+                    bytesRead > 0 -> {
+                        offset += bytesRead
+                        if (offset >= AudioConfig.BYTES_PER_FRAME) {
+                            onFrameAvailable?.invoke(frameBuffer.copyOf())
+                            offset = 0
+                        }
                     }
-                } else if (bytesRead == AudioRecord.ERROR_INVALID_OPERATION) {
-                    Log.e(TAG, "AudioRecord 无效操作")
-                    onError?.invoke("录音无效操作")
-                    break
-                } else if (bytesRead == AudioRecord.ERROR_BAD_VALUE) {
-                    Log.e(TAG, "AudioRecord 参数错误")
-                    onError?.invoke("录音参数错误")
-                    break
+                    bytesRead == AudioRecord.ERROR_INVALID_OPERATION -> {
+                        Log.e(TAG, "AudioRecord invalid operation")
+                        onError?.invoke("Audio capture entered an invalid state.")
+                        break
+                    }
+                    bytesRead == AudioRecord.ERROR_BAD_VALUE -> {
+                        Log.e(TAG, "AudioRecord bad value")
+                        onError?.invoke("Audio capture received invalid parameters.")
+                        break
+                    }
                 }
             } catch (e: InterruptedException) {
-                Log.i(TAG, "捕获线程被中断")
+                Log.i(TAG, "Capture thread interrupted")
                 break
             } catch (e: Exception) {
-                Log.e(TAG, "捕获异常", e)
-                onError?.invoke("捕获异常：${e.message}")
+                Log.e(TAG, "Capture loop failed", e)
+                onError?.invoke("Audio capture failed: ${e.message ?: "unknown error"}")
                 break
             }
         }
 
-        Log.i(TAG, "捕获循环结束")
+        Log.i(TAG, "Capture loop ended")
+    }
+
+    private fun attachAudioEffects(record: AudioRecord) {
+        releaseAudioEffects()
+        val sessionId = record.audioSessionId
+        if (AcousticEchoCanceler.isAvailable()) {
+            acousticEchoCanceler = AcousticEchoCanceler.create(sessionId)?.apply {
+                enabled = true
+            }
+            Log.i(TAG, "AcousticEchoCanceler enabled=${acousticEchoCanceler?.enabled == true}")
+        } else {
+            Log.i(TAG, "AcousticEchoCanceler unavailable")
+        }
+        if (NoiseSuppressor.isAvailable()) {
+            noiseSuppressor = NoiseSuppressor.create(sessionId)?.apply {
+                enabled = true
+            }
+            Log.i(TAG, "NoiseSuppressor enabled=${noiseSuppressor?.enabled == true}")
+        } else {
+            Log.i(TAG, "NoiseSuppressor unavailable")
+        }
+    }
+
+    private fun cleanupRecorder() {
+        releaseAudioEffects()
+        try {
+            audioRecord?.release()
+        } catch (_: Exception) {
+            // ignore
+        }
+        audioRecord = null
+    }
+
+    private fun releaseAudioEffects() {
+        try {
+            acousticEchoCanceler?.release()
+        } catch (_: Exception) {
+            // ignore
+        }
+        try {
+            noiseSuppressor?.release()
+        } catch (_: Exception) {
+            // ignore
+        }
+        acousticEchoCanceler = null
+        noiseSuppressor = null
     }
 }

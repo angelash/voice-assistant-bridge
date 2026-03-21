@@ -39,6 +39,7 @@ import com.audiobridge.client.conversation.RoleSource
 import com.audiobridge.client.conversation.SharedConversationEngine
 import com.audiobridge.client.meeting.MeetingCaptionSnapshot
 import com.audiobridge.client.meeting.MeetingCaptionState
+import com.audiobridge.client.meeting.MeetingAudioGateState
 import com.audiobridge.client.meeting.MeetingControlBus
 import com.audiobridge.client.meeting.MeetingUiSnapshot
 import com.audiobridge.client.meeting.MeetingUiState
@@ -889,6 +890,10 @@ class VisualStageActivity : AppCompatActivity() {
             initTts()
             return
         }
+        val gateMeetingInput = MeetingUiState.snapshot().active
+        if (gateMeetingInput) {
+            MeetingAudioGateState.beginPlayback()
+        }
 
         val utteranceId = "visual-${System.currentTimeMillis()}"
         tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
@@ -900,6 +905,9 @@ class VisualStageActivity : AppCompatActivity() {
             }
 
             override fun onDone(utteranceId: String?) {
+                if (gateMeetingInput) {
+                    MeetingAudioGateState.endPlayback()
+                }
                 runOnUiThread {
                     ttsSpeaking = false
                     refreshEyeMode()
@@ -907,6 +915,9 @@ class VisualStageActivity : AppCompatActivity() {
             }
 
             override fun onError(utteranceId: String?) {
+                if (gateMeetingInput) {
+                    MeetingAudioGateState.endPlayback()
+                }
                 runOnUiThread {
                     ttsSpeaking = false
                     refreshEyeMode()
@@ -920,6 +931,9 @@ class VisualStageActivity : AppCompatActivity() {
             updateStatus("TTS 播报失败: $ret", isError = true)
             ttsReady = false
             initTts()
+            if (gateMeetingInput) {
+                MeetingAudioGateState.endPlayback(holdMs = 0L)
+            }
         }
     }
 

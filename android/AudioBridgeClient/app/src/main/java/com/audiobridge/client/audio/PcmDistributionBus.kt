@@ -124,17 +124,27 @@ class PcmDistributionBus {
  * Writes PCM data to disk via MeetingManager
  */
 class DiskWriterConsumer(
-    private val meetingManager: com.audiobridge.client.meeting.MeetingManager
+    private val meetingManager: com.audiobridge.client.meeting.MeetingManager,
+    private val suppressInputProvider: (() -> Boolean)? = null,
 ) : PcmDistributionBus.PcmConsumer {
 
     override val name: String = "disk-writer"
     override var enabled: Boolean = false
     private var bytesWritten = 0L
+    private var silenceBuffer = ByteArray(0)
 
     override fun onPcmData(data: ByteArray) {
         if (!enabled) return
-        meetingManager.writePcmData(data)
-        bytesWritten += data.size
+        val payload = if (suppressInputProvider?.invoke() == true) {
+            if (silenceBuffer.size != data.size) {
+                silenceBuffer = ByteArray(data.size)
+            }
+            silenceBuffer
+        } else {
+            data
+        }
+        meetingManager.writePcmData(payload)
+        bytesWritten += payload.size
     }
 
     override fun flush() {
@@ -155,7 +165,8 @@ class DiskWriterConsumer(
 class SttForwarderConsumer(
     private val onPcmCallback: (ByteArray) -> Unit,
     private val sourceSampleRate: Int = AudioConfig.SAMPLE_RATE,
-    private val targetSampleRate: Int = 16000
+    private val targetSampleRate: Int = 16000,
+    private val suppressInputProvider: (() -> Boolean)? = null,
 ) : PcmDistributionBus.PcmConsumer {
 
     companion object {
@@ -173,6 +184,13 @@ class SttForwarderConsumer(
 
     override fun onPcmData(data: ByteArray) {
         if (!enabled) return
+        if (suppressInputProvider?.invoke() == true) {
+            synchronized(buffer) {
+                buffer.reset()
+                bytesAccumulated = 0
+            }
+            return
+        }
 
         // If no resampling needed, pass through directly
         if (sourceSampleRate == targetSampleRate) {
