@@ -136,7 +136,7 @@ class BridgeConversationEngineTest {
         )
 
         assertTrue(collector.states.contains(ConversationState.FAILED))
-        assertTrue(collector.notices.any { it.text.contains("timeout waiting final reply") })
+        assertTrue(collector.notices.any { it.text.contains("等待龙虾大脑回复超时") })
     }
 
     @Test
@@ -148,7 +148,7 @@ class BridgeConversationEngineTest {
                 .put("source", "openclaw")
                 .put("source_label", "OpenClaw")
                 .put("kind", "final_reply")
-                .put("text", "This is a very long reply message that should trigger long-reply decision flow.")
+                .put("text", "This is a very long reply message that should trigger the long reply decision flow because it contains many separate words and enough detail to cross the configured threshold for spoken playback choices.")
         )
         transport.submitResponse = JSONObject()
             .put("ok", true)

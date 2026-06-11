@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path
+        name="phone_agent_captures"
+        path="phone-agent-captures/" />
+    <files-path
+        name="phone_agent_capture_files"
+        path="phone-agent-captures/" />
+    <files-path
+        name="phone_agent_audio_files"
+        path="phone-agent-audio/" />
+    <files-path
+        name="phone_agent_stream_files"
+        path="phone-agent-stream/" />
+</paths>

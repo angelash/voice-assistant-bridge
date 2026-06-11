@@ -8,8 +8,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import logging
+import mimetypes
 import os
 import re
 import sqlite3
@@ -19,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+import aiohttp
 from aiohttp import web
 from friendly_errors import attach_friendly_message
 
@@ -51,7 +54,16 @@ NON_RETRIABLE_OPENCLAW_ERROR_HINTS = (
     "plugin runtime subagent methods are only available during a gateway request",
     "openclaw invalid payload",
     "openclaw empty reply",
+    "image analysis endpoint unavailable",
+    "image analysis http 400",
+    "image analysis http 401",
+    "image analysis http 403",
+    "image analysis http 404",
+    "image analysis empty reply",
 )
+
+ARTIFACT_TYPES = {"image", "audio", "file"}
+MAX_ARTIFACT_BYTES = 25 * 1024 * 1024
 
 
 def now_iso() -> str:
@@ -82,6 +94,26 @@ def source_label(source: str) -> str:
         SOURCE_OPENCLAW: "龙虾大脑",
         SOURCE_SYSTEM: "系统",
     }.get(source, source)
+
+
+def safe_path_segment(value: str, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", (value or "").strip()).strip("._")
+    return cleaned[:80] or fallback
+
+
+def detect_mime(filename: str, content_type: Optional[str], data: bytes) -> str:
+    if content_type and content_type != "application/octet-stream":
+        return content_type.split(";", 1)[0].strip()
+    guessed = mimetypes.guess_type(filename or "")[0]
+    if guessed:
+        return guessed
+    if data.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return "application/octet-stream"
 
 
 def is_non_retriable_openclaw_error(error: str) -> bool:
@@ -126,6 +158,21 @@ def extract_reply_text(data: dict[str, Any]) -> str:
         val = msg.get("content")
         if isinstance(val, str) and val.strip():
             return val.strip()
+    choices = data.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            choice_msg = choice.get("message")
+            if isinstance(choice_msg, dict):
+                val = choice_msg.get("content")
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
+            delta = choice.get("delta")
+            if isinstance(delta, dict):
+                val = delta.get("content")
+                if isinstance(val, str) and val.strip():
+                    return val.strip()
     return ""
 
 
@@ -179,6 +226,7 @@ class Store:
                     decision_confidence REAL,
                     local_reply TEXT,
                     final_reply TEXT,
+                    artifacts_json TEXT,
                     retry_count INTEGER NOT NULL DEFAULT 0,
                     max_retries INTEGER NOT NULL DEFAULT 5,
                     timeout_sec INTEGER NOT NULL DEFAULT 30,
@@ -188,11 +236,52 @@ class Store:
                 )
                 """
             )
+            self._ensure_column("message_states", "artifacts_json", "TEXT")
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS artifact_states (
+                    artifact_id TEXT PRIMARY KEY,
+                    client_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    artifact_type TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    storage_path TEXT NOT NULL,
+                    size_bytes INTEGER NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    capture_ts TEXT,
+                    meta_json TEXT,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS message_artifacts (
+                    message_id TEXT NOT NULL,
+                    artifact_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (message_id, artifact_id)
+                )
+                """
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_artifact_session ON artifact_states(session_id, created_at)"
+            )
+            self.conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_message_artifact_message ON message_artifacts(message_id)"
+            )
             self.conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_message_session ON message_states(session_id, created_at)"
             )
             self.conn.execute("CREATE INDEX IF NOT EXISTS idx_message_status ON message_states(status)")
             self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, column_type: str) -> None:
+        cols = {row["name"] for row in self.conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        if column not in cols:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     @staticmethod
     def _dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -234,6 +323,51 @@ class Store:
             rows = self.conn.execute(
                 "SELECT * FROM message_states WHERE session_id=? ORDER BY created_at DESC LIMIT ?",
                 (session_id, limit),
+            ).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def create_artifact(self, row: dict[str, Any]) -> dict[str, Any]:
+        keys = list(row.keys())
+        cols = ", ".join(keys)
+        vals = ", ".join("?" for _ in keys)
+        with self.lock:
+            self.conn.execute(f"INSERT INTO artifact_states ({cols}) VALUES ({vals})", [row[k] for k in keys])
+            self.conn.commit()
+        return row
+
+    def get_artifact(self, artifact_id: str) -> Optional[dict[str, Any]]:
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT * FROM artifact_states WHERE artifact_id=?",
+                (artifact_id,),
+            ).fetchone()
+        return self._dict(row) if row else None
+
+    def link_message_artifacts(self, message_id: str, artifact_ids: list[str]) -> None:
+        if not artifact_ids:
+            return
+        ts = now_iso()
+        with self.lock:
+            self.conn.executemany(
+                """
+                INSERT OR IGNORE INTO message_artifacts (message_id, artifact_id, created_at)
+                VALUES (?, ?, ?)
+                """,
+                [(message_id, artifact_id, ts) for artifact_id in artifact_ids],
+            )
+            self.conn.commit()
+
+    def message_artifacts(self, message_id: str) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.conn.execute(
+                """
+                SELECT a.*
+                FROM artifact_states a
+                INNER JOIN message_artifacts ma ON ma.artifact_id = a.artifact_id
+                WHERE ma.message_id=?
+                ORDER BY ma.created_at ASC
+                """,
+                (message_id,),
             ).fetchall()
         return [self._dict(r) for r in rows]
 
@@ -505,6 +639,27 @@ class VoiceAssistantServer:
         db_path = Path(cfg.get("bridge_db_path", str(Path(__file__).with_name("bridge_state.db"))))
         self.store = Store(db_path)
         self.events = EventHub()
+        self.artifacts_dir = Path(cfg.get("phone_agent_artifacts_dir", "artifacts/phone-agent"))
+        self.openclaw_image_api_url = os.getenv(
+            "VOICE_OPENCLAW_IMAGE_API_URL",
+            cfg.get("openclaw_image_api_url", self.openclaw.base_url or "http://127.0.0.1:18789"),
+        ).rstrip("/")
+        self.openclaw_image_analyze_path = os.getenv(
+            "VOICE_OPENCLAW_IMAGE_ANALYZE_PATH",
+            cfg.get("openclaw_image_analyze_path", "/v1/chat/completions"),
+        )
+        self.openclaw_image_model = os.getenv(
+            "VOICE_OPENCLAW_IMAGE_MODEL",
+            cfg.get("openclaw_image_model", "openclaw"),
+        )
+        self.openclaw_image_agent_id = os.getenv(
+            "VOICE_OPENCLAW_IMAGE_AGENT_ID",
+            cfg.get("openclaw_image_agent_id", "local-api"),
+        )
+        self.openclaw_image_token = os.getenv(
+            "VOICE_OPENCLAW_IMAGE_TOKEN",
+            cfg.get("openclaw_image_token", self.openclaw.token),
+        )
 
         # V2 Meeting Mode
         self.meeting_store = MeetingStore(db_path)
@@ -576,6 +731,10 @@ class VoiceAssistantServer:
 
             reason = "openclaw_first"
             quick_reply = "已转发给龙虾大脑，正在处理。"
+            artifacts = self.store.message_artifacts(message_id)
+            if any(item.get("artifact_type") == "image" for item in artifacts):
+                reason = "openclaw_vision_first"
+                quick_reply = "已收到图片，正在请求龙虾视觉分析。"
 
             if not self.openclaw.enabled:
                 reason = f"{reason}|openclaw_disabled"
@@ -634,6 +793,95 @@ class VoiceAssistantServer:
     def _backoff(self, attempt: int) -> float:
         return min(max(self.forward_backoff * (2 ** max(attempt - 1, 0)), 0.5), 10.0)
 
+    async def _resolve_reply(self, row: dict[str, Any], timeout: int) -> str:
+        artifacts = self.store.message_artifacts(row["message_id"])
+        if any(item.get("artifact_type") == "image" for item in artifacts):
+            return await self._analyze_image_artifacts(row, artifacts, timeout)
+        return await self.openclaw.chat(row["text"], row["session_id"], row["message_id"], timeout)
+
+    async def _analyze_image_artifacts(
+        self,
+        row: dict[str, Any],
+        artifacts: list[dict[str, Any]],
+        timeout: int,
+    ) -> str:
+        images = [item for item in artifacts if item.get("artifact_type") == "image"]
+        if not images:
+            raise RuntimeError("no supported image artifact")
+        if not self.openclaw_image_api_url:
+            raise RuntimeError("image analysis endpoint unavailable: not configured")
+
+        image = images[0]
+        image_path = Path(image["storage_path"])
+        if not image_path.exists():
+            raise RuntimeError(f"image artifact file missing: {image['artifact_id']}")
+
+        image_base64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        url = f"{self.openclaw_image_api_url}{self.openclaw_image_analyze_path}"
+        prompt = (row.get("text") or "").strip() or "请分析这张图片。"
+        headers = {"Content-Type": "application/json"}
+        if self.openclaw_image_token:
+            headers["Authorization"] = f"Bearer {self.openclaw_image_token}"
+        if self.openclaw_image_agent_id:
+            headers["x-openclaw-agent-id"] = self.openclaw_image_agent_id
+        if self.openclaw_image_analyze_path.rstrip("/") == "/v1/chat/completions":
+            payload = {
+                "model": self.openclaw_image_model,
+                "user": row["session_id"],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{image['mime_type']};base64,{image_base64}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+            }
+        else:
+            payload = {
+                "image": image_base64,
+                "prompt": prompt,
+                "session_id": row["session_id"],
+                "message_id": row["message_id"],
+                "artifact_id": image["artifact_id"],
+                "mime_type": image["mime_type"],
+                "filename": image["filename"],
+            }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    json=payload,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=max(timeout, 30)),
+                ) as resp:
+                    body = await resp.text()
+                    if resp.status != 200:
+                        raise RuntimeError(f"image analysis http {resp.status}: {body[:300]}")
+                    try:
+                        data = json.loads(body or "{}")
+                    except Exception as exc:
+                        raise RuntimeError("image analysis invalid payload") from exc
+        except aiohttp.ClientError as exc:
+            raise RuntimeError(f"image analysis endpoint unavailable: {exc}") from exc
+
+        text_out = extract_reply_text(data)
+        if not text_out:
+            for key in ("description", "analysis", "summary", "caption"):
+                value = data.get(key) if isinstance(data, dict) else None
+                if isinstance(value, str) and value.strip():
+                    text_out = value.strip()
+                    break
+        if not text_out:
+            raise RuntimeError(f"image analysis empty reply: {json.dumps(data, ensure_ascii=False)[:300]}")
+        return text_out
+
     async def _forward_task(self, message_id: str) -> None:
         row = self.store.get(message_id)
         if not row or row["status"] in TERMINAL:
@@ -647,7 +895,7 @@ class VoiceAssistantServer:
             timeout = int(row.get("timeout_sec") or self.forward_timeout)
             for attempt in range(done_failures + 1, max_retry + 1):
                 try:
-                    text_out = await self.openclaw.chat(row["text"], row["session_id"], row["message_id"], timeout)
+                    text_out = await self._resolve_reply(row, timeout)
                     self.store.update(
                         message_id,
                         status=STATUS_OPENCLAW_RECEIVED,
@@ -714,6 +962,7 @@ class VoiceAssistantServer:
         client_id: str,
         session_id: str,
         source: str,
+        artifacts: Optional[list[dict[str, Any]]] = None,
         message_id: Optional[str] = None,
         turn_id: Optional[str] = None,
         wait_terminal: bool = False,
@@ -731,6 +980,8 @@ class VoiceAssistantServer:
         if existing:
             return existing, True
 
+        artifact_refs = self._normalize_artifact_refs(artifacts or [], session_id=session_id, client_id=client_id)
+
         ts = now_iso()
         self.store.create(
             {
@@ -746,6 +997,7 @@ class VoiceAssistantServer:
                 "decision_confidence": None,
                 "local_reply": None,
                 "final_reply": None,
+                "artifacts_json": json.dumps(artifact_refs, ensure_ascii=False) if artifact_refs else None,
                 "retry_count": 0,
                 "max_retries": self.forward_max_retries,
                 "timeout_sec": self.forward_timeout,
@@ -757,11 +1009,44 @@ class VoiceAssistantServer:
         row = self.store.get(message_id)
         if not row:
             raise RuntimeError("create message failed")
+        self.store.link_message_artifacts(message_id, [item["artifact_id"] for item in artifact_refs])
         await self._emit_status(row, "accepted")
         row = await self._local_stage(message_id)
         if wait_terminal and row.get("status") not in TERMINAL:
             row = await self._wait_terminal(message_id)
         return row, False
+
+    def _normalize_artifact_refs(
+        self,
+        artifacts: list[dict[str, Any]],
+        *,
+        session_id: str,
+        client_id: str,
+    ) -> list[dict[str, Any]]:
+        refs: list[dict[str, Any]] = []
+        for raw in artifacts:
+            if not isinstance(raw, dict):
+                raise ValueError("artifact reference must be an object")
+            artifact_id = (raw.get("artifact_id") or "").strip()
+            if not artifact_id:
+                raise ValueError("artifact_id required")
+            artifact = self.store.get_artifact(artifact_id)
+            if not artifact:
+                raise ValueError(f"artifact_not_found: {artifact_id}")
+            if artifact["session_id"] != session_id:
+                raise ValueError(f"artifact_session_mismatch: {artifact_id}")
+            if artifact["client_id"] != client_id:
+                raise ValueError(f"artifact_client_mismatch: {artifact_id}")
+            refs.append(
+                {
+                    "artifact_id": artifact_id,
+                    "type": artifact["artifact_type"],
+                    "mime_type": artifact["mime_type"],
+                    "filename": artifact["filename"],
+                    "url": f"/v1/artifacts/{artifact_id}",
+                }
+            )
+        return refs
 
     @staticmethod
     def _messages_list(row: dict[str, Any]) -> list[dict[str, str]]:
@@ -783,7 +1068,21 @@ class VoiceAssistantServer:
             )
         return out
 
+    @staticmethod
+    def _artifact_public(artifact: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "artifact_id": artifact["artifact_id"],
+            "type": artifact["artifact_type"],
+            "mime_type": artifact["mime_type"],
+            "filename": artifact["filename"],
+            "size_bytes": artifact["size_bytes"],
+            "sha256": artifact["sha256"],
+            "capture_ts": artifact.get("capture_ts"),
+            "url": f"/v1/artifacts/{artifact['artifact_id']}",
+        }
+
     def _submit_resp(self, row: dict[str, Any], deduped: bool) -> dict[str, Any]:
+        artifacts = [self._artifact_public(item) for item in self.store.message_artifacts(row["message_id"])]
         return {
             "ok": True,
             "accepted": True,
@@ -799,11 +1098,13 @@ class VoiceAssistantServer:
             "local_reply": row.get("local_reply"),
             "local_source": SOURCE_LOCAL if row.get("local_reply") else None,
             "local_source_label": source_label(SOURCE_LOCAL) if row.get("local_reply") else None,
+            "artifacts": artifacts,
             "retry": {"count": row.get("retry_count", 0), "max": row.get("max_retries", self.forward_max_retries), "timeout_sec": row.get("timeout_sec", self.forward_timeout)},
             "updated_at": row.get("updated_at"),
         }
 
     def _status_resp(self, row: dict[str, Any]) -> dict[str, Any]:
+        artifacts = [self._artifact_public(item) for item in self.store.message_artifacts(row["message_id"])]
         return {
             "ok": True,
             "message_id": row["message_id"],
@@ -816,6 +1117,7 @@ class VoiceAssistantServer:
             "decision": row.get("decision"),
             "reason": row.get("decision_reason"),
             "confidence": row.get("decision_confidence"),
+            "artifacts": artifacts,
             "messages": self._messages_list(row),
             "retry": {"count": row.get("retry_count", 0), "max": row.get("max_retries", self.forward_max_retries), "timeout_sec": row.get("timeout_sec", self.forward_timeout)},
             "last_error": row.get("last_error"),
@@ -837,6 +1139,7 @@ class VoiceAssistantServer:
                 client_id=(data.get("client_id") or "windows-client"),
                 session_id=(data.get("session_id") or self.default_session_id),
                 source=(data.get("source") or "windows"),
+                artifacts=data.get("artifacts") or [],
                 message_id=data.get("message_id"),
                 turn_id=data.get("turn_id"),
                 wait_terminal=False,
@@ -856,6 +1159,122 @@ class VoiceAssistantServer:
         if not row:
             return web.json_response({"ok": False, "error": "message_not_found"}, status=404)
         return web.json_response(self._status_resp(row))
+
+    async def handle_v1_artifact_upload(self, request: web.Request) -> web.Response:
+        try:
+            reader = await request.multipart()
+        except Exception:
+            return web.json_response({"ok": False, "error": "multipart/form-data required"}, status=400)
+
+        file_bytes: Optional[bytes] = None
+        filename = ""
+        file_content_type: Optional[str] = None
+        artifact_type = "file"
+        client_id = "android-client"
+        session_id = self.default_session_id
+        source = "android"
+        capture_ts = ""
+        meta_json = ""
+
+        async for field in reader:
+            if field.name == "file":
+                filename = field.filename or ""
+                file_content_type = field.headers.get("Content-Type")
+                file_bytes = await field.read(decode=False)
+            else:
+                value = (await field.read(decode=False)).decode("utf-8", errors="replace").strip()
+                if field.name == "artifact_type":
+                    artifact_type = value.lower()
+                elif field.name == "client_id":
+                    client_id = value or client_id
+                elif field.name == "session_id":
+                    session_id = value or session_id
+                elif field.name == "source":
+                    source = value or source
+                elif field.name == "capture_ts":
+                    capture_ts = value
+                elif field.name == "meta_json":
+                    meta_json = value
+
+        if artifact_type not in ARTIFACT_TYPES:
+            return web.json_response({"ok": False, "error": "artifact_type must be image, audio, or file"}, status=400)
+        if file_bytes is None:
+            return web.json_response({"ok": False, "error": "file required"}, status=400)
+        if not file_bytes:
+            return web.json_response({"ok": False, "error": "empty_file"}, status=400)
+        if len(file_bytes) > MAX_ARTIFACT_BYTES:
+            return web.json_response({"ok": False, "error": "file_too_large"}, status=413)
+        if meta_json:
+            try:
+                json.loads(meta_json)
+            except Exception:
+                return web.json_response({"ok": False, "error": "invalid_meta_json"}, status=400)
+
+        checksum = hashlib.sha256(file_bytes).hexdigest()
+        mime_type = detect_mime(filename, file_content_type, file_bytes)
+        if artifact_type == "image" and not mime_type.startswith("image/"):
+            return web.json_response({"ok": False, "error": "image artifact requires image content"}, status=400)
+        if not filename:
+            ext = mimetypes.guess_extension(mime_type) or ".bin"
+            filename = f"{artifact_type}_{checksum[:12]}{ext}"
+        safe_filename = safe_path_segment(filename, f"{artifact_type}_{checksum[:12]}.bin")
+        prefix = {"image": "img", "audio": "aud", "file": "file"}[artifact_type]
+        artifact_id = f"{prefix}-{uuid.uuid4().hex}"
+        safe_session = safe_path_segment(session_id, "session")
+        target_dir = self.artifacts_dir / safe_session / artifact_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        storage_path = target_dir / safe_filename
+        storage_path.write_bytes(file_bytes)
+
+        row = self.store.create_artifact(
+            {
+                "artifact_id": artifact_id,
+                "client_id": client_id,
+                "session_id": session_id,
+                "source": source,
+                "artifact_type": artifact_type,
+                "mime_type": mime_type,
+                "filename": filename,
+                "storage_path": str(storage_path),
+                "size_bytes": len(file_bytes),
+                "sha256": checksum,
+                "capture_ts": capture_ts or None,
+                "meta_json": meta_json or None,
+                "created_at": now_iso(),
+            }
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "artifact_id": artifact_id,
+                "type": artifact_type,
+                "mime_type": mime_type,
+                "filename": filename,
+                "size_bytes": len(file_bytes),
+                "sha256": checksum,
+                "url": f"/v1/artifacts/{artifact_id}",
+                "capture_ts": row.get("capture_ts"),
+            }
+        )
+
+    async def handle_v1_artifact_get(self, request: web.Request) -> web.Response:
+        artifact_id = (request.match_info.get("artifact_id") or "").strip()
+        if not artifact_id:
+            return web.json_response({"ok": False, "error": "artifact_id required"}, status=400)
+        artifact = self.store.get_artifact(artifact_id)
+        if not artifact:
+            return web.json_response({"ok": False, "error": "artifact_not_found"}, status=404)
+        path = Path(artifact["storage_path"])
+        if not path.exists():
+            return web.json_response({"ok": False, "error": "artifact_file_missing"}, status=404)
+        return web.Response(
+            body=path.read_bytes(),
+            content_type=artifact["mime_type"],
+            headers={
+                "Cache-Control": "private, max-age=3600",
+                "Content-Disposition": f'inline; filename="{artifact["filename"]}"',
+            },
+        )
 
     async def handle_v1_events(self, request: web.Request) -> web.StreamResponse:
         ws = web.WebSocketResponse(heartbeat=30)
@@ -1000,6 +1419,19 @@ class VoiceAssistantServer:
             logger.exception("handle_audio failed")
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
+    async def handle_v1_audio_transcription(self, request: web.Request) -> web.Response:
+        try:
+            audio_data = await request.read()
+            if not audio_data:
+                return web.json_response({"ok": False, "error": "empty_audio"}, status=400)
+            text = await self.transcribe_audio(audio_data)
+            if not text:
+                return web.json_response({"ok": False, "error": "stt_failed"}, status=400)
+            return web.json_response({"ok": True, "text": text})
+        except Exception as exc:
+            logger.exception("handle_v1_audio_transcription failed")
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
     async def handle_tts(self, request: web.Request) -> web.Response:
         try:
             data = await request.json()
@@ -1013,6 +1445,7 @@ class VoiceAssistantServer:
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
     async def handle_health(self, _request: web.Request) -> web.Response:
+        openclaw_available, openclaw_health = await self.openclaw.health(self.openclaw_probe_timeout)
         return web.json_response(
             {
                 "status": "ok",
@@ -1021,6 +1454,9 @@ class VoiceAssistantServer:
                     "submit": "/v1/messages",
                     "status": "/v1/messages/{message_id}",
                     "events": "/v1/events",
+                    "artifacts": "/v1/artifacts",
+                    "artifact": "/v1/artifacts/{artifact_id}",
+                    "audio_transcription": "/v1/audio/transcriptions",
                     "operator_summarize": "/v1/operator/summarize",
                     "legacy_chat": "/chat",
                     "v2_meetings": "/v2/meetings",
@@ -1031,7 +1467,13 @@ class VoiceAssistantServer:
                 "local_operator_endpoint": self.local_operator.endpoint,
                 "local_operator_model": self.local_operator.model,
                 "openclaw_gateway": f"{self.openclaw.base_url}{self.openclaw.chat_path}",
+                "openclaw_image_gateway": f"{self.openclaw_image_api_url}{self.openclaw_image_analyze_path}",
+                "openclaw_image_model": self.openclaw_image_model,
+                "openclaw_image_agent_id": self.openclaw_image_agent_id,
                 "openclaw_enabled": self.openclaw.enabled,
+                "openclaw_available": openclaw_available,
+                "openclaw_status": "ok" if openclaw_available else "unavailable",
+                "openclaw_health": openclaw_health,
                 "forward_timeout_sec": self.forward_timeout,
                 "forward_max_retries": self.forward_max_retries,
                 "default_session_id": self.default_session_id,
@@ -1073,6 +1515,9 @@ class VoiceAssistantServer:
         # V1 routes
         app.router.add_post("/v1/messages", self.handle_v1_submit)
         app.router.add_get("/v1/messages/{message_id}", self.handle_v1_status)
+        app.router.add_post("/v1/artifacts", self.handle_v1_artifact_upload)
+        app.router.add_get("/v1/artifacts/{artifact_id}", self.handle_v1_artifact_get)
+        app.router.add_post("/v1/audio/transcriptions", self.handle_v1_audio_transcription)
         app.router.add_get("/v1/events", self.handle_v1_events)
         app.router.add_post("/v1/operator/summarize", self.handle_v1_operator_summarize)
         app.router.add_post("/chat", self.handle_chat)
