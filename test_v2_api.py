@@ -1811,8 +1811,8 @@ class TestM5ImageAnalysisWorker(unittest.TestCase):
         import shutil
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def test_worker_processes_pending_image(self):
-        """Worker should pick pending image and produce analyzed result"""
+    def test_worker_fails_pending_image_when_openclaw_unavailable(self):
+        """Worker should mark analysis failed instead of producing placeholder results"""
         from image_analysis_worker import ImageAnalysisWorker
 
         meeting = self.store.create_meeting(client_id="test-client")
@@ -1842,7 +1842,7 @@ class TestM5ImageAnalysisWorker(unittest.TestCase):
                 self.store,
                 self.event_hub,
                 artifacts_dir=Path(self.temp_dir) / "artifacts",
-                openclaw_api_url="http://127.0.0.1:1",  # Force fast fallback path
+                openclaw_api_url="http://127.0.0.1:1",  # Force fast unavailable path
                 max_workers=1,
             )
             worker._poll_interval = 0.05
@@ -1860,10 +1860,9 @@ class TestM5ImageAnalysisWorker(unittest.TestCase):
         final = asyncio.run(run_worker())
 
         self.assertIsNotNone(final)
-        self.assertEqual(final["analysis_status"], "analyzed")
-        self.assertIsNotNone(final["analysis_result"])
-        result = json.loads(final["analysis_result"]) if isinstance(final["analysis_result"], str) else final["analysis_result"]
-        self.assertEqual(result.get("analysis_source"), "fallback")
+        self.assertEqual(final["analysis_status"], "analysis_failed")
+        self.assertIsNone(final["analysis_result"])
+        self.assertIn("OpenClaw image analysis", final.get("analysis_error") or "")
         self.assertGreaterEqual(len(self.event_hub.events), 2)
 
 

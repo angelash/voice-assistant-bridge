@@ -35,5 +35,5 @@
   "android_tunnel_enabled": true,
   "android_tunnel_base_url": "",
   "android_tunnel_auth_token": "",
-  "notes": "V1: local operator quick reply + OpenClaw reliable forwarding"
+  "notes": "Local config template. Copy to config.json for machine-specific settings."
 }

@@ -236,35 +236,28 @@ class PhoneAgentCaptureService : LifecycleService() {
             PhoneAgentCaptureStatus.setError(message)
             return
         }
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            PhoneAgentCaptureStatus.setError("系统没有可用的语音识别服务，无法语音唤醒。")
-            return
-        }
+        if (wakeLoopJob?.isActive == true) return
         wakeListening = true
         PhoneAgentCaptureStatus.update {
             it.copy(
                 wakeListening = true,
-                statusText = "语音唤醒正在启动系统识别服务...",
+                statusText = "语音唤醒正在启动 Bridge STT 分片监听...",
                 lastWakeText = null,
                 lastError = null,
             )
         }
         refreshForeground()
-        val recognizer = wakeRecognizer ?: SpeechRecognizer.createSpeechRecognizer(this).also {
-            wakeRecognizer = it
-        }
-        recognizer.setRecognitionListener(wakeRecognitionListener())
-        startWakeRecognizer(recognizer)
+        startBridgeWakeLoop()
     }
 
     private fun stopWakeListener() {
         wakeListening = false
-        wakeRestartRunnable?.let { mainHandler.removeCallbacks(it) }
-        wakeRestartRunnable = null
-        cancelWakeReadyTimeout()
-        runCatching { wakeRecognizer?.cancel() }
-        runCatching { wakeRecognizer?.destroy() }
-        wakeRecognizer = null
+        wakeLoopJob?.cancel()
+        wakeLoopJob = null
+        wakeTranscriptionInFlight.set(false)
+        runCatching { wakeAudioRecord?.stop() }
+        runCatching { wakeAudioRecord?.release() }
+        wakeAudioRecord = null
         PhoneAgentCaptureStatus.update {
             it.copy(
                 wakeListening = false,
@@ -275,109 +268,152 @@ class PhoneAgentCaptureService : LifecycleService() {
         stopIfIdle()
     }
 
-    private fun startWakeRecognizer(recognizer: SpeechRecognizer) {
-        if (!wakeListening) return
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-            .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-        PhoneAgentCaptureStatus.update {
-            it.copy(statusText = "语音唤醒正在启动系统识别服务...")
-        }
-        refreshForeground()
-        scheduleWakeReadyTimeout()
-        runCatching {
-            recognizer.startListening(intent)
-        }.onFailure { error ->
-            cancelWakeReadyTimeout()
-            PhoneAgentCaptureStatus.setError("语音唤醒启动失败：${error.message ?: error.javaClass.simpleName}")
-            scheduleWakeRestart(2_000L)
-        }
-    }
-
-    private fun wakeRecognitionListener(): RecognitionListener {
-        return object : RecognitionListener {
-            override fun onReadyForSpeech(params: Bundle?) {
-                cancelWakeReadyTimeout()
-                PhoneAgentCaptureStatus.update {
-                    it.copy(statusText = "语音唤醒已进入系统收音：请说“小助手”。", lastError = null)
-                }
-                refreshForeground()
+    private fun startBridgeWakeLoop() {
+        wakeLoopJob = serviceScope.launch {
+            val minBufferSize = AudioRecord.getMinBufferSize(
+                WAKE_SAMPLE_RATE_HZ,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+            )
+            if (minBufferSize <= 0) {
+                PhoneAgentCaptureStatus.setError("语音唤醒启动失败：设备不支持 16kHz 单声道 PCM 录音。")
+                stopWakeListener()
+                return@launch
             }
-
-            override fun onBeginningOfSpeech() {
-                PhoneAgentCaptureStatus.update {
-                    it.copy(statusText = "语音唤醒正在识别语音...")
-                }
-                refreshForeground()
+            val chunkBytes = WAKE_SAMPLE_RATE_HZ * WAKE_CHUNK_SECONDS * 2
+            val bufferSize = maxOf(minBufferSize, chunkBytes / 2)
+            val record = try {
+                AudioRecord(
+                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    WAKE_SAMPLE_RATE_HZ,
+                    AudioFormat.CHANNEL_IN_MONO,
+                    AudioFormat.ENCODING_PCM_16BIT,
+                    bufferSize,
+                )
+            } catch (error: SecurityException) {
+                PhoneAgentCaptureStatus.setError("语音唤醒启动失败：缺少麦克风权限。")
+                stopWakeListener()
+                return@launch
+            } catch (error: Exception) {
+                PhoneAgentCaptureStatus.setError("语音唤醒启动失败：${error.message ?: error.javaClass.simpleName}")
+                stopWakeListener()
+                return@launch
             }
-
-            override fun onRmsChanged(rmsdB: Float) = Unit
-            override fun onBufferReceived(buffer: ByteArray?) = Unit
-            override fun onEndOfSpeech() = Unit
-            override fun onPartialResults(partialResults: Bundle?) = Unit
-            override fun onEvent(eventType: Int, params: Bundle?) = Unit
-
-            override fun onError(error: Int) {
-                if (!wakeListening) return
-                cancelWakeReadyTimeout()
-                val message = wakeSpeechErrorMessage(error)
-                PhoneAgentCaptureStatus.update {
-                    it.copy(statusText = "语音唤醒监听中：$message")
-                }
-                refreshForeground()
-                if (error == SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS) {
-                    PhoneAgentCaptureStatus.setError(message)
-                    stopWakeListener()
-                    return
-                }
-                scheduleWakeRestart(1_200L)
+            wakeAudioRecord = record
+            if (record.state != AudioRecord.STATE_INITIALIZED) {
+                runCatching { record.release() }
+                wakeAudioRecord = null
+                PhoneAgentCaptureStatus.setError("语音唤醒启动失败：麦克风录音器初始化失败。")
+                stopWakeListener()
+                return@launch
             }
-
-            override fun onResults(results: Bundle?) {
-                if (!wakeListening) return
-                val texts = results
-                    ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.map { it.trim() }
-                    ?.filter { it.isNotBlank() }
-                    .orEmpty()
-                handleWakeResults(texts)
-                scheduleWakeRestart(800L)
+            try {
+                record.startRecording()
+            } catch (error: SecurityException) {
+                PhoneAgentCaptureStatus.setError("语音唤醒启动失败：缺少麦克风权限。")
+                stopWakeListener()
+                return@launch
+            } catch (error: Exception) {
+                PhoneAgentCaptureStatus.setError("语音唤醒启动失败：${error.message ?: error.javaClass.simpleName}")
+                stopWakeListener()
+                return@launch
             }
-        }
-    }
-
-    private fun handleWakeResults(texts: List<String>) {
-        if (texts.isEmpty()) {
             PhoneAgentCaptureStatus.update {
-                it.copy(statusText = "语音唤醒监听中：未识别到有效语音。")
+                it.copy(
+                    wakeListening = true,
+                    statusText = "语音唤醒正在使用 Bridge STT 分片监听：请说“小助手”。",
+                    lastError = null,
+                )
+            }
+            refreshForeground()
+
+            val readBuffer = ByteArray(minOf(minBufferSize, 4096).coerceAtLeast(1024))
+            val chunk = ByteArrayOutputStream(chunkBytes)
+            try {
+                while (isActive && wakeListening) {
+                    val read = record.read(readBuffer, 0, readBuffer.size)
+                    if (read > 0) {
+                        chunk.write(readBuffer, 0, read)
+                        if (chunk.size() >= chunkBytes) {
+                            val pcm = chunk.toByteArray()
+                            chunk.reset()
+                            submitWakeChunk(pcm)
+                        }
+                    } else if (read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_BAD_VALUE) {
+                        PhoneAgentCaptureStatus.setError("语音唤醒录音失败：AudioRecord 读取错误 $read。")
+                        stopWakeListener()
+                        return@launch
+                    }
+                }
+            } finally {
+                runCatching { record.stop() }
+                runCatching { record.release() }
+                if (wakeAudioRecord === record) {
+                    wakeAudioRecord = null
+                }
+            }
+        }
+    }
+
+    private fun submitWakeChunk(pcmAudio: ByteArray) {
+        if (!wakeListening || !wakeTranscriptionInFlight.compareAndSet(false, true)) return
+        serviceScope.launch {
+            PhoneAgentCaptureStatus.update {
+                it.copy(statusText = "语音唤醒正在转写最近 ${WAKE_CHUNK_SECONDS} 秒音频...")
+            }
+            refreshForeground()
+            runCatching { repository.transcribePcmAudio(pcmAudio) }
+                .onSuccess { text ->
+                    handleWakeText(text)
+                }
+                .onFailure { error ->
+                    val rawMessage = error.message.orEmpty()
+                    if (rawMessage.contains("stt_failed", ignoreCase = true)) {
+                        PhoneAgentCaptureStatus.update {
+                            it.copy(
+                                statusText = "语音唤醒监听中：未识别到有效语音。",
+                                lastWakeText = null,
+                            )
+                        }
+                    } else {
+                        PhoneAgentCaptureStatus.setError(
+                            "语音唤醒转写失败：${rawMessage.ifBlank { error.javaClass.simpleName }}",
+                        )
+                        stopWakeListener()
+                    }
+                }
+            wakeTranscriptionInFlight.set(false)
+            refreshForeground()
+        }
+    }
+
+    private fun handleWakeText(text: String) {
+        val recognized = text.trim()
+        if (recognized.isBlank()) {
+            PhoneAgentCaptureStatus.update {
+                it.copy(statusText = "语音唤醒监听中：未识别到有效语音。", lastWakeText = null)
             }
             refreshForeground()
             return
         }
-        val match = texts.firstNotNullOfOrNull { text ->
-            val phrase = WAKE_PHRASES.firstOrNull { phrase ->
-                text.contains(phrase, ignoreCase = true)
-            }
-            if (phrase == null) null else text to phrase
+        val phrase = WAKE_PHRASES.firstOrNull { phrase ->
+            recognized.contains(phrase, ignoreCase = true)
         }
-        if (match == null) {
-            val recognized = texts.joinToString(" / ")
+        if (phrase == null) {
             PhoneAgentCaptureStatus.update {
                 it.copy(statusText = "语音唤醒监听中：上次识别未命中。", lastWakeText = recognized)
             }
             refreshForeground()
             return
         }
-        val (text, phrase) = match
-        val command = text.substringAfter(phrase, missingDelimiterValue = "").trim(' ', '，', ',', '。')
+        val command = recognized.substringAfter(phrase, missingDelimiterValue = "").trim(' ', '，', ',', '。')
         val messageText = if (command.isNotBlank()) {
             "语音唤醒：$command"
         } else {
-            "语音唤醒已触发。识别文本：$text"
+            "语音唤醒已触发。识别文本：$recognized"
         }
         PhoneAgentCaptureStatus.update {
-            it.copy(statusText = "语音唤醒已触发，正在发送。", lastWakeText = text, lastError = null)
+            it.copy(statusText = "语音唤醒已触发，正在发送。", lastWakeText = recognized, lastError = null)
         }
         refreshForeground()
         serviceScope.launch {
@@ -399,35 +435,6 @@ class PhoneAgentCaptureService : LifecycleService() {
                 }
             refreshForeground()
         }
-    }
-
-    private fun scheduleWakeRestart(delayMs: Long) {
-        wakeRestartRunnable?.let { mainHandler.removeCallbacks(it) }
-        val runnable = Runnable {
-            val recognizer = wakeRecognizer
-            if (wakeListening && recognizer != null) {
-                startWakeRecognizer(recognizer)
-            }
-        }
-        wakeRestartRunnable = runnable
-        mainHandler.postDelayed(runnable, delayMs)
-    }
-
-    private fun scheduleWakeReadyTimeout() {
-        cancelWakeReadyTimeout()
-        val runnable = Runnable {
-            if (!wakeListening) return@Runnable
-            val message = "系统语音识别服务启动后没有进入收音状态，语音唤醒不可用。"
-            PhoneAgentCaptureStatus.setError(message)
-            stopWakeListener()
-        }
-        wakeReadyTimeoutRunnable = runnable
-        mainHandler.postDelayed(runnable, WAKE_READY_TIMEOUT_MS)
-    }
-
-    private fun cancelWakeReadyTimeout() {
-        wakeReadyTimeoutRunnable?.let { mainHandler.removeCallbacks(it) }
-        wakeReadyTimeoutRunnable = null
     }
 
     private fun refreshForeground() {
@@ -538,21 +545,6 @@ class PhoneAgentCaptureService : LifecycleService() {
         }
     }
 
-    private fun wakeSpeechErrorMessage(error: Int): String {
-        return when (error) {
-            SpeechRecognizer.ERROR_AUDIO -> "麦克风录音错误"
-            SpeechRecognizer.ERROR_CLIENT -> "识别客户端错误"
-            SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "缺少麦克风权限"
-            SpeechRecognizer.ERROR_NETWORK -> "网络不可用"
-            SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "网络超时"
-            SpeechRecognizer.ERROR_NO_MATCH -> "没有命中唤醒词"
-            SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "识别服务正忙"
-            SpeechRecognizer.ERROR_SERVER -> "识别服务错误"
-            SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "没有听到语音"
-            else -> "识别错误码 $error"
-        }
-    }
-
     companion object {
         const val ACTION_START_BACKGROUND_CAPTURE = "com.audiobridge.client.phoneagent.START_BACKGROUND_CAPTURE"
         const val ACTION_START_FRAME_STREAM = "com.audiobridge.client.phoneagent.START_FRAME_STREAM"
@@ -567,7 +559,8 @@ class PhoneAgentCaptureService : LifecycleService() {
         private const val NOTIFICATION_ID = 6001
         private const val BACKGROUND_CAPTURE_INTERVAL_MS = 30_000L
         private const val FRAME_STREAM_INTERVAL_MS = 3_000L
-        private const val WAKE_READY_TIMEOUT_MS = 8_000L
+        private const val WAKE_SAMPLE_RATE_HZ = 16_000
+        private const val WAKE_CHUNK_SECONDS = 5
         private val WAKE_PHRASES = listOf("小助手", "你好助手", "手机助手", "phone agent")
 
         fun intent(context: Context, action: String): Intent {

@@ -3,15 +3,14 @@ package com.audiobridge.client.phoneagent.ui
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.speech.RecognitionListener
-import android.speech.SpeechRecognizer
-import android.speech.RecognizerIntent
 import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -99,9 +98,13 @@ import com.audiobridge.client.phoneagent.service.PhoneAgentCaptureService
 import com.audiobridge.client.phoneagent.service.PhoneAgentCaptureStatus
 import com.audiobridge.client.phoneagent.service.PhoneAgentCaptureUiState
 import com.audiobridge.client.phoneagent.worker.PhoneAgentSyncScheduler
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import okhttp3.WebSocket
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -109,6 +112,7 @@ import java.util.Date
 import java.util.Locale
 
 private const val SPEECH_INPUT_TIMEOUT_MS = 15_000L
+private const val SPEECH_INPUT_SAMPLE_RATE_HZ = 16_000
 
 class PhoneAgentActivity : ComponentActivity() {
     private lateinit var repository: MessageRepository
@@ -118,8 +122,12 @@ class PhoneAgentActivity : ComponentActivity() {
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var ttsErrorMessage: String? = null
-    private var speechRecognizer: SpeechRecognizer? = null
+    private var speechInputRecord: AudioRecord? = null
+    private var speechInputJob: Job? = null
+    @Volatile
     private var speechListening = false
+    @Volatile
+    private var speechInputShouldSubmit = false
     private val speechHandler = Handler(Looper.getMainLooper())
     private var speechTimeoutRunnable: Runnable? = null
     private var audioRecorder: MediaRecorder? = null
@@ -173,6 +181,7 @@ class PhoneAgentActivity : ComponentActivity() {
             var pendingCaptureServiceAction by remember { mutableStateOf<String?>(null) }
             var lastReportedFailureId by remember { mutableStateOf<String?>(null) }
             var lastReportedCaptureError by remember { mutableStateOf<String?>(null) }
+            val activityStartedAtMs = remember { System.currentTimeMillis() }
             val scope = rememberCoroutineScope()
 
             fun sendPlainText(text: String) {
@@ -280,6 +289,7 @@ class PhoneAgentActivity : ComponentActivity() {
                     healthText = "正在听语音..."
                     activity.startSpeechInput(
                         onText = { sendPlainText(it) },
+                        onStatus = { healthText = it },
                         reportIssue = {
                             healthText = it
                             issueText = it
@@ -364,10 +374,13 @@ class PhoneAgentActivity : ComponentActivity() {
                         .onSuccess { file ->
                             audioRecording = false
                             healthText = "录音已保存：${file.name}"
-                            uploadAudioAndSend(file, prompt)
+                            val audioPrompt = pendingAudioPrompt.ifBlank { prompt }
+                            pendingAudioPrompt = ""
+                            uploadAudioAndSend(file, audioPrompt)
                         }
                         .onFailure {
                             audioRecording = false
+                            pendingAudioPrompt = ""
                             issueText = "停止录音失败：${it.message ?: it.javaClass.simpleName}"
                         }
                     return
@@ -407,8 +420,9 @@ class PhoneAgentActivity : ComponentActivity() {
             }
             LaunchedEffect(messages.lastOrNull()?.messageId, messages.lastOrNull()?.bridgeStatus, messages.lastOrNull()?.errorMessage) {
                 val failed = messages.lastOrNull {
-                    it.bridgeStatus == BridgeMessageStatus.FAILED ||
-                        it.localStatus == LocalMessageStatus.FAILED.name
+                    it.updatedAt >= activityStartedAtMs &&
+                        (it.bridgeStatus == BridgeMessageStatus.FAILED ||
+                            it.localStatus == LocalMessageStatus.FAILED.name)
                 }
                 if (failed != null && failed.messageId != lastReportedFailureId) {
                     lastReportedFailureId = failed.messageId
@@ -506,6 +520,7 @@ class PhoneAgentActivity : ComponentActivity() {
                             healthText = "正在听语音..."
                             activity.startSpeechInput(
                                 onText = { sendPlainText(it) },
+                                onStatus = { healthText = it },
                                 reportIssue = {
                                     healthText = it
                                     issueText = it
@@ -544,8 +559,13 @@ class PhoneAgentActivity : ComponentActivity() {
                     onClearLocalData = {
                         busy = true
                         scope.launch {
-                            repository.clearLocalData()
-                            healthText = "本地数据已清空"
+                            runCatching { repository.clearLocalData() }
+                                .onSuccess {
+                                    healthText = "本地数据已清空"
+                                }
+                                .onFailure {
+                                    issueText = "清空本地数据失败：${it.message ?: it.javaClass.simpleName}"
+                                }
                             busy = false
                         }
                     },
@@ -568,102 +588,163 @@ class PhoneAgentActivity : ComponentActivity() {
         tts = null
         ttsReady = false
         ttsErrorMessage = null
-        finishSpeechListening()
-        speechRecognizer?.destroy()
-        speechRecognizer = null
+        stopSpeechInputRecording(submit = false)
+        speechInputJob?.cancel()
+        speechInputJob = null
+        runCatching { speechInputRecord?.release() }
+        speechInputRecord = null
         releaseAudioRecorder()
         super.onDestroy()
     }
 
     private fun startSpeechInput(
         onText: (String) -> Unit,
+        onStatus: (String) -> Unit,
         reportIssue: (String) -> Unit,
     ) {
         if (speechListening) {
-            speechRecognizer?.cancel()
-            finishSpeechListening()
-            reportIssue("语音输入已停止。")
+            stopSpeechInputRecording(submit = true)
+            onStatus("语音输入录音结束，正在转写...")
             return
         }
-        if (!SpeechRecognizer.isRecognitionAvailable(this)) {
-            reportIssue("系统没有可用的语音识别服务。")
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            SPEECH_INPUT_SAMPLE_RATE_HZ,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (minBufferSize <= 0) {
+            reportIssue("语音输入启动失败：设备不支持 16kHz 单声道 PCM 录音。")
             return
         }
-        val recognizer = speechRecognizer ?: SpeechRecognizer.createSpeechRecognizer(this).also {
-            speechRecognizer = it
+        val record = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                SPEECH_INPUT_SAMPLE_RATE_HZ,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                maxOf(minBufferSize, SPEECH_INPUT_SAMPLE_RATE_HZ * 2),
+            )
+        } catch (error: SecurityException) {
+            reportIssue("语音输入启动失败：缺少麦克风权限。")
+            return
+        } catch (error: Exception) {
+            reportIssue("语音输入启动失败：${error.message ?: error.javaClass.simpleName}")
+            return
         }
-        recognizer.setRecognitionListener(
-            object : RecognitionListener {
-                override fun onReadyForSpeech(params: Bundle?) = Unit
-                override fun onBeginningOfSpeech() = Unit
-                override fun onRmsChanged(rmsdB: Float) = Unit
-                override fun onBufferReceived(buffer: ByteArray?) = Unit
-                override fun onEndOfSpeech() = Unit
-                override fun onPartialResults(partialResults: Bundle?) = Unit
-                override fun onEvent(eventType: Int, params: Bundle?) = Unit
+        if (record.state != AudioRecord.STATE_INITIALIZED) {
+            runCatching { record.release() }
+            reportIssue("语音输入启动失败：麦克风录音器初始化失败。")
+            return
+        }
+        try {
+            record.startRecording()
+        } catch (error: SecurityException) {
+            runCatching { record.release() }
+            reportIssue("语音输入启动失败：缺少麦克风权限。")
+            return
+        } catch (error: Exception) {
+            runCatching { record.release() }
+            reportIssue("语音输入启动失败：${error.message ?: error.javaClass.simpleName}")
+            return
+        }
 
-                override fun onError(error: Int) {
-                    speechHandler.post {
-                        if (!speechListening) return@post
-                        finishSpeechListening()
-                        reportIssue(speechErrorMessage(error))
-                    }
-                }
-
-                override fun onResults(results: Bundle?) {
-                    val text = results
-                        ?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        ?.firstOrNull()
-                        ?.trim()
-                        .orEmpty()
-                    speechHandler.post {
-                        if (!speechListening) return@post
-                        finishSpeechListening()
-                        if (text.isBlank()) {
-                            reportIssue("没有识别到可发送的语音内容。")
-                        } else {
-                            onText(text)
-                        }
-                    }
+        speechInputRecord = record
+        speechListening = true
+        speechInputShouldSubmit = true
+        onStatus("正在录音，15 秒内自动转写；再次点击语音可立即转写。")
+        scheduleSpeechTimeout(onStatus)
+        speechInputJob = lifecycleScope.launch {
+            val audioResult = runCatching {
+                withContext(Dispatchers.IO) {
+                    readSpeechInputPcm(record, minBufferSize)
                 }
             }
-        )
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-            .putExtra(
-                RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                RecognizerIntent.LANGUAGE_MODEL_FREE_FORM,
-            )
-            .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-            .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, false)
-        runCatching {
-            recognizer.startListening(intent)
-            speechListening = true
-            scheduleSpeechTimeout(recognizer, reportIssue)
-        }.onFailure {
+            val shouldSubmit = speechInputShouldSubmit
             finishSpeechListening()
-            reportIssue("启动语音输入失败：${it.message ?: it.javaClass.simpleName}")
+            speechInputShouldSubmit = false
+            speechInputJob = null
+            val pcmAudio = audioResult.getOrElse { error ->
+                if (shouldSubmit) {
+                    reportIssue("语音输入录音失败：${error.message ?: error.javaClass.simpleName}")
+                }
+                return@launch
+            }
+            if (!shouldSubmit) {
+                return@launch
+            }
+            if (pcmAudio.isEmpty()) {
+                reportIssue("没有录到有效音频，请重新录音。")
+                return@launch
+            }
+            onStatus("语音输入正在通过 Bridge STT 转写...")
+            runCatching { repository.transcribePcmAudio(pcmAudio) }
+                .onSuccess { text ->
+                    val clean = text.trim()
+                    if (clean.isBlank()) {
+                        reportIssue("没有识别到可发送的语音内容。")
+                    } else {
+                        onStatus("语音输入已识别，正在发送...")
+                        onText(clean)
+                    }
+                }
+                .onFailure { error ->
+                    reportIssue("语音输入转写失败：${error.message ?: error.javaClass.simpleName}")
+                }
         }
     }
 
-    private fun scheduleSpeechTimeout(
-        recognizer: SpeechRecognizer,
-        reportIssue: (String) -> Unit,
-    ) {
+    private fun scheduleSpeechTimeout(onStatus: (String) -> Unit) {
         speechTimeoutRunnable?.let { speechHandler.removeCallbacks(it) }
         val timeout = Runnable {
             if (!speechListening) return@Runnable
-            recognizer.cancel()
-            finishSpeechListening()
-            reportIssue("语音输入超时：没有听到语音。")
+            stopSpeechInputRecording(submit = true)
+            onStatus("语音输入达到 15 秒，正在转写...")
         }
         speechTimeoutRunnable = timeout
         speechHandler.postDelayed(timeout, SPEECH_INPUT_TIMEOUT_MS)
+    }
+
+    private fun stopSpeechInputRecording(submit: Boolean) {
+        speechInputShouldSubmit = submit
+        speechListening = false
+        speechTimeoutRunnable?.let { speechHandler.removeCallbacks(it) }
+        speechTimeoutRunnable = null
+        if (!submit) {
+            runCatching { speechInputRecord?.stop() }
+        }
     }
 
     private fun finishSpeechListening() {
         speechListening = false
         speechTimeoutRunnable?.let { speechHandler.removeCallbacks(it) }
         speechTimeoutRunnable = null
+    }
+
+    private fun readSpeechInputPcm(record: AudioRecord, minBufferSize: Int): ByteArray {
+        val maxBytes = SPEECH_INPUT_SAMPLE_RATE_HZ * (SPEECH_INPUT_TIMEOUT_MS / 1000L).toInt() * 2
+        val readBuffer = ByteArray(minOf(maxOf(minBufferSize, 1024), 4096))
+        val audio = ByteArrayOutputStream(maxBytes)
+        try {
+            while (speechListening && audio.size() < maxBytes) {
+                val remaining = maxBytes - audio.size()
+                val read = record.read(readBuffer, 0, minOf(readBuffer.size, remaining))
+                when {
+                    read > 0 -> audio.write(readBuffer, 0, read)
+                    read == 0 -> Unit
+                    !speechListening -> Unit
+                    read == AudioRecord.ERROR_INVALID_OPERATION ||
+                        read == AudioRecord.ERROR_BAD_VALUE -> throw IOException("AudioRecord 读取错误 $read")
+                    else -> throw IOException("AudioRecord 读取失败 $read")
+                }
+            }
+        } finally {
+            runCatching { record.stop() }
+            runCatching { record.release() }
+            if (speechInputRecord === record) {
+                speechInputRecord = null
+            }
+        }
+        return audio.toByteArray()
     }
 
     private fun createPhoneAgentPhotoFile(): File {
@@ -1149,7 +1230,7 @@ private fun CaptureScreen(
         }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedButton(
-                onClick = { onToggleAudioRecording(prompt.ifBlank { "录音已保存并上传为音频附件。当前不会伪造转写内容。" }) },
+                onClick = { onToggleAudioRecording(audioPromptForCapturePrompt(prompt)) },
                 enabled = !busy,
                 shape = RoundedCornerShape(6.dp),
                 modifier = Modifier.weight(1f),
@@ -1662,6 +1743,18 @@ private fun SettingsScreen(
     }
 }
 
+private const val DEFAULT_IMAGE_PROMPT = "请分析这张图片。"
+private const val DEFAULT_AUDIO_PROMPT = "录音已保存并上传为音频附件。当前不会伪造转写内容。"
+
+private fun audioPromptForCapturePrompt(prompt: String): String {
+    val clean = prompt.trim()
+    return if (clean.isBlank() || clean == DEFAULT_IMAGE_PROMPT) {
+        DEFAULT_AUDIO_PROMPT
+    } else {
+        clean
+    }
+}
+
 private fun statusLine(message: MessageEntity): String {
     val local = message.localStatus.lowercase()
     val bridge = message.bridgeStatus.lowercase()
@@ -1673,21 +1766,6 @@ private fun canRetry(message: MessageEntity): Boolean {
     return message.localStatus == LocalMessageStatus.PENDING.name ||
         message.localStatus == LocalMessageStatus.FAILED.name ||
         message.bridgeStatus == BridgeMessageStatus.FAILED
-}
-
-private fun speechErrorMessage(error: Int): String {
-    return when (error) {
-        SpeechRecognizer.ERROR_AUDIO -> "语音输入失败：麦克风录音错误。"
-        SpeechRecognizer.ERROR_CLIENT -> "语音输入失败：识别客户端错误。"
-        SpeechRecognizer.ERROR_INSUFFICIENT_PERMISSIONS -> "语音输入失败：缺少麦克风权限。"
-        SpeechRecognizer.ERROR_NETWORK -> "语音输入失败：网络不可用。"
-        SpeechRecognizer.ERROR_NETWORK_TIMEOUT -> "语音输入失败：网络超时。"
-        SpeechRecognizer.ERROR_NO_MATCH -> "没有识别到可发送的语音内容。"
-        SpeechRecognizer.ERROR_RECOGNIZER_BUSY -> "语音输入失败：识别服务正忙。"
-        SpeechRecognizer.ERROR_SERVER -> "语音输入失败：识别服务错误。"
-        SpeechRecognizer.ERROR_SPEECH_TIMEOUT -> "语音输入超时：没有听到语音。"
-        else -> "语音输入失败：错误码 $error。"
-    }
 }
 
 private fun requiredPermissionsForCaptureAction(action: String): List<String> {

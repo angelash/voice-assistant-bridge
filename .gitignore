@@ -27,11 +27,20 @@ coverage.xml
 htmlcov/
 
 # Local runtime files
+config.json
 *.log
 *.tmp
 *.temp
+.tmp_*
+temp_*.xml
 test_output.mp3
-bridge_state.db
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+android/window_dump*.xml
+artifacts/
 
 # IDE/editor
 .vscode/
@@ -42,4 +51,3 @@ bridge_state.db
 # OS files
 .DS_Store
 Thumbs.db
-artifacts/meetings/

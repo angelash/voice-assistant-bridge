@@ -205,7 +205,6 @@ class ImageAnalysisWorker:
         Run the actual image analysis (called in thread pool).
         
         Attempts to call OpenClaw's image analysis API.
-        Falls back to basic analysis if OpenClaw is unavailable.
         
         Returns dict with analysis results.
         """
@@ -219,16 +218,14 @@ class ImageAnalysisWorker:
         with open(original_path, "rb") as f:
             image_data = f.read()
         
-        # Try to call OpenClaw API first
         try:
             result = self._call_openclaw_api(image_data, image)
             if result:
                 return result
         except Exception as e:
-            logger.warning(f"OpenClaw API call failed: {e}, falling back to basic analysis")
-        
-        # Fallback: basic file-based analysis
-        return self._basic_analysis(image_data, image)
+            raise RuntimeError(f"OpenClaw image analysis failed: {e}") from e
+
+        raise RuntimeError("OpenClaw image analysis returned no result")
 
     def _call_openclaw_api(self, image_data: bytes, image: dict) -> Optional[dict]:
         """
@@ -269,76 +266,11 @@ class ImageAnalysisWorker:
                 return None
                 
         except requests.exceptions.ConnectionError:
-            logger.debug("OpenClaw API not available, using fallback")
+            logger.debug("OpenClaw image analysis API not available")
             return None
         except Exception as e:
             logger.warning(f"OpenClaw API error: {e}")
             return None
-
-    def _basic_analysis(self, image_data: bytes, image: dict) -> dict:
-        """
-        Basic fallback analysis when OpenClaw is unavailable.
-        
-        Provides basic metadata and placeholder analysis.
-        """
-        import hashlib
-        
-        # Basic metadata
-        filename = image.get("filename", "unknown")
-        size_bytes = len(image_data)
-        width = image.get("width")
-        height = image.get("height")
-        fmt = image.get("format", "unknown")
-        
-        # Compute image hash for identification
-        image_hash = hashlib.sha256(image_data).hexdigest()[:16]
-        
-        # Basic format detection
-        format_info = self._detect_image_format(image_data)
-        
-        return {
-            "description": f"Meeting image: {filename}",
-            "labels": ["meeting-image", "uploaded"],
-            "metadata": {
-                "filename": filename,
-                "size_bytes": size_bytes,
-                "width": width,
-                "height": height,
-                "format": fmt,
-                "hash": image_hash,
-            },
-            "format_detected": format_info,
-            "analysis_source": "fallback",
-            "analysis_note": "Basic analysis - OpenClaw not available. For detailed analysis, ensure OpenClaw is running.",
-            "analyzed_at": now_iso(),
-        }
-
-    def _detect_image_format(self, data: bytes) -> dict:
-        """Detect image format from magic bytes."""
-        if len(data) < 12:
-            return {"format": "unknown", "confidence": 0}
-        
-        # PNG
-        if data[:8] == b'\x89PNG\r\n\x1a\n':
-            return {"format": "png", "confidence": 1.0}
-        
-        # JPEG
-        if data[:2] == b'\xff\xd8':
-            return {"format": "jpeg", "confidence": 1.0}
-        
-        # WebP
-        if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
-            return {"format": "webp", "confidence": 1.0}
-        
-        # GIF
-        if data[:6] in (b'GIF87a', b'GIF89a'):
-            return {"format": "gif", "confidence": 1.0}
-        
-        # BMP
-        if data[:2] == b'BM':
-            return {"format": "bmp", "confidence": 1.0}
-        
-        return {"format": "unknown", "confidence": 0}
 
 
 async def analyze_image_via_openclaw(

@@ -15,6 +15,7 @@ import mimetypes
 import os
 import re
 import sqlite3
+import subprocess
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -86,6 +87,56 @@ def load_config() -> dict[str, Any]:
     except Exception as exc:
         logger.warning("read config failed: %s", exc)
         return {}
+
+
+def _extract_openclaw_gateway_token(config_text: str) -> str:
+    try:
+        data = json.loads(config_text)
+    except Exception:
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    gateway = data.get("gateway")
+    if not isinstance(gateway, dict):
+        return ""
+    auth = gateway.get("auth")
+    if not isinstance(auth, dict):
+        return ""
+    token = auth.get("token")
+    return token.strip() if isinstance(token, str) else ""
+
+
+def load_local_openclaw_gateway_token() -> str:
+    candidates = [
+        Path.home() / ".openclaw" / "openclaw.json",
+    ]
+    for path in candidates:
+        try:
+            token = _extract_openclaw_gateway_token(path.read_text(encoding="utf-8"))
+        except Exception:
+            token = ""
+        if token:
+            return token
+
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                [
+                    "wsl.exe",
+                    "--exec",
+                    "bash",
+                    "-lc",
+                    "python3 - <<'PY'\nimport json, pathlib\np=pathlib.Path.home()/'.openclaw'/'openclaw.json'\ntry:\n    data=json.loads(p.read_text())\n    print(((data.get('gateway') or {}).get('auth') or {}).get('token') or '')\nexcept Exception:\n    print('')\nPY",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            return (result.stdout or "").strip().splitlines()[-1].strip()
+        except Exception:
+            return ""
+    return ""
 
 
 def source_label(source: str) -> str:
@@ -659,7 +710,7 @@ class VoiceAssistantServer:
         self.openclaw_image_token = os.getenv(
             "VOICE_OPENCLAW_IMAGE_TOKEN",
             cfg.get("openclaw_image_token", self.openclaw.token),
-        )
+        ).strip() or load_local_openclaw_gateway_token()
 
         # V2 Meeting Mode
         self.meeting_store = MeetingStore(db_path)
