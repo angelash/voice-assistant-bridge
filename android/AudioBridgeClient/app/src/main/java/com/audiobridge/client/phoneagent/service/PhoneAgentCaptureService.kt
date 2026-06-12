@@ -58,6 +58,8 @@ class PhoneAgentCaptureService : LifecycleService() {
     private var wakeAudioRecord: AudioRecord? = null
     private var wakeLoopJob: Job? = null
     private val wakeTranscriptionInFlight = AtomicBoolean(false)
+    private var wakeSilentChunksSkipped = 0
+    private var lastWakeTriggerAtMs = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -238,6 +240,8 @@ class PhoneAgentCaptureService : LifecycleService() {
         }
         if (wakeLoopJob?.isActive == true) return
         wakeListening = true
+        wakeSilentChunksSkipped = 0
+        lastWakeTriggerAtMs = 0L
         PhoneAgentCaptureStatus.update {
             it.copy(
                 wakeListening = true,
@@ -255,6 +259,8 @@ class PhoneAgentCaptureService : LifecycleService() {
         wakeLoopJob?.cancel()
         wakeLoopJob = null
         wakeTranscriptionInFlight.set(false)
+        wakeSilentChunksSkipped = 0
+        lastWakeTriggerAtMs = 0L
         runCatching { wakeAudioRecord?.stop() }
         runCatching { wakeAudioRecord?.release() }
         wakeAudioRecord = null
@@ -356,10 +362,31 @@ class PhoneAgentCaptureService : LifecycleService() {
     }
 
     private fun submitWakeChunk(pcmAudio: ByteArray) {
+        val remainingCooldownMs = wakeCooldownRemainingMs()
+        if (remainingCooldownMs > 0L) {
+            PhoneAgentCaptureStatus.update {
+                it.copy(statusText = "语音唤醒冷却中，${(remainingCooldownMs + 999L) / 1000L} 秒后恢复监听。")
+            }
+            refreshForeground()
+            return
+        }
+        val decision = WakeAudioGate.evaluate(pcmAudio)
+        if (!decision.shouldTranscribe) {
+            wakeSilentChunksSkipped += 1
+            PhoneAgentCaptureStatus.update {
+                it.copy(
+                    statusText = "语音唤醒监听中：环境较安静，已跳过 $wakeSilentChunksSkipped 个无声分片。",
+                    lastWakeText = null,
+                )
+            }
+            refreshForeground()
+            return
+        }
         if (!wakeListening || !wakeTranscriptionInFlight.compareAndSet(false, true)) return
+        wakeSilentChunksSkipped = 0
         serviceScope.launch {
             PhoneAgentCaptureStatus.update {
-                it.copy(statusText = "语音唤醒正在转写最近 ${WAKE_CHUNK_SECONDS} 秒音频...")
+                it.copy(statusText = "语音唤醒正在转写最近 ${WAKE_CHUNK_SECONDS} 秒音频，能量 ${decision.avgAbs}。")
             }
             refreshForeground()
             runCatching { repository.transcribePcmAudio(pcmAudio) }
@@ -387,6 +414,11 @@ class PhoneAgentCaptureService : LifecycleService() {
         }
     }
 
+    private fun wakeCooldownRemainingMs(nowMs: Long = SystemClock.elapsedRealtime()): Long {
+        if (lastWakeTriggerAtMs <= 0L) return 0L
+        return (lastWakeTriggerAtMs + WAKE_TRIGGER_COOLDOWN_MS - nowMs).coerceAtLeast(0L)
+    }
+
     private fun handleWakeText(text: String) {
         val recognized = text.trim()
         if (recognized.isBlank()) {
@@ -406,12 +438,24 @@ class PhoneAgentCaptureService : LifecycleService() {
             refreshForeground()
             return
         }
+        val remainingCooldownMs = wakeCooldownRemainingMs()
+        if (remainingCooldownMs > 0L) {
+            PhoneAgentCaptureStatus.update {
+                it.copy(
+                    statusText = "语音唤醒冷却中，忽略重复命中。",
+                    lastWakeText = recognized,
+                )
+            }
+            refreshForeground()
+            return
+        }
         val command = recognized.substringAfter(phrase, missingDelimiterValue = "").trim(' ', '，', ',', '。')
         val messageText = if (command.isNotBlank()) {
             "语音唤醒：$command"
         } else {
             "语音唤醒已触发。识别文本：$recognized"
         }
+        lastWakeTriggerAtMs = SystemClock.elapsedRealtime()
         PhoneAgentCaptureStatus.update {
             it.copy(statusText = "语音唤醒已触发，正在发送。", lastWakeText = recognized, lastError = null)
         }
@@ -561,6 +605,7 @@ class PhoneAgentCaptureService : LifecycleService() {
         private const val FRAME_STREAM_INTERVAL_MS = 3_000L
         private const val WAKE_SAMPLE_RATE_HZ = 16_000
         private const val WAKE_CHUNK_SECONDS = 5
+        private const val WAKE_TRIGGER_COOLDOWN_MS = 12_000L
         private val WAKE_PHRASES = listOf("小助手", "你好助手", "手机助手", "phone agent")
 
         fun intent(context: Context, action: String): Intent {
