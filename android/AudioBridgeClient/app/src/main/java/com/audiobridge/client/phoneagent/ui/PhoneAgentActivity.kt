@@ -176,6 +176,7 @@ class PhoneAgentActivity : ComponentActivity() {
                 )
             }
             var audioRecording by remember { mutableStateOf(false) }
+            var deviceState by remember { mutableStateOf(AndroidPhoneAgentDeviceState.read(activity)) }
             var pendingPhotoFile by remember { mutableStateOf<File?>(null) }
             var pendingPhotoPrompt by remember { mutableStateOf("请分析这张图片。") }
             var pendingAudioPrompt by remember { mutableStateOf("") }
@@ -424,6 +425,12 @@ class PhoneAgentActivity : ComponentActivity() {
                     delay(2500)
                 }
             }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    deviceState = AndroidPhoneAgentDeviceState.read(activity)
+                    delay(5000)
+                }
+            }
             LaunchedEffect(messages.lastOrNull()?.messageId, messages.lastOrNull()?.bridgeStatus, messages.lastOrNull()?.errorMessage) {
                 val failed = messages.lastOrNull {
                     it.updatedAt >= activityStartedAtMs &&
@@ -451,6 +458,7 @@ class PhoneAgentActivity : ComponentActivity() {
                     healthText = healthText,
                     eventText = eventText,
                     issueText = issueText,
+                    deviceState = deviceState,
                     busy = busy,
                     cameraPermissionGranted = cameraPermissionGranted,
                     audioRecording = audioRecording,
@@ -981,6 +989,7 @@ class PhoneAgentActivity : ComponentActivity() {
 private enum class PhoneAgentTab(val title: String) {
     Chat("聊天"),
     Capture("采集"),
+    Diagnostics("诊断"),
     Settings("设置"),
 }
 
@@ -1010,6 +1019,7 @@ private fun PhoneAgentApp(
     healthText: String,
     eventText: String,
     issueText: String?,
+    deviceState: com.audiobridge.client.phoneagent.policy.PhoneAgentDeviceState,
     busy: Boolean,
     cameraPermissionGranted: Boolean,
     audioRecording: Boolean,
@@ -1125,6 +1135,14 @@ private fun PhoneAgentApp(
                     onStopCameraCapture = onStopCameraCapture,
                     onStartWakeListener = onStartWakeListener,
                     onStopWakeListener = onStopWakeListener,
+                )
+                PhoneAgentTab.Diagnostics -> DiagnosticsScreen(
+                    settings = settings,
+                    messages = messages,
+                    captureState = captureState,
+                    deviceState = deviceState,
+                    healthText = healthText,
+                    eventText = eventText,
                 )
                 PhoneAgentTab.Settings -> SettingsScreen(
                     initialSettings = settings,
@@ -1321,6 +1339,116 @@ private fun CaptureScreen(
                 Text("停唤醒", maxLines = 1)
             }
         }
+    }
+}
+
+@Composable
+private fun DiagnosticsScreen(
+    settings: AppSettings,
+    messages: List<MessageEntity>,
+    captureState: PhoneAgentCaptureUiState,
+    deviceState: com.audiobridge.client.phoneagent.policy.PhoneAgentDeviceState,
+    healthText: String,
+    eventText: String,
+) {
+    val pending = messages.count { it.localStatus == LocalMessageStatus.PENDING.name }
+    val sending = messages.count { it.localStatus == LocalMessageStatus.SENDING.name }
+    val failed = messages.count {
+        it.localStatus == LocalMessageStatus.FAILED.name || it.bridgeStatus == BridgeMessageStatus.FAILED
+    }
+    val delivered = messages.count { it.bridgeStatus == BridgeMessageStatus.DELIVERED }
+    val networkDecision = PhoneAgentPolicy.networkUse(settings, deviceState)
+    val captureDecision = PhoneAgentPolicy.captureStart(settings, deviceState)
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(8.dp),
+            tonalElevation = 1.dp,
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("链路", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                DiagnosticLine("Bridge", healthText)
+                DiagnosticLine("事件流", eventText)
+                DiagnosticLine("当前会话", settings.sessionId)
+                DiagnosticLine("Client", settings.clientId)
+            }
+        }
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(8.dp),
+            tonalElevation = 1.dp,
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("队列", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                DiagnosticLine("消息总数", messages.size.toString())
+                DiagnosticLine("待发送", pending.toString())
+                DiagnosticLine("发送中", sending.toString())
+                DiagnosticLine("已完成", delivered.toString())
+                DiagnosticLine("失败", failed.toString())
+            }
+        }
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(8.dp),
+            tonalElevation = 1.dp,
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("设备策略", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                DiagnosticLine("网络", if (deviceState.networkConnected) "已连接" else "未连接")
+                DiagnosticLine("网络类型", if (deviceState.networkMetered) "计量/移动网络" else "非计量网络")
+                DiagnosticLine("电源", if (deviceState.charging) "充电中/满电" else "电池供电")
+                DiagnosticLine("同步策略", if (networkDecision.allowed) "允许" else networkDecision.reason)
+                DiagnosticLine("采集策略", if (captureDecision.allowed) "允许" else captureDecision.reason)
+            }
+        }
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(8.dp),
+            tonalElevation = 1.dp,
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("采集", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                val modeText = when (captureState.cameraMode) {
+                    PhoneAgentCaptureService.MODE_BACKGROUND_CAPTURE -> "持续后台采集"
+                    PhoneAgentCaptureService.MODE_FRAME_STREAM -> "实时视频帧流"
+                    null -> "未运行"
+                    else -> captureState.cameraMode
+                }
+                DiagnosticLine("相机", modeText)
+                DiagnosticLine("语音唤醒", if (captureState.wakeListening) "监听中" else "未运行")
+                DiagnosticLine("最近状态", captureState.statusText)
+                if (!captureState.lastError.isNullOrBlank()) {
+                    DiagnosticLine("最近错误", captureState.lastError)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticLine(label: String, value: String) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.SemiBold,
+        )
+        Text(
+            value.ifBlank { "无" },
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
     }
 }
 
