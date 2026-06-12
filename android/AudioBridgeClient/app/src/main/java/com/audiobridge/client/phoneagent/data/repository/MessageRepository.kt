@@ -229,9 +229,11 @@ class MessageRepository private constructor(
     suspend fun applyEvent(event: BridgeEvent) = withContext(Dispatchers.IO) {
         if (event.messageId.isBlank()) return@withContext
         var shouldFetchDeliveredStatus = false
+        var shouldDropPending = false
         messageUpdateMutex.withLock {
             val current = messageDao.get(event.messageId) ?: return@withLock
             val eventStatus = event.status?.ifBlank { null } ?: statusFromEventType(event.eventType)
+            shouldDropPending = eventStatus != null
             var nextLocalReply = current.localReply
             var nextFinalReply = current.finalReply
             if (!event.text.isNullOrBlank()) {
@@ -259,6 +261,9 @@ class MessageRepository private constructor(
         }
         if (shouldFetchDeliveredStatus) {
             refreshMessageStatus(event.messageId)
+        }
+        if (shouldDropPending) {
+            pendingDao.delete(event.messageId)
         }
     }
 
@@ -307,6 +312,10 @@ class MessageRepository private constructor(
     private suspend fun trySendPending(messageId: String, scheduleOnFailure: Boolean): Boolean {
         var pending = pendingDao.get(messageId) ?: return true
         val message = messageDao.get(messageId) ?: run {
+            pendingDao.delete(messageId)
+            return true
+        }
+        if (PendingRequestPruner.shouldDropConfirmedPending(message.localStatus, message.bridgeStatus)) {
             pendingDao.delete(messageId)
             return true
         }
@@ -439,6 +448,9 @@ class MessageRepository private constructor(
                     updatedAt = System.currentTimeMillis(),
                 )
             )
+            if (PendingRequestPruner.shouldDropForBridgePayload(bridgeStatus)) {
+                pendingDao.delete(payload.messageId)
+            }
         }
     }
 
