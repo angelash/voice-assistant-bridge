@@ -110,7 +110,7 @@ class MessageRepository private constructor(
         if (!file.exists() || file.length() <= 0L) {
             throw IOException("录音文件不存在或为空")
         }
-        val cleanText = text.trim().ifBlank { "录音已保存并上传为音频附件。当前不会伪造转写内容。" }
+        val cleanText = text.trim().ifBlank { "请转写并分析这段录音。" }
         sendArtifactMessage(
             file = file,
             text = cleanText,

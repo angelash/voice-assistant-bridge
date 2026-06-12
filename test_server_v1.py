@@ -9,6 +9,7 @@ from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
 
 from server import (
+    STATUS_DELIVERED,
     STATUS_FAILED,
     STATUS_WAITING_OPENCLAW,
     Store,
@@ -215,6 +216,55 @@ class TestArtifactApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(linked))
         self.assertEqual(artifact_id, linked[0]["artifact_id"])
         self.assertEqual("audio", linked[0]["artifact_type"])
+
+    async def test_audio_artifact_is_transcribed_before_openclaw_reply(self):
+        audio_bytes = b"\x00\x00\x00\x18ftypM4A \x00\x00\x00\x00M4A mp42isom"
+        form = FormData()
+        form.add_field("artifact_type", "audio")
+        form.add_field("client_id", "android-phone")
+        form.add_field("session_id", "daily-agent-test")
+        form.add_field("source", "android")
+        form.add_field("file", audio_bytes, filename="recording.m4a", content_type="audio/mp4")
+        upload_resp = await self.client.post("/v1/artifacts", data=form)
+        upload = await upload_resp.json()
+        artifact_id = upload["artifact_id"]
+        seen = {}
+
+        async def fake_transcribe_audio_file(path):
+            seen["audio_path"] = str(path)
+            return "今天晚上七点提醒我复盘 Phone Agent。"
+
+        async def fake_chat(text, session_id, message_id, timeout_sec):
+            seen["chat_text"] = text
+            seen["session_id"] = session_id
+            seen["message_id"] = message_id
+            seen["timeout_sec"] = timeout_sec
+            return "已根据录音安排复盘提醒。"
+
+        self.server.openclaw.base_url = "http://openclaw.test"
+        self.server.transcribe_audio_file = fake_transcribe_audio_file
+        self.server.openclaw.chat = fake_chat
+
+        row, deduped = await self.server.submit(
+            text="请处理这段录音。",
+            client_id="android-phone",
+            session_id="daily-agent-test",
+            source="android",
+            artifacts=[{"artifact_id": artifact_id, "type": "audio"}],
+            message_id="msg-audio-transcribe",
+            wait_terminal=True,
+        )
+
+        self.assertFalse(deduped)
+        self.assertEqual(STATUS_DELIVERED, row["status"])
+        self.assertIn("用户原始提示", seen["chat_text"])
+        self.assertIn("请处理这段录音。", seen["chat_text"])
+        self.assertIn("今天晚上七点提醒我复盘 Phone Agent。", seen["chat_text"])
+        self.assertEqual("daily-agent-test", seen["session_id"])
+        self.assertEqual("msg-audio-transcribe", seen["message_id"])
+        stored = self.server.store.get_artifact(artifact_id)
+        self.assertIsNotNone(stored)
+        self.assertIn("今天晚上七点提醒我复盘", stored["meta_json"])
 
     async def test_audio_transcription_returns_text_only(self):
         async def fake_transcribe(audio_data):

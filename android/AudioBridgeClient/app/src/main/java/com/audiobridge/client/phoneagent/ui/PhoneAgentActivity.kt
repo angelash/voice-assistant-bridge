@@ -1528,7 +1528,7 @@ private fun ChatInputBar(
         keyboard?.hide()
     }
     fun recordAudio() {
-        val prompt = text.trim().ifBlank { "录音已保存并上传为音频附件。当前不会伪造转写内容。" }
+        val prompt = text.trim().ifBlank { "请转写并分析这段录音。" }
         onToggleAudioRecording(prompt)
         if (audioRecording) {
             text = ""
@@ -1744,7 +1744,7 @@ private fun SettingsScreen(
 }
 
 private const val DEFAULT_IMAGE_PROMPT = "请分析这张图片。"
-private const val DEFAULT_AUDIO_PROMPT = "录音已保存并上传为音频附件。当前不会伪造转写内容。"
+private const val DEFAULT_AUDIO_PROMPT = "请转写并分析这段录音。"
 
 private fun audioPromptForCapturePrompt(prompt: String): String {
     val clean = prompt.trim()

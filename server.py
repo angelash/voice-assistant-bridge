@@ -386,6 +386,16 @@ class Store:
             self.conn.commit()
         return row
 
+    def update_artifact(self, artifact_id: str, **fields: Any) -> None:
+        if not fields:
+            return
+        keys = list(fields.keys())
+        sets = ", ".join(f"{k}=?" for k in keys)
+        args = [fields[k] for k in keys] + [artifact_id]
+        with self.lock:
+            self.conn.execute(f"UPDATE artifact_states SET {sets} WHERE artifact_id=?", args)
+            self.conn.commit()
+
     def get_artifact(self, artifact_id: str) -> Optional[dict[str, Any]]:
         with self.lock:
             row = self.conn.execute(
@@ -846,9 +856,83 @@ class VoiceAssistantServer:
 
     async def _resolve_reply(self, row: dict[str, Any], timeout: int) -> str:
         artifacts = self.store.message_artifacts(row["message_id"])
+        row_for_reply = row
+        if any(item.get("artifact_type") == "audio" for item in artifacts):
+            row_for_reply = dict(row)
+            row_for_reply["text"] = await self._augment_text_with_audio_transcripts(row, artifacts)
         if any(item.get("artifact_type") == "image" for item in artifacts):
-            return await self._analyze_image_artifacts(row, artifacts, timeout)
-        return await self.openclaw.chat(row["text"], row["session_id"], row["message_id"], timeout)
+            return await self._analyze_image_artifacts(row_for_reply, artifacts, timeout)
+        return await self.openclaw.chat(
+            row_for_reply["text"],
+            row["session_id"],
+            row["message_id"],
+            timeout,
+        )
+
+    async def _augment_text_with_audio_transcripts(
+        self,
+        row: dict[str, Any],
+        artifacts: list[dict[str, Any]],
+    ) -> str:
+        audio_items = [item for item in artifacts if item.get("artifact_type") == "audio"]
+        if not audio_items:
+            return row["text"]
+
+        lines = [
+            "用户原始提示：",
+            (row.get("text") or "").strip(),
+            "",
+            "以下是用户上传录音的真实转写，请基于转写内容回答；不要把附件当作不可读文件处理：",
+        ]
+        for index, artifact in enumerate(audio_items, start=1):
+            transcript = await self._transcribe_audio_artifact(artifact)
+            filename = artifact.get("filename") or artifact.get("artifact_id") or f"audio-{index}"
+            lines.extend(
+                [
+                    "",
+                    f"[录音 {index}: {filename}]",
+                    transcript,
+                ]
+            )
+        return "\n".join(lines).strip()
+
+    async def _transcribe_audio_artifact(self, artifact: dict[str, Any]) -> str:
+        artifact_id = artifact.get("artifact_id") or ""
+        meta = self._artifact_meta(artifact)
+        cached = (meta.get("transcript") or "").strip() if isinstance(meta.get("transcript"), str) else ""
+        if cached:
+            return cached
+
+        audio_path = Path(artifact.get("storage_path") or "")
+        if not audio_path.exists() or audio_path.stat().st_size <= 0:
+            raise RuntimeError(f"audio artifact file missing: {artifact_id}")
+        transcript = (await self.transcribe_audio_file(audio_path)).strip()
+        if not transcript:
+            raise RuntimeError(f"audio transcription empty: {artifact_id}")
+
+        meta.update(
+            {
+                "transcript": transcript,
+                "transcript_at": now_iso(),
+                "transcript_engine": "faster-whisper",
+            }
+        )
+        self.store.update_artifact(
+            artifact_id,
+            meta_json=json.dumps(meta, ensure_ascii=False),
+        )
+        return transcript
+
+    @staticmethod
+    def _artifact_meta(artifact: dict[str, Any]) -> dict[str, Any]:
+        raw = artifact.get("meta_json")
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
 
     async def _analyze_image_artifacts(
         self,
@@ -1423,6 +1507,13 @@ class VoiceAssistantServer:
         await self.init_models()
         arr = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0
         segments, _ = self.stt.transcribe(arr, language="zh", beam_size=5)
+        return "".join(seg.text for seg in segments).strip()
+
+    async def transcribe_audio_file(self, audio_path: Path) -> str:
+        if not audio_path.exists() or audio_path.stat().st_size <= 0:
+            raise FileNotFoundError(f"audio file not found: {audio_path}")
+        await self.init_models()
+        segments, _ = self.stt.transcribe(str(audio_path), language="zh", beam_size=5)
         return "".join(seg.text for seg in segments).strip()
 
     async def synthesize_tts(self, text: str) -> bytes:
