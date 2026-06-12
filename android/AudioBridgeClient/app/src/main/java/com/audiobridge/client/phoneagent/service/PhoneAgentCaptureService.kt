@@ -24,8 +24,11 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
+import com.audiobridge.client.phoneagent.data.settings.SettingsRepository
 import com.audiobridge.client.phoneagent.data.repository.MessageRepository
 import com.audiobridge.client.phoneagent.model.LocalMessageStatus
+import com.audiobridge.client.phoneagent.policy.AndroidPhoneAgentDeviceState
+import com.audiobridge.client.phoneagent.policy.PhoneAgentPolicy
 import com.audiobridge.client.phoneagent.ui.PhoneAgentActivity
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
@@ -104,6 +107,15 @@ class PhoneAgentCaptureService : LifecycleService() {
         if (!hasPermission(Manifest.permission.CAMERA)) {
             val message = "缺少摄像头权限，无法启动${modeLabel(mode)}。"
             PhoneAgentCaptureStatus.setError(message)
+            return
+        }
+        val settings = SettingsRepository.get(applicationContext).load()
+        val decision = PhoneAgentPolicy.captureStart(
+            settings,
+            AndroidPhoneAgentDeviceState.read(applicationContext),
+        )
+        if (!decision.allowed) {
+            PhoneAgentCaptureStatus.setError(decision.reason)
             return
         }
         cameraMode = mode

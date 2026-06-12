@@ -18,6 +18,8 @@ import com.audiobridge.client.phoneagent.model.AppSettings
 import com.audiobridge.client.phoneagent.model.BridgeMessageStatus
 import com.audiobridge.client.phoneagent.model.LocalMessageStatus
 import com.audiobridge.client.phoneagent.model.PhoneAgentDefaults
+import com.audiobridge.client.phoneagent.policy.AndroidPhoneAgentDeviceState
+import com.audiobridge.client.phoneagent.policy.PhoneAgentPolicy
 import com.audiobridge.client.phoneagent.worker.PhoneAgentSyncScheduler
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -318,6 +320,13 @@ class MessageRepository private constructor(
             )
         )
         return try {
+            val networkDecision = PhoneAgentPolicy.networkUse(
+                settings,
+                AndroidPhoneAgentDeviceState.read(appContext),
+            )
+            if (!networkDecision.allowed) {
+                throw IOException(networkDecision.reason)
+            }
             val payload = JSONObject(pending.payloadJson)
             var artifacts = parseArtifactRefs(payload.optJSONArray("artifacts"))
             val localArtifactPath = payload.optString("local_artifact_path").trim()

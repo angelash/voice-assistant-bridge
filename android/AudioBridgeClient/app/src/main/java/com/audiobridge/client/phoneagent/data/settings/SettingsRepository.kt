@@ -24,6 +24,7 @@ class SettingsRepository private constructor(context: Context) {
             useWebSocket = prefs.getBoolean(KEY_USE_WEBSOCKET, true),
             allowMobileNetworkSync = prefs.getBoolean(KEY_ALLOW_MOBILE_NETWORK_SYNC, true),
             allowAutoCapture = prefs.getBoolean(KEY_ALLOW_AUTO_CAPTURE, false),
+            allowCaptureOnBattery = prefs.getBoolean(KEY_ALLOW_CAPTURE_ON_BATTERY, false),
         )
     }
 
@@ -42,6 +43,7 @@ class SettingsRepository private constructor(context: Context) {
             .putBoolean(KEY_USE_WEBSOCKET, normalized.useWebSocket)
             .putBoolean(KEY_ALLOW_MOBILE_NETWORK_SYNC, normalized.allowMobileNetworkSync)
             .putBoolean(KEY_ALLOW_AUTO_CAPTURE, normalized.allowAutoCapture)
+            .putBoolean(KEY_ALLOW_CAPTURE_ON_BATTERY, normalized.allowCaptureOnBattery)
             .apply()
         return normalized
     }
@@ -62,6 +64,7 @@ class SettingsRepository private constructor(context: Context) {
         private const val KEY_USE_WEBSOCKET = "useWebSocket"
         private const val KEY_ALLOW_MOBILE_NETWORK_SYNC = "allowMobileNetworkSync"
         private const val KEY_ALLOW_AUTO_CAPTURE = "allowAutoCapture"
+        private const val KEY_ALLOW_CAPTURE_ON_BATTERY = "allowCaptureOnBattery"
 
         @Volatile
         private var instance: SettingsRepository? = null

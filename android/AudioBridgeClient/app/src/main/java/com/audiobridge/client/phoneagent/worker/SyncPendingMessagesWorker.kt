@@ -40,6 +40,7 @@ object PhoneAgentSyncScheduler {
         }
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(networkType)
+            .setRequiresBatteryNotLow(true)
             .build()
         val request = OneTimeWorkRequestBuilder<SyncPendingMessagesWorker>()
             .setConstraints(constraints)

@@ -94,6 +94,8 @@ import com.audiobridge.client.phoneagent.data.settings.SettingsRepository
 import com.audiobridge.client.phoneagent.model.AppSettings
 import com.audiobridge.client.phoneagent.model.BridgeMessageStatus
 import com.audiobridge.client.phoneagent.model.LocalMessageStatus
+import com.audiobridge.client.phoneagent.policy.AndroidPhoneAgentDeviceState
+import com.audiobridge.client.phoneagent.policy.PhoneAgentPolicy
 import com.audiobridge.client.phoneagent.service.PhoneAgentCaptureService
 import com.audiobridge.client.phoneagent.service.PhoneAgentCaptureStatus
 import com.audiobridge.client.phoneagent.service.PhoneAgentCaptureUiState
@@ -335,15 +337,19 @@ class PhoneAgentActivity : ComponentActivity() {
             }
 
             fun startCaptureService(action: String) {
-                if (
-                    action in setOf(
+                if (action in setOf(
                         PhoneAgentCaptureService.ACTION_START_BACKGROUND_CAPTURE,
                         PhoneAgentCaptureService.ACTION_START_FRAME_STREAM,
-                    ) &&
-                    !settings.allowAutoCapture
+                    )
                 ) {
-                    issueText = "设置未开启“允许手动启动前台持续采集”，不会启动摄像头持续采集。"
-                    return
+                    val decision = PhoneAgentPolicy.captureStart(
+                        settings,
+                        AndroidPhoneAgentDeviceState.read(activity),
+                    )
+                    if (!decision.allowed) {
+                        issueText = decision.reason
+                        return
+                    }
                 }
                 val permissions = requiredPermissionsForCaptureAction(action)
                     .filter {
@@ -1664,6 +1670,9 @@ private fun SettingsScreen(
     var allowAutoCapture by remember(initialSettings) {
         mutableStateOf(initialSettings.allowAutoCapture)
     }
+    var allowCaptureOnBattery by remember(initialSettings) {
+        mutableStateOf(initialSettings.allowCaptureOnBattery)
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1728,6 +1737,16 @@ private fun SettingsScreen(
             )
             Text("允许手动启动前台持续采集")
         }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Checkbox(
+                checked = allowCaptureOnBattery,
+                onCheckedChange = { allowCaptureOnBattery = it },
+            )
+            Text("允许电池供电持续采集")
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
@@ -1740,6 +1759,7 @@ private fun SettingsScreen(
                             useWebSocket = useWebSocket,
                             allowMobileNetworkSync = allowMobileNetworkSync,
                             allowAutoCapture = allowAutoCapture,
+                            allowCaptureOnBattery = allowCaptureOnBattery,
                         )
                     )
                 },

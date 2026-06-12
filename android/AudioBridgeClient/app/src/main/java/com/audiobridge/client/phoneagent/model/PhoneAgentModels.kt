@@ -44,4 +44,5 @@ data class AppSettings(
     val useWebSocket: Boolean = true,
     val allowMobileNetworkSync: Boolean = true,
     val allowAutoCapture: Boolean = false,
+    val allowCaptureOnBattery: Boolean = false,
 )
