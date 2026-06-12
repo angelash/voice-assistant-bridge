@@ -302,7 +302,7 @@ class PhoneAgentCaptureService : LifecycleService() {
             val bufferSize = maxOf(minBufferSize, chunkBytes / 2)
             val record = try {
                 AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_RECOGNITION,
+                    MediaRecorder.AudioSource.MIC,
                     WAKE_SAMPLE_RATE_HZ,
                     AudioFormat.CHANNEL_IN_MONO,
                     AudioFormat.ENCODING_PCM_16BIT,
@@ -387,7 +387,7 @@ class PhoneAgentCaptureService : LifecycleService() {
             wakeSilentChunksSkipped += 1
             PhoneAgentCaptureStatus.update {
                 it.copy(
-                    statusText = "语音唤醒监听中：环境较安静，已跳过 $wakeSilentChunksSkipped 个无声分片。",
+                    statusText = "语音唤醒监听中：环境较安静，已跳过 $wakeSilentChunksSkipped 个无声分片，能量 ${decision.avgAbs}/${decision.peakWindowAvgAbs}。",
                     lastWakeText = null,
                 )
             }
@@ -398,7 +398,9 @@ class PhoneAgentCaptureService : LifecycleService() {
         wakeSilentChunksSkipped = 0
         serviceScope.launch {
             PhoneAgentCaptureStatus.update {
-                it.copy(statusText = "语音唤醒正在转写最近 ${WAKE_CHUNK_SECONDS} 秒音频，能量 ${decision.avgAbs}。")
+                it.copy(
+                    statusText = "语音唤醒正在转写最近 ${WAKE_CHUNK_SECONDS} 秒音频，能量 ${decision.avgAbs}/${decision.peakWindowAvgAbs}。",
+                )
             }
             refreshForeground()
             runCatching { repository.transcribePcmAudio(pcmAudio) }

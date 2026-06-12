@@ -15,6 +15,7 @@ class WakeAudioGateTest {
         assertFalse(decision.shouldTranscribe)
         assertEquals("silent", decision.reason)
         assertEquals(0, decision.avgAbs)
+        assertEquals(0, decision.peakWindowAvgAbs)
     }
 
     @Test
@@ -43,5 +44,26 @@ class WakeAudioGateTest {
         assertTrue(decision.shouldTranscribe)
         assertEquals("speech", decision.reason)
         assertEquals(1_200, decision.avgAbs)
+        assertEquals(1_200, decision.peakWindowAvgAbs)
+    }
+
+    @Test
+    fun shortSpeechBurstInLongChunkIsSubmittedForTranscription() {
+        val pcm = ByteArray(WakeAudioGate.DEFAULT_MIN_BYTES * 10)
+        val burstStart = WakeAudioGate.DEFAULT_MIN_BYTES * 4
+        var i = burstStart
+        while (i < burstStart + WakeAudioGate.DEFAULT_MIN_BYTES / 2) {
+            val sample = 1_200
+            pcm[i] = (sample and 0xFF).toByte()
+            pcm[i + 1] = ((sample shr 8) and 0xFF).toByte()
+            i += 2
+        }
+
+        val decision = WakeAudioGate.evaluate(pcm)
+
+        assertTrue(decision.shouldTranscribe)
+        assertEquals("speech", decision.reason)
+        assertTrue(decision.avgAbs < WakeAudioGate.DEFAULT_THRESHOLD_AVG_ABS)
+        assertTrue(decision.peakWindowAvgAbs >= WakeAudioGate.DEFAULT_THRESHOLD_PEAK_WINDOW_AVG_ABS)
     }
 }
