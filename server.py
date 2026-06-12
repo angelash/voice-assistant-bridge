@@ -14,6 +14,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import threading
@@ -431,6 +432,80 @@ class Store:
                 (message_id,),
             ).fetchall()
         return [self._dict(r) for r in rows]
+
+    def session_artifacts(self, session_id: str, client_id: str = "") -> list[dict[str, Any]]:
+        sql = "SELECT * FROM artifact_states WHERE session_id=?"
+        args: list[Any] = [session_id]
+        if client_id:
+            sql += " AND client_id=?"
+            args.append(client_id)
+        sql += " ORDER BY created_at ASC"
+        with self.lock:
+            rows = self.conn.execute(sql, args).fetchall()
+        return [self._dict(r) for r in rows]
+
+    def delete_session(self, session_id: str, client_id: str = "") -> dict[str, int]:
+        with self.lock:
+            if client_id:
+                message_rows = self.conn.execute(
+                    "SELECT message_id FROM message_states WHERE session_id=? AND client_id=?",
+                    (session_id, client_id),
+                ).fetchall()
+                artifact_rows = self.conn.execute(
+                    "SELECT artifact_id FROM artifact_states WHERE session_id=? AND client_id=?",
+                    (session_id, client_id),
+                ).fetchall()
+            else:
+                message_rows = self.conn.execute(
+                    "SELECT message_id FROM message_states WHERE session_id=?",
+                    (session_id,),
+                ).fetchall()
+                artifact_rows = self.conn.execute(
+                    "SELECT artifact_id FROM artifact_states WHERE session_id=?",
+                    (session_id,),
+                ).fetchall()
+
+            message_ids = [row["message_id"] for row in message_rows]
+            artifact_ids = [row["artifact_id"] for row in artifact_rows]
+            link_count = 0
+            if message_ids:
+                placeholders = ",".join("?" for _ in message_ids)
+                cur = self.conn.execute(
+                    f"DELETE FROM message_artifacts WHERE message_id IN ({placeholders})",
+                    message_ids,
+                )
+                link_count += cur.rowcount if cur.rowcount >= 0 else 0
+            if artifact_ids:
+                placeholders = ",".join("?" for _ in artifact_ids)
+                cur = self.conn.execute(
+                    f"DELETE FROM message_artifacts WHERE artifact_id IN ({placeholders})",
+                    artifact_ids,
+                )
+                link_count += cur.rowcount if cur.rowcount >= 0 else 0
+            if client_id:
+                message_cur = self.conn.execute(
+                    "DELETE FROM message_states WHERE session_id=? AND client_id=?",
+                    (session_id, client_id),
+                )
+                artifact_cur = self.conn.execute(
+                    "DELETE FROM artifact_states WHERE session_id=? AND client_id=?",
+                    (session_id, client_id),
+                )
+            else:
+                message_cur = self.conn.execute(
+                    "DELETE FROM message_states WHERE session_id=?",
+                    (session_id,),
+                )
+                artifact_cur = self.conn.execute(
+                    "DELETE FROM artifact_states WHERE session_id=?",
+                    (session_id,),
+                )
+            self.conn.commit()
+        return {
+            "messages": message_cur.rowcount if message_cur.rowcount >= 0 else 0,
+            "artifacts": artifact_cur.rowcount if artifact_cur.rowcount >= 0 else 0,
+            "links": link_count,
+        }
 
     def close(self) -> None:
         with self.lock:
@@ -1216,6 +1291,32 @@ class VoiceAssistantServer:
             "url": f"/v1/artifacts/{artifact['artifact_id']}",
         }
 
+    def _delete_artifact_files(self, artifacts: list[dict[str, Any]]) -> int:
+        deleted = 0
+        root = self.artifacts_dir.resolve()
+        for artifact in artifacts:
+            storage_path = (artifact.get("storage_path") or "").strip()
+            if not storage_path:
+                continue
+            try:
+                resolved = Path(storage_path).resolve()
+            except Exception:
+                continue
+            if not resolved.is_relative_to(root):
+                logger.warning("skip artifact delete outside root: %s", resolved)
+                continue
+            artifact_dir = resolved.parent
+            try:
+                if artifact_dir.is_dir() and artifact_dir.resolve().is_relative_to(root):
+                    shutil.rmtree(artifact_dir)
+                    deleted += 1
+                elif resolved.exists():
+                    resolved.unlink()
+                    deleted += 1
+            except Exception as exc:
+                logger.warning("delete artifact file failed %s: %s", artifact.get("artifact_id"), exc)
+        return deleted
+
     def _submit_resp(self, row: dict[str, Any], deduped: bool) -> dict[str, Any]:
         artifacts = [self._artifact_public(item) for item in self.store.message_artifacts(row["message_id"])]
         return {
@@ -1411,6 +1512,26 @@ class VoiceAssistantServer:
             },
         )
 
+    async def handle_v1_session_delete(self, request: web.Request) -> web.Response:
+        session_id = (request.match_info.get("session_id") or "").strip()
+        if not session_id:
+            return web.json_response({"ok": False, "error": "session_id required"}, status=400)
+        client_id = (request.query.get("client_id") or "").strip()
+        artifacts = self.store.session_artifacts(session_id, client_id=client_id)
+        counts = self.store.delete_session(session_id, client_id=client_id)
+        files_deleted = self._delete_artifact_files(artifacts)
+        return web.json_response(
+            {
+                "ok": True,
+                "session_id": session_id,
+                "client_id": client_id or None,
+                "deleted": {
+                    **counts,
+                    "artifact_files": files_deleted,
+                },
+            }
+        )
+
     async def handle_v1_events(self, request: web.Request) -> web.StreamResponse:
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
@@ -1598,6 +1719,7 @@ class VoiceAssistantServer:
                     "events": "/v1/events",
                     "artifacts": "/v1/artifacts",
                     "artifact": "/v1/artifacts/{artifact_id}",
+                    "session_delete": "/v1/sessions/{session_id}",
                     "audio_transcription": "/v1/audio/transcriptions",
                     "operator_summarize": "/v1/operator/summarize",
                     "legacy_chat": "/chat",
@@ -1659,6 +1781,7 @@ class VoiceAssistantServer:
         app.router.add_get("/v1/messages/{message_id}", self.handle_v1_status)
         app.router.add_post("/v1/artifacts", self.handle_v1_artifact_upload)
         app.router.add_get("/v1/artifacts/{artifact_id}", self.handle_v1_artifact_get)
+        app.router.add_delete("/v1/sessions/{session_id}", self.handle_v1_session_delete)
         app.router.add_post("/v1/audio/transcriptions", self.handle_v1_audio_transcription)
         app.router.add_get("/v1/events", self.handle_v1_events)
         app.router.add_post("/v1/operator/summarize", self.handle_v1_operator_summarize)

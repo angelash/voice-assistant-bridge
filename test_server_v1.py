@@ -166,6 +166,42 @@ class TestArtifactApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, len(linked))
         self.assertEqual(artifact_id, linked[0]["artifact_id"])
 
+    async def test_delete_session_removes_records_and_artifact_files(self):
+        form = FormData()
+        form.add_field("artifact_type", "image")
+        form.add_field("client_id", "android-phone")
+        form.add_field("session_id", "daily-agent-test")
+        form.add_field("source", "android")
+        form.add_field("file", PNG_BYTES, filename="camera.png", content_type="image/png")
+        upload_resp = await self.client.post("/v1/artifacts", data=form)
+        upload = await upload_resp.json()
+        artifact_id = upload["artifact_id"]
+        artifact = self.server.store.get_artifact(artifact_id)
+        self.assertIsNotNone(artifact)
+        artifact_dir = Path(artifact["storage_path"]).parent
+        self.assertTrue(artifact_dir.exists())
+
+        await self.server.submit(
+            text="请分析这张图片。",
+            client_id="android-phone",
+            session_id="daily-agent-test",
+            source="android",
+            artifacts=[{"artifact_id": artifact_id, "type": "image"}],
+            message_id="msg-delete-session",
+        )
+
+        resp = await self.client.delete("/v1/sessions/daily-agent-test?client_id=android-phone")
+
+        self.assertEqual(200, resp.status)
+        payload = await resp.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(1, payload["deleted"]["messages"])
+        self.assertEqual(1, payload["deleted"]["artifacts"])
+        self.assertEqual(1, payload["deleted"]["artifact_files"])
+        self.assertIsNone(self.server.store.get("msg-delete-session"))
+        self.assertIsNone(self.server.store.get_artifact(artifact_id))
+        self.assertFalse(artifact_dir.exists())
+
     async def test_rejects_non_image_content_for_image_artifact(self):
         form = FormData()
         form.add_field("artifact_type", "image")

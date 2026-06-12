@@ -29,6 +29,7 @@ interface PhoneAgentBridgeApi {
     ): BridgeArtifactUploadResponse
     fun submitMessage(settings: AppSettings, request: BridgeSubmitRequest): BridgeMessagePayload
     fun fetchMessageStatus(settings: AppSettings, messageId: String): BridgeMessagePayload
+    fun clearRemoteSession(settings: AppSettings): JSONObject
     fun openEventStream(
         settings: AppSettings,
         onConnected: () -> Unit,
@@ -144,6 +145,26 @@ class OkHttpPhoneAgentBridgeApi(
             throw IOException(json.optString("error").ifBlank { "Bridge 状态响应异常" })
         }
         return parsed
+    }
+
+    override fun clearRemoteSession(settings: AppSettings): JSONObject {
+        val base = settings.bridgeBaseUrl.toHttpUrlOrNull()
+            ?: throw IOException("Bridge 地址格式不正确")
+        val url = base.newBuilder()
+            .encodedPath("/v1/sessions")
+            .addPathSegment(settings.sessionId)
+            .addQueryParameter("client_id", settings.clientId)
+            .build()
+        val request = Request.Builder()
+            .url(url)
+            .delete()
+            .withAuth(settings.apiToken)
+            .build()
+        val json = executeJson(request, "清空远端会话失败")
+        if (!json.optBoolean("ok", false)) {
+            throw IOException(json.optString("error").ifBlank { "Bridge 未确认清空远端会话" })
+        }
+        return json
     }
 
     override fun openEventStream(

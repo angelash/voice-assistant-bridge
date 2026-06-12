@@ -271,6 +271,16 @@ class MessageRepository private constructor(
         }
     }
 
+    suspend fun clearRemoteSessionData(): String = withContext(Dispatchers.IO) {
+        val settings = settingsRepository.load()
+        val json = bridgeApi.clearRemoteSession(settings)
+        val deleted = json.optJSONObject("deleted")
+        val messages = deleted?.optInt("messages", 0) ?: 0
+        val artifacts = deleted?.optInt("artifacts", 0) ?: 0
+        val files = deleted?.optInt("artifact_files", 0) ?: 0
+        "消息 $messages 条，附件 $artifacts 个，文件 $files 个"
+    }
+
     suspend fun checkHealth(settings: AppSettings): Result<String> = withContext(Dispatchers.IO) {
         runCatching {
             val json = bridgeApi.health(settings)

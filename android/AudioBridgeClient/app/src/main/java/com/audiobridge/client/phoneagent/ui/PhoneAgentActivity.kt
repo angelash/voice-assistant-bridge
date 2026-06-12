@@ -569,6 +569,34 @@ class PhoneAgentActivity : ComponentActivity() {
                             busy = false
                         }
                     },
+                    onClearRemoteSession = {
+                        busy = true
+                        scope.launch {
+                            runCatching { repository.clearRemoteSessionData() }
+                                .onSuccess {
+                                    healthText = "远端会话已清空：$it"
+                                }
+                                .onFailure {
+                                    issueText = "清空远端会话失败：${it.message ?: it.javaClass.simpleName}"
+                                }
+                            busy = false
+                        }
+                    },
+                    onClearAllData = {
+                        busy = true
+                        scope.launch {
+                            runCatching {
+                                val remoteSummary = repository.clearRemoteSessionData()
+                                repository.clearLocalData()
+                                remoteSummary
+                            }.onSuccess {
+                                healthText = "本地和远端会话已清空：$it"
+                            }.onFailure {
+                                issueText = "清空本地+远端失败：${it.message ?: it.javaClass.simpleName}"
+                            }
+                            busy = false
+                        }
+                    },
                     onOpenLegacy = {
                         startActivity(Intent(this, MainActivity::class.java))
                     },
@@ -996,6 +1024,8 @@ private fun PhoneAgentApp(
     onStopWakeListener: () -> Unit,
     onRetry: (String) -> Unit,
     onClearLocalData: () -> Unit,
+    onClearRemoteSession: () -> Unit,
+    onClearAllData: () -> Unit,
     onOpenLegacy: () -> Unit,
     onDismissIssue: () -> Unit,
 ) {
@@ -1097,6 +1127,8 @@ private fun PhoneAgentApp(
                     onSave = onSaveSettings,
                     onHealthCheck = onHealthCheck,
                     onClearLocalData = onClearLocalData,
+                    onClearRemoteSession = onClearRemoteSession,
+                    onClearAllData = onClearAllData,
                     onOpenLegacy = onOpenLegacy,
                 )
             }
@@ -1617,6 +1649,8 @@ private fun SettingsScreen(
     onSave: (AppSettings) -> Unit,
     onHealthCheck: () -> Unit,
     onClearLocalData: () -> Unit,
+    onClearRemoteSession: () -> Unit,
+    onClearAllData: () -> Unit,
     onOpenLegacy: () -> Unit,
 ) {
     var bridgeBaseUrl by remember(initialSettings) { mutableStateOf(initialSettings.bridgeBaseUrl) }
@@ -1725,13 +1759,34 @@ private fun SettingsScreen(
         Text(healthText, style = MaterialTheme.typography.bodyMedium)
         Text(eventText, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         HorizontalDivider()
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             OutlinedButton(
                 onClick = onClearLocalData,
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.tertiary),
                 shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.weight(1f),
             ) {
-                Text("清空本地数据")
+                Text("清空本地", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = onClearRemoteSession,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.tertiary),
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("清空远端", maxLines = 1)
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = onClearAllData,
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.tertiary),
+                shape = RoundedCornerShape(6.dp),
+            ) {
+                Text("清空本地+远端")
             }
             OutlinedButton(
                 onClick = onOpenLegacy,
