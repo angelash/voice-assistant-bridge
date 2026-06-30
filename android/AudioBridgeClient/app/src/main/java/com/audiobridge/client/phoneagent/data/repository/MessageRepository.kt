@@ -9,6 +9,8 @@ import com.audiobridge.client.phoneagent.data.api.BridgeMessagePayload
 import com.audiobridge.client.phoneagent.data.api.BridgeSubmitRequest
 import com.audiobridge.client.phoneagent.data.api.OkHttpPhoneAgentBridgeApi
 import com.audiobridge.client.phoneagent.data.api.PhoneAgentBridgeApi
+import com.audiobridge.client.phoneagent.data.db.ArtifactEntity
+import com.audiobridge.client.phoneagent.data.db.ArtifactUploadStatus
 import com.audiobridge.client.phoneagent.data.db.MessageEntity
 import com.audiobridge.client.phoneagent.data.db.PendingRequestEntity
 import com.audiobridge.client.phoneagent.data.db.PendingRequestType
@@ -48,9 +50,11 @@ class MessageRepository private constructor(
 ) {
     private val messageDao = database.messageDao()
     private val pendingDao = database.pendingRequestDao()
+    private val artifactDao = database.artifactDao()
     private val messageUpdateMutex = Mutex()
 
     val messages: Flow<List<MessageEntity>> = messageDao.observeAll()
+    val artifacts: Flow<List<ArtifactEntity>> = artifactDao.observeAll()
 
     suspend fun sendText(
         text: String,
@@ -91,6 +95,7 @@ class MessageRepository private constructor(
         file: File,
         text: String,
         mimeType: String = "image/jpeg",
+        source: String = "camera-photo",
     ): MessageEntity = withContext(Dispatchers.IO) {
         if (!file.exists() || file.length() <= 0L) {
             throw IOException("图片文件不存在或为空")
@@ -101,6 +106,7 @@ class MessageRepository private constructor(
             text = cleanText,
             artifactType = "image",
             mimeType = mimeType.ifBlank { "image/jpeg" },
+            source = source,
         )
     }
 
@@ -108,6 +114,7 @@ class MessageRepository private constructor(
         file: File,
         text: String,
         mimeType: String = "audio/mp4",
+        source: String = "audio-recording",
     ): MessageEntity = withContext(Dispatchers.IO) {
         if (!file.exists() || file.length() <= 0L) {
             throw IOException("录音文件不存在或为空")
@@ -118,6 +125,7 @@ class MessageRepository private constructor(
             text = cleanText,
             artifactType = "audio",
             mimeType = mimeType.ifBlank { "audio/mp4" },
+            source = source,
         )
     }
 
@@ -125,6 +133,8 @@ class MessageRepository private constructor(
         file: File,
         text: String,
         mimeType: String = "image/jpeg",
+        source: String = "visual-frame",
+        metaJson: String? = null,
     ): MessageEntity = withContext(Dispatchers.IO) {
         if (!file.exists() || file.length() <= 0L) {
             throw IOException("视频帧文件不存在或为空")
@@ -135,17 +145,24 @@ class MessageRepository private constructor(
             text = cleanText,
             artifactType = "image",
             mimeType = mimeType.ifBlank { "image/jpeg" },
+            source = source,
+            metaJson = metaJson,
         )
     }
 
-    suspend fun uploadImageArtifact(file: File): BridgeArtifactUploadResponse = withContext(Dispatchers.IO) {
+    suspend fun uploadImageArtifact(
+        file: File,
+        source: String = "visual-stream",
+        metaJson: String? = null,
+    ): BridgeArtifactUploadResponse = withContext(Dispatchers.IO) {
         val settings = settingsRepository.load()
-        bridgeApi.uploadArtifact(
+        uploadArtifactOnly(
             settings = settings,
             file = file,
             artifactType = "image",
             mimeType = "image/jpeg",
-            captureTs = isoUtc(file.lastModified()),
+            source = source,
+            metaJson = metaJson,
         )
     }
 
@@ -271,11 +288,35 @@ class MessageRepository private constructor(
         database.withTransaction {
             pendingDao.deleteAll()
             messageDao.deleteAll()
+            artifactDao.deleteAll()
         }
         listOf("phone-agent-captures", "phone-agent-audio", "phone-agent-stream").forEach { name ->
             File(appContext.filesDir, name).deleteRecursively()
             File(appContext.cacheDir, name).deleteRecursively()
         }
+    }
+
+    suspend fun deleteLocalArtifact(localId: String): Boolean = withContext(Dispatchers.IO) {
+        val artifact = artifactDao.get(localId) ?: return@withContext false
+        deleteArtifactFileIfPrivate(artifact)
+        artifactDao.delete(localId)
+        true
+    }
+
+    suspend fun pruneArtifactsOlderThan(days: Int): Int = withContext(Dispatchers.IO) {
+        val cutoff = System.currentTimeMillis() - days.coerceIn(1, 365).toLong() * 24L * 60L * 60L * 1000L
+        var deleted = 0
+        while (true) {
+            val batch = artifactDao.olderThan(cutoff)
+            if (batch.isEmpty()) break
+            batch.forEach { artifact ->
+                deleteArtifactFileIfPrivate(artifact)
+                artifactDao.delete(artifact.localId)
+                deleted += 1
+            }
+            if (batch.size < 500) break
+        }
+        deleted
     }
 
     suspend fun clearRemoteSessionData(): String = withContext(Dispatchers.IO) {
@@ -340,18 +381,26 @@ class MessageRepository private constructor(
             var artifacts = parseArtifactRefs(payload.optJSONArray("artifacts"))
             val localArtifactPath = payload.optString("local_artifact_path").trim()
                 .ifBlank { payload.optString("local_image_path").trim() }
+            val localArtifactId = payload.optString("local_artifact_id").trim()
             if (artifacts.isEmpty() && localArtifactPath.isNotBlank()) {
                 val artifactFile = File(localArtifactPath)
                 if (!artifactFile.exists() || artifactFile.length() <= 0L) {
                     throw IOException("本地附件文件不存在或为空：${artifactFile.name.ifBlank { localArtifactPath }}")
                 }
                 val artifactType = payload.optString("artifact_type").ifBlank { "file" }
+                updateArtifactStatus(
+                    localArtifactId,
+                    ArtifactUploadStatus.UPLOADING,
+                    bridgeArtifactId = null,
+                    lastError = null,
+                )
                 val artifact = bridgeApi.uploadArtifact(
                     settings = settings,
                     file = artifactFile,
                     artifactType = artifactType,
                     mimeType = payload.optString("mime_type").ifBlank { defaultMimeType(artifactType) },
                     captureTs = payload.optString("capture_ts").ifBlank { isoUtc(artifactFile.lastModified()) },
+                    metaJson = payload.optString("meta_json").ifBlank { null },
                 )
                 artifacts = listOf(
                     BridgeArtifactRef(
@@ -362,6 +411,7 @@ class MessageRepository private constructor(
                 payload.put("artifacts", artifactRefsToJsonArray(artifacts))
                 payload.remove("local_artifact_path")
                 payload.remove("local_image_path")
+                payload.remove("local_artifact_id")
                 pending = pending.copy(
                     payloadJson = payload.toString(),
                     updatedAt = System.currentTimeMillis(),
@@ -374,6 +424,12 @@ class MessageRepository private constructor(
                         artifactsJson = artifactRefsToJson(artifacts),
                         updatedAt = System.currentTimeMillis(),
                     )
+                )
+                updateArtifactStatus(
+                    localArtifactId,
+                    ArtifactUploadStatus.UPLOADED,
+                    bridgeArtifactId = artifact.artifactId,
+                    lastError = null,
                 )
             }
             val request = BridgeSubmitRequest(
@@ -390,6 +446,15 @@ class MessageRepository private constructor(
             true
         } catch (error: Exception) {
             val compact = compactError(error)
+            runCatching {
+                val payload = JSONObject(pending.payloadJson)
+                updateArtifactStatus(
+                    payload.optString("local_artifact_id").trim(),
+                    ArtifactUploadStatus.QUEUED,
+                    bridgeArtifactId = null,
+                    lastError = compact,
+                )
+            }
             val retryCount = pending.retryCount + 1
             val failedMessage = messageDao.get(messageId) ?: message
             messageDao.upsert(
@@ -493,20 +558,13 @@ class MessageRepository private constructor(
             )
     }
 
-    private fun buildImagePendingPayload(message: MessageEntity, file: File): JSONObject {
-        return buildArtifactPendingPayload(
-            message = message,
-            file = file,
-            artifactType = "image",
-            mimeType = "image/jpeg",
-        )
-    }
-
     private suspend fun sendArtifactMessage(
         file: File,
         text: String,
         artifactType: String,
         mimeType: String,
+        source: String,
+        metaJson: String? = null,
     ): MessageEntity {
         val settings = settingsRepository.load()
         val now = System.currentTimeMillis()
@@ -521,15 +579,27 @@ class MessageRepository private constructor(
             createdAt = now,
             updatedAt = now,
         )
+        val artifact = createArtifactEntity(
+            settings = settings,
+            file = file,
+            artifactType = artifactType,
+            mimeType = mimeType,
+            source = source,
+            relatedMessageId = message.messageId,
+            uploadStatus = ArtifactUploadStatus.QUEUED,
+            metaJson = metaJson,
+            now = now,
+        )
         val pending = PendingRequestEntity(
             id = message.messageId,
             requestType = PendingRequestType.SEND_MESSAGE,
-            payloadJson = buildArtifactPendingPayload(message, file, artifactType, mimeType).toString(),
+            payloadJson = buildArtifactPendingPayload(message, artifact, artifactType, mimeType).toString(),
             createdAt = now,
             updatedAt = now,
         )
         database.withTransaction {
             messageDao.upsert(message)
+            artifactDao.upsert(artifact)
             pendingDao.upsert(pending)
         }
         trySendPending(message.messageId, scheduleOnFailure = true)
@@ -538,15 +608,150 @@ class MessageRepository private constructor(
 
     private fun buildArtifactPendingPayload(
         message: MessageEntity,
-        file: File,
+        artifact: ArtifactEntity,
         artifactType: String,
         mimeType: String,
     ): JSONObject {
         return buildPendingPayload(message, emptyList())
-            .put("local_artifact_path", file.absolutePath)
+            .put("local_artifact_id", artifact.localId)
+            .put("local_artifact_path", artifact.localPath)
             .put("artifact_type", artifactType)
             .put("mime_type", mimeType)
-            .put("capture_ts", isoUtc(file.lastModified()))
+            .put("capture_ts", artifact.captureTs)
+            .also { json ->
+                if (!artifact.metaJson.isNullOrBlank()) {
+                    json.put("meta_json", artifact.metaJson)
+                }
+            }
+    }
+
+    private suspend fun uploadArtifactOnly(
+        settings: AppSettings,
+        file: File,
+        artifactType: String,
+        mimeType: String,
+        source: String,
+        metaJson: String?,
+    ): BridgeArtifactUploadResponse {
+        if (!file.exists() || file.length() <= 0L) {
+            throw IOException("附件文件不存在或为空")
+        }
+        val now = System.currentTimeMillis()
+        var artifact = artifactDao.getByLocalPath(file.absolutePath)
+        if (artifact == null) {
+            artifact = createArtifactEntity(
+                settings = settings,
+                file = file,
+                artifactType = artifactType,
+                mimeType = mimeType,
+                source = source,
+                relatedMessageId = null,
+                uploadStatus = ArtifactUploadStatus.UPLOADING,
+                metaJson = metaJson,
+                now = now,
+            )
+        } else {
+            artifact = artifact.copy(
+                uploadStatus = ArtifactUploadStatus.UPLOADING,
+                source = source,
+                metaJson = metaJson ?: artifact.metaJson,
+                updatedAt = now,
+                lastError = null,
+            )
+        }
+        artifactDao.upsert(artifact)
+        return try {
+            val response = bridgeApi.uploadArtifact(
+                settings = settings,
+                file = file,
+                artifactType = artifactType,
+                mimeType = mimeType,
+                captureTs = artifact.captureTs,
+                metaJson = artifact.metaJson,
+            )
+            artifactDao.upsert(
+                artifact.copy(
+                    bridgeArtifactId = response.artifactId,
+                    uploadStatus = ArtifactUploadStatus.UPLOADED,
+                    sizeBytes = response.sizeBytes.takeIf { it > 0L } ?: artifact.sizeBytes,
+                    updatedAt = System.currentTimeMillis(),
+                    lastError = null,
+                )
+            )
+            response
+        } catch (error: Exception) {
+            artifactDao.upsert(
+                artifact.copy(
+                    uploadStatus = ArtifactUploadStatus.FAILED,
+                    updatedAt = System.currentTimeMillis(),
+                    lastError = compactError(error),
+                )
+            )
+            throw error
+        }
+    }
+
+    private fun createArtifactEntity(
+        settings: AppSettings,
+        file: File,
+        artifactType: String,
+        mimeType: String,
+        source: String,
+        relatedMessageId: String?,
+        uploadStatus: String,
+        metaJson: String?,
+        now: Long,
+    ): ArtifactEntity {
+        return ArtifactEntity(
+            localId = "art-${UUID.randomUUID()}",
+            sessionId = settings.sessionId,
+            clientId = settings.clientId,
+            artifactType = artifactType,
+            mimeType = mimeType,
+            filename = file.name,
+            localPath = file.absolutePath,
+            sizeBytes = file.length().coerceAtLeast(0L),
+            captureTs = isoUtc(file.lastModified().takeIf { it > 0L } ?: now),
+            uploadStatus = uploadStatus,
+            relatedMessageId = relatedMessageId,
+            source = source,
+            metaJson = metaJson,
+            createdAt = now,
+            updatedAt = now,
+        )
+    }
+
+    private suspend fun updateArtifactStatus(
+        localId: String,
+        uploadStatus: String,
+        bridgeArtifactId: String?,
+        lastError: String?,
+    ) {
+        if (localId.isBlank()) return
+        val current = artifactDao.get(localId) ?: return
+        artifactDao.upsert(
+            current.copy(
+                bridgeArtifactId = bridgeArtifactId ?: current.bridgeArtifactId,
+                uploadStatus = uploadStatus,
+                updatedAt = System.currentTimeMillis(),
+                lastError = lastError,
+            )
+        )
+    }
+
+    private fun deleteArtifactFileIfPrivate(artifact: ArtifactEntity) {
+        val path = artifact.localPath.trim()
+        if (path.isBlank()) return
+        val file = File(path)
+        if (!file.exists()) return
+        val allowedRoots = listOf(appContext.filesDir, appContext.cacheDir).map { it.canonicalFile }
+        val canonical = runCatching { file.canonicalFile }.getOrNull() ?: return
+        val insidePrivateDir = allowedRoots.any { root ->
+            canonical.path == root.path || canonical.path.startsWith(root.path + File.separator)
+        }
+        if (insidePrivateDir) {
+            file.delete()
+        }
     }
 
     private fun parseArtifactRefs(array: JSONArray?): List<BridgeArtifactRef> {

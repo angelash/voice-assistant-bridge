@@ -348,6 +348,16 @@ class TestArtifactApi(unittest.IsolatedAsyncioTestCase):
         artifact = self.server.store.get_artifact(upload["artifact_id"])
         self.assertIsNotNone(artifact)
 
+        form2 = FormData()
+        form2.add_field("artifact_type", "image")
+        form2.add_field("client_id", "android-phone")
+        form2.add_field("session_id", "daily-agent-test")
+        form2.add_field("file", PNG_BYTES, filename="camera-2.png", content_type="image/png")
+        upload_resp2 = await self.client.post("/v1/artifacts", data=form2)
+        upload2 = await upload_resp2.json()
+        artifact2 = self.server.store.get_artifact(upload2["artifact_id"])
+        self.assertIsNotNone(artifact2)
+
         received = {}
 
         async def handle_chat(request):
@@ -381,7 +391,7 @@ class TestArtifactApi(unittest.IsolatedAsyncioTestCase):
                     "session_id": "daily-agent-test",
                     "text": "请识别图片。",
                 },
-                [artifact],
+                [artifact, artifact2],
                 timeout=5,
             )
         finally:
@@ -393,7 +403,10 @@ class TestArtifactApi(unittest.IsolatedAsyncioTestCase):
         content = received["body"]["messages"][0]["content"]
         self.assertEqual("text", content[0]["type"])
         self.assertEqual("image_url", content[1]["type"])
+        self.assertEqual("image_url", content[2]["type"])
+        self.assertIn("连续关键帧", content[0]["text"])
         self.assertTrue(content[1]["image_url"]["url"].startswith("data:image/png;base64,"))
+        self.assertTrue(content[2]["image_url"]["url"].startswith("data:image/png;base64,"))
 
 
 if __name__ == "__main__":

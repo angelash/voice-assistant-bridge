@@ -78,6 +78,7 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -88,6 +89,7 @@ import androidx.core.content.ContextCompat
 import androidx.compose.ui.viewinterop.AndroidView
 import com.audiobridge.client.MainActivity
 import com.audiobridge.client.phoneagent.data.api.OkHttpPhoneAgentBridgeApi
+import com.audiobridge.client.phoneagent.data.db.ArtifactEntity
 import com.audiobridge.client.phoneagent.data.db.MessageEntity
 import com.audiobridge.client.phoneagent.data.repository.MessageRepository
 import com.audiobridge.client.phoneagent.data.settings.SettingsRepository
@@ -162,6 +164,7 @@ class PhoneAgentActivity : ComponentActivity() {
         setContent {
             val activity = this@PhoneAgentActivity
             val messages by repository.messages.collectAsStateWithLifecycle(initialValue = emptyList())
+            val artifacts by repository.artifacts.collectAsStateWithLifecycle(initialValue = emptyList())
             val captureState by PhoneAgentCaptureStatus.state.collectAsStateWithLifecycle()
             var settings by remember { mutableStateOf(settingsRepository.load()) }
             var healthText by remember { mutableStateOf("未检查") }
@@ -454,6 +457,7 @@ class PhoneAgentActivity : ComponentActivity() {
                 PhoneAgentApp(
                     settings = settings,
                     messages = messages,
+                    artifacts = artifacts,
                     captureState = captureState,
                     healthText = healthText,
                     eventText = eventText,
@@ -567,6 +571,32 @@ class PhoneAgentActivity : ComponentActivity() {
                             if (!sent) {
                                 issueText = "重试未成功，消息仍保留在离线队列。"
                             }
+                            busy = false
+                        }
+                    },
+                    onDeleteArtifact = { localId ->
+                        busy = true
+                        scope.launch {
+                            runCatching { repository.deleteLocalArtifact(localId) }
+                                .onSuccess { deleted ->
+                                    healthText = if (deleted) "附件已删除" else "附件不存在"
+                                }
+                                .onFailure {
+                                    issueText = "删除附件失败：${it.message ?: it.javaClass.simpleName}"
+                                }
+                            busy = false
+                        }
+                    },
+                    onPruneArtifacts = { days ->
+                        busy = true
+                        scope.launch {
+                            runCatching { repository.pruneArtifactsOlderThan(days) }
+                                .onSuccess { count ->
+                                    healthText = "已清理 $count 个 ${days} 天前的本地附件"
+                                }
+                                .onFailure {
+                                    issueText = "清理附件失败：${it.message ?: it.javaClass.simpleName}"
+                                }
                             busy = false
                         }
                     },
@@ -987,9 +1017,10 @@ class PhoneAgentActivity : ComponentActivity() {
 }
 
 private enum class PhoneAgentTab(val title: String) {
-    Chat("聊天"),
-    Capture("采集"),
-    Diagnostics("诊断"),
+    Chat("对话"),
+    Capture("看见听见"),
+    Artifacts("附件"),
+    Diagnostics("状态"),
     Settings("设置"),
 }
 
@@ -1015,6 +1046,7 @@ private fun PhoneAgentTheme(content: @Composable () -> Unit) {
 private fun PhoneAgentApp(
     settings: AppSettings,
     messages: List<MessageEntity>,
+    artifacts: List<ArtifactEntity>,
     captureState: PhoneAgentCaptureUiState,
     healthText: String,
     eventText: String,
@@ -1039,6 +1071,8 @@ private fun PhoneAgentApp(
     onStartWakeListener: () -> Unit,
     onStopWakeListener: () -> Unit,
     onRetry: (String) -> Unit,
+    onDeleteArtifact: (String) -> Unit,
+    onPruneArtifacts: (Int) -> Unit,
     onClearLocalData: () -> Unit,
     onClearRemoteSession: () -> Unit,
     onClearAllData: () -> Unit,
@@ -1076,7 +1110,7 @@ private fun PhoneAgentApp(
                     },
                     actions = {
                         TextButton(onClick = onHealthCheck) {
-                            Text("Health")
+                            Text("检查")
                         }
                     },
                 )
@@ -1135,6 +1169,13 @@ private fun PhoneAgentApp(
                     onStopCameraCapture = onStopCameraCapture,
                     onStartWakeListener = onStartWakeListener,
                     onStopWakeListener = onStopWakeListener,
+                )
+                PhoneAgentTab.Artifacts -> ArtifactsScreen(
+                    artifacts = artifacts,
+                    retentionDays = settings.captureRetentionDays,
+                    busy = busy,
+                    onDeleteArtifact = onDeleteArtifact,
+                    onPruneArtifacts = onPruneArtifacts,
                 )
                 PhoneAgentTab.Diagnostics -> DiagnosticsScreen(
                     settings = settings,
@@ -1302,7 +1343,7 @@ private fun CaptureScreen(
                 shape = RoundedCornerShape(6.dp),
                 modifier = Modifier.weight(1f),
             ) {
-                Text("后台采集", maxLines = 1)
+                Text("定时观察", maxLines = 1)
             }
             OutlinedButton(
                 onClick = onStartFrameStream,
@@ -1310,7 +1351,7 @@ private fun CaptureScreen(
                 shape = RoundedCornerShape(6.dp),
                 modifier = Modifier.weight(1f),
             ) {
-                Text("实时帧流", maxLines = 1)
+                Text("实时看见", maxLines = 1)
             }
             OutlinedButton(
                 onClick = onStopCameraCapture,
@@ -1318,7 +1359,7 @@ private fun CaptureScreen(
                 shape = RoundedCornerShape(6.dp),
                 modifier = Modifier.weight(1f),
             ) {
-                Text("停相机", maxLines = 1)
+                Text("停止看见", maxLines = 1)
             }
         }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1328,7 +1369,7 @@ private fun CaptureScreen(
                 shape = RoundedCornerShape(6.dp),
                 modifier = Modifier.weight(1f),
             ) {
-                Text("语音唤醒", maxLines = 1)
+                Text("叫醒监听", maxLines = 1)
             }
             OutlinedButton(
                 onClick = onStopWakeListener,
@@ -1337,6 +1378,161 @@ private fun CaptureScreen(
                 modifier = Modifier.weight(1f),
             ) {
                 Text("停唤醒", maxLines = 1)
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArtifactsScreen(
+    artifacts: List<ArtifactEntity>,
+    retentionDays: Int,
+    busy: Boolean,
+    onDeleteArtifact: (String) -> Unit,
+    onPruneArtifacts: (Int) -> Unit,
+) {
+    val totalBytes = artifacts.sumOf { it.sizeBytes.coerceAtLeast(0L) }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(8.dp),
+            tonalElevation = 1.dp,
+        ) {
+            Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("附件库", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                Text(
+                    "${artifacts.size} 个附件，占用 ${formatBytes(totalBytes)}",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Text(
+                    "当前保留策略：${retentionDays.coerceIn(1, 365)} 天",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { onPruneArtifacts(retentionDays) },
+                enabled = !busy && artifacts.isNotEmpty(),
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("按设置清理", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = { onPruneArtifacts(7) },
+                enabled = !busy && artifacts.isNotEmpty(),
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("7天前", maxLines = 1)
+            }
+            OutlinedButton(
+                onClick = { onPruneArtifacts(30) },
+                enabled = !busy && artifacts.isNotEmpty(),
+                shape = RoundedCornerShape(6.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("30天前", maxLines = 1)
+            }
+        }
+        HorizontalDivider()
+        if (artifacts.isEmpty()) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Text(
+                    "暂无附件",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                items(artifacts, key = { it.localId }) { artifact ->
+                    ArtifactRow(
+                        artifact = artifact,
+                        busy = busy,
+                        onDeleteArtifact = onDeleteArtifact,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ArtifactRow(
+    artifact: ArtifactEntity,
+    busy: Boolean,
+    onDeleteArtifact: (String) -> Unit,
+) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(8.dp),
+        tonalElevation = 1.dp,
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        artifact.filename,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        "${artifactKindLabel(artifact.artifactType)} / ${artifactSourceLabel(artifact.source)} / ${artifactStatusLabel(artifact.uploadStatus)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                OutlinedButton(
+                    onClick = { onDeleteArtifact(artifact.localId) },
+                    enabled = !busy,
+                    shape = RoundedCornerShape(6.dp),
+                ) {
+                    Text("删除", maxLines = 1)
+                }
+            }
+            Text(
+                "${formatBytes(artifact.sizeBytes)} / ${formatTimestamp(artifact.createdAt)}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (!artifact.bridgeArtifactId.isNullOrBlank()) {
+                Text(
+                    "远端：${artifact.bridgeArtifactId.take(18)}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (!artifact.lastError.isNullOrBlank()) {
+                Text(
+                    artifact.lastError,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -1419,12 +1615,15 @@ private fun DiagnosticsScreen(
             Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("采集", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                 val modeText = when (captureState.cameraMode) {
-                    PhoneAgentCaptureService.MODE_BACKGROUND_CAPTURE -> "持续后台采集"
-                    PhoneAgentCaptureService.MODE_FRAME_STREAM -> "实时视频帧流"
+                    PhoneAgentCaptureService.MODE_BACKGROUND_CAPTURE -> "定时观察"
+                    PhoneAgentCaptureService.MODE_FRAME_STREAM -> "实时看见"
                     null -> "未运行"
                     else -> captureState.cameraMode
                 }
                 DiagnosticLine("相机", modeText)
+                DiagnosticLine("已采集帧", captureState.capturedFrames.toString())
+                DiagnosticLine("已上传帧", captureState.uploadedFrames.toString())
+                DiagnosticLine("摘要次数", captureState.summaryMessages.toString())
                 DiagnosticLine("语音唤醒", if (captureState.wakeListening) "监听中" else "未运行")
                 DiagnosticLine("最近状态", captureState.statusText)
                 if (!captureState.lastError.isNullOrBlank()) {
@@ -1464,8 +1663,8 @@ private fun StatusPanel(captureState: PhoneAgentCaptureUiState) {
             Text("采集状态", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             Text(captureState.statusText, style = MaterialTheme.typography.bodyMedium)
             val modeText = when (captureState.cameraMode) {
-                PhoneAgentCaptureService.MODE_BACKGROUND_CAPTURE -> "持续后台采集"
-                PhoneAgentCaptureService.MODE_FRAME_STREAM -> "实时视频帧流"
+                PhoneAgentCaptureService.MODE_BACKGROUND_CAPTURE -> "定时观察"
+                PhoneAgentCaptureService.MODE_FRAME_STREAM -> "实时看见"
                 null -> "未运行"
                 else -> captureState.cameraMode
             }
@@ -1474,6 +1673,13 @@ private fun StatusPanel(captureState: PhoneAgentCaptureUiState) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            if (captureState.cameraMode != null) {
+                Text(
+                    "帧：${captureState.capturedFrames} 采集 / ${captureState.uploadedFrames} 上传 / ${captureState.summaryMessages} 摘要",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             if (!captureState.lastWakeText.isNullOrBlank()) {
                 Text(
                     "最近语音：${captureState.lastWakeText}",
@@ -1801,6 +2007,21 @@ private fun SettingsScreen(
     var allowCaptureOnBattery by remember(initialSettings) {
         mutableStateOf(initialSettings.allowCaptureOnBattery)
     }
+    var frameStreamIntervalSec by remember(initialSettings) {
+        mutableStateOf(initialSettings.frameStreamIntervalSec.toString())
+    }
+    var backgroundCaptureIntervalSec by remember(initialSettings) {
+        mutableStateOf(initialSettings.backgroundCaptureIntervalSec.toString())
+    }
+    var streamSummaryEveryFrames by remember(initialSettings) {
+        mutableStateOf(initialSettings.streamSummaryEveryFrames.toString())
+    }
+    var maxFramesPerCaptureSession by remember(initialSettings) {
+        mutableStateOf(initialSettings.maxFramesPerCaptureSession.toString())
+    }
+    var captureRetentionDays by remember(initialSettings) {
+        mutableStateOf(initialSettings.captureRetentionDays.toString())
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1875,6 +2096,33 @@ private fun SettingsScreen(
             )
             Text("允许电池供电持续采集")
         }
+        HorizontalDivider()
+        Text("采集策略", style = MaterialTheme.typography.titleSmall)
+        SettingNumberField(
+            value = frameStreamIntervalSec,
+            onValueChange = { frameStreamIntervalSec = it },
+            label = "实时看见间隔（秒，1-60）",
+        )
+        SettingNumberField(
+            value = backgroundCaptureIntervalSec,
+            onValueChange = { backgroundCaptureIntervalSec = it },
+            label = "定时观察间隔（秒，10-3600）",
+        )
+        SettingNumberField(
+            value = streamSummaryEveryFrames,
+            onValueChange = { streamSummaryEveryFrames = it },
+            label = "每几帧合并一次摘要（1-8）",
+        )
+        SettingNumberField(
+            value = maxFramesPerCaptureSession,
+            onValueChange = { maxFramesPerCaptureSession = it },
+            label = "单次最多采集帧数（1-5000）",
+        )
+        SettingNumberField(
+            value = captureRetentionDays,
+            onValueChange = { captureRetentionDays = it },
+            label = "本地附件保留天数（1-365）",
+        )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(
                 onClick = {
@@ -1888,6 +2136,36 @@ private fun SettingsScreen(
                             allowMobileNetworkSync = allowMobileNetworkSync,
                             allowAutoCapture = allowAutoCapture,
                             allowCaptureOnBattery = allowCaptureOnBattery,
+                            frameStreamIntervalSec = parseIntSetting(
+                                frameStreamIntervalSec,
+                                initialSettings.frameStreamIntervalSec,
+                                1,
+                                60,
+                            ),
+                            backgroundCaptureIntervalSec = parseIntSetting(
+                                backgroundCaptureIntervalSec,
+                                initialSettings.backgroundCaptureIntervalSec,
+                                10,
+                                3600,
+                            ),
+                            streamSummaryEveryFrames = parseIntSetting(
+                                streamSummaryEveryFrames,
+                                initialSettings.streamSummaryEveryFrames,
+                                1,
+                                8,
+                            ),
+                            maxFramesPerCaptureSession = parseIntSetting(
+                                maxFramesPerCaptureSession,
+                                initialSettings.maxFramesPerCaptureSession,
+                                1,
+                                5000,
+                            ),
+                            captureRetentionDays = parseIntSetting(
+                                captureRetentionDays,
+                                initialSettings.captureRetentionDays,
+                                1,
+                                365,
+                            ),
                         )
                     )
                 },
@@ -1946,8 +2224,78 @@ private fun SettingsScreen(
     }
 }
 
+@Composable
+private fun SettingNumberField(
+    value: String,
+    onValueChange: (String) -> Unit,
+    label: String,
+) {
+    OutlinedTextField(
+        value = value,
+        onValueChange = { raw -> onValueChange(raw.filter { it.isDigit() }.take(5)) },
+        label = { Text(label) },
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+        modifier = Modifier.fillMaxWidth(),
+    )
+}
+
+private fun parseIntSetting(raw: String, fallback: Int, min: Int, max: Int): Int {
+    return raw.toIntOrNull()?.coerceIn(min, max) ?: fallback.coerceIn(min, max)
+}
+
 private const val DEFAULT_IMAGE_PROMPT = "请分析这张图片。"
 private const val DEFAULT_AUDIO_PROMPT = "请转写并分析这段录音。"
+
+private fun formatBytes(bytes: Long): String {
+    val safe = bytes.coerceAtLeast(0L).toDouble()
+    val units = listOf("B", "KB", "MB", "GB")
+    var value = safe
+    var unitIndex = 0
+    while (value >= 1024.0 && unitIndex < units.lastIndex) {
+        value /= 1024.0
+        unitIndex += 1
+    }
+    return if (unitIndex == 0) {
+        "${value.toLong()} ${units[unitIndex]}"
+    } else {
+        String.format(Locale.US, "%.1f %s", value, units[unitIndex])
+    }
+}
+
+private fun formatTimestamp(timeMs: Long): String {
+    if (timeMs <= 0L) return "未知时间"
+    return SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(Date(timeMs))
+}
+
+private fun artifactKindLabel(type: String): String {
+    return when (type.lowercase(Locale.US)) {
+        "image" -> "图片"
+        "audio" -> "录音"
+        else -> "文件"
+    }
+}
+
+private fun artifactSourceLabel(source: String): String {
+    return when (source) {
+        "camera-photo" -> "拍照"
+        "audio-recording" -> "录音"
+        "visual-stream" -> "实时看见"
+        "scheduled-observation" -> "定时观察"
+        "visual-frame" -> "视觉帧"
+        else -> source.ifBlank { "未知来源" }
+    }
+}
+
+private fun artifactStatusLabel(status: String): String {
+    return when (status) {
+        "QUEUED" -> "待上传"
+        "UPLOADING" -> "上传中"
+        "UPLOADED" -> "已上传"
+        "FAILED" -> "失败"
+        else -> status.ifBlank { "未知" }
+    }
+}
 
 private fun audioPromptForCapturePrompt(prompt: String): String {
     val clean = prompt.trim()

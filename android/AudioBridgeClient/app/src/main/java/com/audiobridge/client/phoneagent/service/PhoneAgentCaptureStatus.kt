@@ -9,6 +9,10 @@ data class PhoneAgentCaptureUiState(
     val wakeListening: Boolean = false,
     val statusText: String = "采集服务未运行",
     val lastFrameAtMs: Long = 0L,
+    val streamId: String? = null,
+    val capturedFrames: Int = 0,
+    val uploadedFrames: Int = 0,
+    val summaryMessages: Int = 0,
     val lastWakeText: String? = null,
     val lastError: String? = null,
 )

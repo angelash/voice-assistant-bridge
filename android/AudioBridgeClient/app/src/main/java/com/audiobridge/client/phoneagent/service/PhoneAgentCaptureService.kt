@@ -24,8 +24,10 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleService
+import com.audiobridge.client.phoneagent.data.api.BridgeArtifactRef
 import com.audiobridge.client.phoneagent.data.settings.SettingsRepository
 import com.audiobridge.client.phoneagent.data.repository.MessageRepository
+import com.audiobridge.client.phoneagent.model.AppSettings
 import com.audiobridge.client.phoneagent.model.LocalMessageStatus
 import com.audiobridge.client.phoneagent.policy.AndroidPhoneAgentDeviceState
 import com.audiobridge.client.phoneagent.policy.PhoneAgentPolicy
@@ -38,11 +40,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.text.SimpleDateFormat
+import java.util.ArrayDeque
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -56,6 +61,8 @@ class PhoneAgentCaptureService : LifecycleService() {
     private var cameraProvider: ProcessCameraProvider? = null
     private var cameraAnalysis: ImageAnalysis? = null
     private var cameraMode: String? = null
+    private var captureSettings: AppSettings? = null
+    private var visualSession: VisualCaptureSession? = null
     private var lastFrameUploadAtMs = 0L
     private var wakeListening = false
     private var wakeAudioRecord: AudioRecord? = null
@@ -63,6 +70,15 @@ class PhoneAgentCaptureService : LifecycleService() {
     private val wakeTranscriptionInFlight = AtomicBoolean(false)
     private var wakeSilentChunksSkipped = 0
     private var lastWakeTriggerAtMs = 0L
+
+    private data class VisualCaptureSession(
+        val streamId: String,
+        val mode: String,
+        val recentArtifacts: ArrayDeque<BridgeArtifactRef> = ArrayDeque(),
+        var capturedFrames: Int = 0,
+        var uploadedFrames: Int = 0,
+        var summaryMessages: Int = 0,
+    )
 
     override fun onCreate() {
         super.onCreate()
@@ -118,8 +134,16 @@ class PhoneAgentCaptureService : LifecycleService() {
             PhoneAgentCaptureStatus.setError(decision.reason)
             return
         }
+        captureSettings = settings
+        visualSession = VisualCaptureSession(
+            streamId = "visual-${UUID.randomUUID()}",
+            mode = mode,
+        )
         cameraMode = mode
         lastFrameUploadAtMs = 0L
+        serviceScope.launch {
+            repository.pruneArtifactsOlderThan(settings.captureRetentionDays)
+        }
         refreshForeground()
         bindCameraAnalyzer(mode)
     }
@@ -148,6 +172,10 @@ class PhoneAgentCaptureService : LifecycleService() {
                     PhoneAgentCaptureStatus.update {
                         it.copy(
                             cameraMode = mode,
+                            streamId = visualSession?.streamId,
+                            capturedFrames = 0,
+                            uploadedFrames = 0,
+                            summaryMessages = 0,
                             statusText = "${modeLabel(mode)}已启动，正在等待第一帧。",
                             lastError = null,
                         )
@@ -165,12 +193,28 @@ class PhoneAgentCaptureService : LifecycleService() {
 
     private fun handleCameraFrame(image: androidx.camera.core.ImageProxy, mode: String) {
         val now = SystemClock.elapsedRealtime()
-        val interval = if (mode == MODE_FRAME_STREAM) FRAME_STREAM_INTERVAL_MS else BACKGROUND_CAPTURE_INTERVAL_MS
+        val settings = captureSettings ?: SettingsRepository.get(applicationContext).load().also {
+            captureSettings = it
+        }
+        val interval = frameIntervalMs(mode, settings)
+        val session = visualSession
+        if (session != null && session.capturedFrames >= settings.maxFramesPerCaptureSession) {
+            image.close()
+            PhoneAgentCaptureStatus.setError(
+                "${modeLabel(mode)}已达到本次 ${settings.maxFramesPerCaptureSession} 帧上限，已停止采集。",
+            )
+            mainHandler.post { stopCameraMode() }
+            return
+        }
         if (now - lastFrameUploadAtMs < interval || !frameUploadInFlight.compareAndSet(false, true)) {
             image.close()
             return
         }
         lastFrameUploadAtMs = now
+        if (session != null) {
+            session.capturedFrames += 1
+        }
+        val frameIndex = session?.capturedFrames ?: 1
         val file = createStreamFrameFile(mode)
         try {
             CameraFrameEncoder.writeJpeg(image, file)
@@ -185,23 +229,52 @@ class PhoneAgentCaptureService : LifecycleService() {
 
         serviceScope.launch {
             val result = runCatching {
-                repository.sendVideoFrameMessage(
+                val currentSession = visualSession ?: VisualCaptureSession(
+                    streamId = "visual-${UUID.randomUUID()}",
+                    mode = mode,
+                ).also { visualSession = it }
+                val upload = repository.uploadImageArtifact(
                     file = file,
-                    text = promptForMode(mode),
-                    mimeType = "image/jpeg",
+                    source = sourceForMode(mode),
+                    metaJson = frameMetaJson(currentSession, frameIndex),
                 )
-            }
-            result.onSuccess { message ->
-                val queued = message.localStatus == LocalMessageStatus.PENDING.name &&
-                    !message.errorMessage.isNullOrBlank()
-                val status = if (queued) {
-                    "${modeLabel(mode)}已保存一帧并进入离线队列：${message.errorMessage}"
+                currentSession.uploadedFrames += 1
+                val ref = BridgeArtifactRef(
+                    artifactId = upload.artifactId,
+                    type = upload.type.ifBlank { "image" },
+                )
+                currentSession.recentArtifacts.addLast(ref)
+                while (currentSession.recentArtifacts.size > settings.streamSummaryEveryFrames) {
+                    currentSession.recentArtifacts.removeFirst()
+                }
+                val shouldSummarize = currentSession.uploadedFrames % settings.streamSummaryEveryFrames == 0
+                val summaryMessage = if (shouldSummarize) {
+                    currentSession.summaryMessages += 1
+                    repository.sendText(
+                        text = promptForMode(mode, currentSession),
+                        artifacts = currentSession.recentArtifacts.toList(),
+                    )
                 } else {
-                    "${modeLabel(mode)}已上传一帧：${message.messageId.take(12)}"
+                    null
+                }
+                upload to summaryMessage
+            }
+            result.onSuccess { (upload, message) ->
+                val queued = message?.localStatus == LocalMessageStatus.PENDING.name &&
+                    !message.errorMessage.isNullOrBlank()
+                val sessionState = visualSession
+                val status = when {
+                    queued -> "${modeLabel(mode)}摘要已进入离线队列：${message?.errorMessage}"
+                    message != null -> "${modeLabel(mode)}已合并 ${settings.streamSummaryEveryFrames} 帧并请求摘要：${message.messageId.take(12)}"
+                    else -> "${modeLabel(mode)}已上传第 $frameIndex 帧：${upload.artifactId.take(12)}，等待合并摘要。"
                 }
                 PhoneAgentCaptureStatus.update {
                     it.copy(
                         cameraMode = mode,
+                        streamId = sessionState?.streamId,
+                        capturedFrames = sessionState?.capturedFrames ?: it.capturedFrames,
+                        uploadedFrames = sessionState?.uploadedFrames ?: it.uploadedFrames,
+                        summaryMessages = sessionState?.summaryMessages ?: it.summaryMessages,
                         statusText = status,
                         lastFrameAtMs = System.currentTimeMillis(),
                         lastError = if (queued) status else null,
@@ -220,14 +293,18 @@ class PhoneAgentCaptureService : LifecycleService() {
                 }
                 val message = "${modeLabel(mode)}上传失败：${error.message ?: error.javaClass.simpleName}"
                 PhoneAgentCaptureStatus.setError(message)
+                mainHandler.post { stopCameraMode() }
             }
             frameUploadInFlight.set(false)
+            repository.pruneArtifactsOlderThan(settings.captureRetentionDays)
             refreshForeground()
         }
     }
 
     private fun stopCameraMode() {
         cameraMode = null
+        captureSettings = null
+        visualSession = null
         frameUploadInFlight.set(false)
         cameraAnalysis?.let { analysis ->
             runCatching { cameraProvider?.unbind(analysis) }
@@ -237,6 +314,7 @@ class PhoneAgentCaptureService : LifecycleService() {
         PhoneAgentCaptureStatus.update {
             it.copy(
                 cameraMode = null,
+                streamId = null,
                 statusText = if (wakeListening) "语音唤醒监听中" else "摄像头采集已停止",
             )
         }
@@ -589,16 +667,43 @@ class PhoneAgentCaptureService : LifecycleService() {
 
     private fun modeLabel(mode: String?): String {
         return when (mode) {
-            MODE_BACKGROUND_CAPTURE -> "持续后台采集"
-            MODE_FRAME_STREAM -> "实时视频帧流"
+            MODE_BACKGROUND_CAPTURE -> "定时观察"
+            MODE_FRAME_STREAM -> "实时看见"
             else -> "摄像头采集"
         }
     }
 
-    private fun promptForMode(mode: String): String {
+    private fun frameIntervalMs(mode: String, settings: AppSettings): Long {
+        val seconds = when (mode) {
+            MODE_FRAME_STREAM -> settings.frameStreamIntervalSec.coerceIn(1, 60)
+            MODE_BACKGROUND_CAPTURE -> settings.backgroundCaptureIntervalSec.coerceIn(10, 3600)
+            else -> settings.backgroundCaptureIntervalSec.coerceIn(10, 3600)
+        }
+        return seconds * 1000L
+    }
+
+    private fun sourceForMode(mode: String): String {
         return when (mode) {
-            MODE_BACKGROUND_CAPTURE -> "这是手机持续后台采集的一帧，请简要描述画面中可见内容。"
-            MODE_FRAME_STREAM -> "这是手机实时视频帧流的一帧，请分析当前画面并给出可操作观察。"
+            MODE_BACKGROUND_CAPTURE -> "scheduled-observation"
+            MODE_FRAME_STREAM -> "visual-stream"
+            else -> "camera-capture"
+        }
+    }
+
+    private fun frameMetaJson(session: VisualCaptureSession, frameIndex: Int): String {
+        return JSONObject()
+            .put("stream_id", session.streamId)
+            .put("mode", session.mode)
+            .put("frame_index", frameIndex)
+            .put("captured_frames", session.capturedFrames)
+            .put("summary_messages", session.summaryMessages)
+            .toString()
+    }
+
+    private fun promptForMode(mode: String, session: VisualCaptureSession): String {
+        return when (mode) {
+            MODE_BACKGROUND_CAPTURE -> "这是手机定时观察的连续关键帧，请合并成一段简短生活摘要，只保留对用户有用的变化。会话：${session.streamId}，已采集 ${session.capturedFrames} 帧。"
+            MODE_FRAME_STREAM -> "这是手机实时看见的连续关键帧，请基于最近画面变化给出低延迟观察和可执行提醒。会话：${session.streamId}，已采集 ${session.capturedFrames} 帧。"
             else -> "请分析这张图片。"
         }
     }
@@ -615,8 +720,6 @@ class PhoneAgentCaptureService : LifecycleService() {
 
         private const val NOTIFICATION_CHANNEL_ID = "phone_agent_capture"
         private const val NOTIFICATION_ID = 6001
-        private const val BACKGROUND_CAPTURE_INTERVAL_MS = 30_000L
-        private const val FRAME_STREAM_INTERVAL_MS = 3_000L
         private const val WAKE_SAMPLE_RATE_HZ = 16_000
         private const val WAKE_CHUNK_SECONDS = 5
         private const val WAKE_TRIGGER_COOLDOWN_MS = 12_000L

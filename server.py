@@ -66,6 +66,7 @@ NON_RETRIABLE_OPENCLAW_ERROR_HINTS = (
 
 ARTIFACT_TYPES = {"image", "audio", "file"}
 MAX_ARTIFACT_BYTES = 25 * 1024 * 1024
+MAX_IMAGE_CONTEXT_ARTIFACTS = 4
 
 
 def now_iso() -> str:
@@ -1021,47 +1022,61 @@ class VoiceAssistantServer:
         if not self.openclaw_image_api_url:
             raise RuntimeError("image analysis endpoint unavailable: not configured")
 
-        image = images[0]
-        image_path = Path(image["storage_path"])
-        if not image_path.exists():
-            raise RuntimeError(f"image artifact file missing: {image['artifact_id']}")
-
-        image_base64 = base64.b64encode(image_path.read_bytes()).decode("ascii")
+        selected_images = images[-MAX_IMAGE_CONTEXT_ARTIFACTS:]
+        encoded_images: list[dict[str, Any]] = []
+        for image in selected_images:
+            image_path = Path(image["storage_path"])
+            if not image_path.exists():
+                raise RuntimeError(f"image artifact file missing: {image['artifact_id']}")
+            encoded_images.append(
+                {
+                    "artifact_id": image["artifact_id"],
+                    "mime_type": image["mime_type"],
+                    "filename": image["filename"],
+                    "image": base64.b64encode(image_path.read_bytes()).decode("ascii"),
+                }
+            )
         url = f"{self.openclaw_image_api_url}{self.openclaw_image_analyze_path}"
         prompt = (row.get("text") or "").strip() or "请分析这张图片。"
+        if len(encoded_images) > 1:
+            prompt = (
+                f"{prompt}\n\n"
+                f"以下 {len(encoded_images)} 张图片是来自同一段手机视觉流的连续关键帧，按时间从早到晚排列。"
+                "请结合连续变化给出观察，不要把它们当作互不相关的独立图片。"
+            )
         headers = {"Content-Type": "application/json"}
         if self.openclaw_image_token:
             headers["Authorization"] = f"Bearer {self.openclaw_image_token}"
         if self.openclaw_image_agent_id:
             headers["x-openclaw-agent-id"] = self.openclaw_image_agent_id
         if self.openclaw_image_analyze_path.rstrip("/") == "/v1/chat/completions":
+            content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            for image in encoded_images:
+                content.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{image['mime_type']};base64,{image['image']}"
+                        },
+                    }
+                )
             payload = {
                 "model": self.openclaw_image_model,
                 "user": row["session_id"],
                 "messages": [
                     {
                         "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{image['mime_type']};base64,{image_base64}"
-                                },
-                            },
-                        ],
+                        "content": content,
                     }
                 ],
             }
         else:
             payload = {
-                "image": image_base64,
+                "images": encoded_images,
                 "prompt": prompt,
                 "session_id": row["session_id"],
                 "message_id": row["message_id"],
-                "artifact_id": image["artifact_id"],
-                "mime_type": image["mime_type"],
-                "filename": image["filename"],
+                "artifact_ids": [image["artifact_id"] for image in encoded_images],
             }
         try:
             async with aiohttp.ClientSession() as session:

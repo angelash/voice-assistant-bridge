@@ -25,6 +25,11 @@ class SettingsRepository private constructor(context: Context) {
             allowMobileNetworkSync = prefs.getBoolean(KEY_ALLOW_MOBILE_NETWORK_SYNC, true),
             allowAutoCapture = prefs.getBoolean(KEY_ALLOW_AUTO_CAPTURE, false),
             allowCaptureOnBattery = prefs.getBoolean(KEY_ALLOW_CAPTURE_ON_BATTERY, false),
+            frameStreamIntervalSec = prefs.getInt(KEY_FRAME_STREAM_INTERVAL_SEC, 2).coerceIn(1, 60),
+            backgroundCaptureIntervalSec = prefs.getInt(KEY_BACKGROUND_CAPTURE_INTERVAL_SEC, 60).coerceIn(10, 3600),
+            streamSummaryEveryFrames = prefs.getInt(KEY_STREAM_SUMMARY_EVERY_FRAMES, 3).coerceIn(1, 8),
+            maxFramesPerCaptureSession = prefs.getInt(KEY_MAX_FRAMES_PER_CAPTURE_SESSION, 180).coerceIn(1, 5000),
+            captureRetentionDays = prefs.getInt(KEY_CAPTURE_RETENTION_DAYS, 7).coerceIn(1, 365),
         )
     }
 
@@ -34,6 +39,11 @@ class SettingsRepository private constructor(context: Context) {
             clientId = settings.clientId.trim().ifBlank { PhoneAgentDefaults.DEFAULT_CLIENT_ID },
             sessionId = settings.sessionId.trim().ifBlank { PhoneAgentDefaults.defaultSessionId() },
             apiToken = settings.apiToken.trim(),
+            frameStreamIntervalSec = settings.frameStreamIntervalSec.coerceIn(1, 60),
+            backgroundCaptureIntervalSec = settings.backgroundCaptureIntervalSec.coerceIn(10, 3600),
+            streamSummaryEveryFrames = settings.streamSummaryEveryFrames.coerceIn(1, 8),
+            maxFramesPerCaptureSession = settings.maxFramesPerCaptureSession.coerceIn(1, 5000),
+            captureRetentionDays = settings.captureRetentionDays.coerceIn(1, 365),
         )
         prefs.edit()
             .putString(KEY_BRIDGE_BASE_URL, normalized.bridgeBaseUrl)
@@ -44,6 +54,11 @@ class SettingsRepository private constructor(context: Context) {
             .putBoolean(KEY_ALLOW_MOBILE_NETWORK_SYNC, normalized.allowMobileNetworkSync)
             .putBoolean(KEY_ALLOW_AUTO_CAPTURE, normalized.allowAutoCapture)
             .putBoolean(KEY_ALLOW_CAPTURE_ON_BATTERY, normalized.allowCaptureOnBattery)
+            .putInt(KEY_FRAME_STREAM_INTERVAL_SEC, normalized.frameStreamIntervalSec)
+            .putInt(KEY_BACKGROUND_CAPTURE_INTERVAL_SEC, normalized.backgroundCaptureIntervalSec)
+            .putInt(KEY_STREAM_SUMMARY_EVERY_FRAMES, normalized.streamSummaryEveryFrames)
+            .putInt(KEY_MAX_FRAMES_PER_CAPTURE_SESSION, normalized.maxFramesPerCaptureSession)
+            .putInt(KEY_CAPTURE_RETENTION_DAYS, normalized.captureRetentionDays)
             .apply()
         return normalized
     }
@@ -65,6 +80,11 @@ class SettingsRepository private constructor(context: Context) {
         private const val KEY_ALLOW_MOBILE_NETWORK_SYNC = "allowMobileNetworkSync"
         private const val KEY_ALLOW_AUTO_CAPTURE = "allowAutoCapture"
         private const val KEY_ALLOW_CAPTURE_ON_BATTERY = "allowCaptureOnBattery"
+        private const val KEY_FRAME_STREAM_INTERVAL_SEC = "frameStreamIntervalSec"
+        private const val KEY_BACKGROUND_CAPTURE_INTERVAL_SEC = "backgroundCaptureIntervalSec"
+        private const val KEY_STREAM_SUMMARY_EVERY_FRAMES = "streamSummaryEveryFrames"
+        private const val KEY_MAX_FRAMES_PER_CAPTURE_SESSION = "maxFramesPerCaptureSession"
+        private const val KEY_CAPTURE_RETENTION_DAYS = "captureRetentionDays"
 
         @Volatile
         private var instance: SettingsRepository? = null

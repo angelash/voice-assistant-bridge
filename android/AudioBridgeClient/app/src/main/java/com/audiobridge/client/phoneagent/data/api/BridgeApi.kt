@@ -26,6 +26,7 @@ interface PhoneAgentBridgeApi {
         artifactType: String,
         mimeType: String,
         captureTs: String?,
+        metaJson: String? = null,
     ): BridgeArtifactUploadResponse
     fun submitMessage(settings: AppSettings, request: BridgeSubmitRequest): BridgeMessagePayload
     fun fetchMessageStatus(settings: AppSettings, messageId: String): BridgeMessagePayload
@@ -74,6 +75,7 @@ class OkHttpPhoneAgentBridgeApi(
         artifactType: String,
         mimeType: String,
         captureTs: String?,
+        metaJson: String?,
     ): BridgeArtifactUploadResponse {
         if (!file.exists() || file.length() <= 0L) {
             throw IOException("文件不存在或为空")
@@ -91,6 +93,9 @@ class OkHttpPhoneAgentBridgeApi(
             )
         if (!captureTs.isNullOrBlank()) {
             bodyBuilder.addFormDataPart("capture_ts", captureTs)
+        }
+        if (!metaJson.isNullOrBlank()) {
+            bodyBuilder.addFormDataPart("meta_json", metaJson)
         }
         val httpRequest = Request.Builder()
             .url("${settings.bridgeBaseUrl.trimEnd('/')}/v1/artifacts")

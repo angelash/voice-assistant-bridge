@@ -45,4 +45,9 @@ data class AppSettings(
     val allowMobileNetworkSync: Boolean = true,
     val allowAutoCapture: Boolean = false,
     val allowCaptureOnBattery: Boolean = false,
+    val frameStreamIntervalSec: Int = 2,
+    val backgroundCaptureIntervalSec: Int = 60,
+    val streamSummaryEveryFrames: Int = 3,
+    val maxFramesPerCaptureSession: Int = 180,
+    val captureRetentionDays: Int = 7,
 )
